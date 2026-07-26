@@ -27,12 +27,22 @@ import { installLogCapture } from './services/nova/logStore';
 // Capture console output into a ring buffer so the launcher can stream live logs.
 installLogCapture();
 
+const AGENT_MODE_LABEL = process.env.NOVA_COORDINATOR
+  ? `host-agent -> ${process.env.NOVA_COORDINATOR}`
+  : 'standalone';
+
 async function main() {
   console.log('╔══════════════════════════════════════════╗');
   console.log('║       PROJECT NOVA — OGFN Backend        ║');
   console.log('║    Chapter 1 Season 7/8 Emulator         ║');
   console.log('║      Full EOS Translation Layer          ║');
   console.log('╚══════════════════════════════════════════╝');
+  // Identify the build in the log itself.
+  //
+  // Every log shared for diagnosis so far has been silent about which launcher produced it, which
+  // has meant repeatedly guessing whether a reported failure came from a build containing the
+  // relevant fix. A log that cannot identify its own version wastes a round trip every time.
+  console.log(`[Version] launcher ${process.env.NOVA_LAUNCHER_VERSION || '(unknown — started outside the launcher)'} · agent ${AGENT_MODE_LABEL}`);
 
   // Initialize directories and database
   Config.init();

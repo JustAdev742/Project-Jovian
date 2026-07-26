@@ -106,7 +106,11 @@ fn repair_client_display_settings() {
     }
 }
 
-fn patch_local_engine_ini() {
+/// Point Fortnite's XMPP at Nova, and PROVE it landed.
+///
+/// Returns an error the player can act on. Every launch path propagates it rather than launching
+/// anyway — see the verification block below for why an unpatched ini is fatal rather than degraded.
+fn patch_local_engine_ini() -> Result<(), String> {
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         let mut engine_ini_path = std::path::PathBuf::from(local_app_data);
         engine_ini_path.push("FortniteGame");
@@ -207,13 +211,51 @@ n.VerifyPeer=false
         final_content.push_str("\n");
         final_content.push_str(xmpp_sections);
 
-        if let Err(e) = std::fs::write(&engine_ini_path, final_content) {
-            eprintln!("Failed to patch local Engine.ini: {}", e);
-        } else {
-            println!("Local Engine.ini patched with XMPP config successfully.");
+        // Clear read-only before writing. Repacked 7.40 builds very often ship Engine.ini read-only,
+        // or the player is told to set it read-only so the game stops overwriting their settings —
+        // and std::fs::write on a read-only file fails with PermissionDenied. This used to be a
+        // silent eprintln, which is exactly how a laptop ended up launching with an UNPATCHED ini.
+        if let Ok(meta) = std::fs::metadata(&engine_ini_path) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                println!("Engine.ini is read-only — clearing the attribute so Nova can patch it.");
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&engine_ini_path, perms);
+            }
+        }
+
+        std::fs::write(&engine_ini_path, &final_content)
+            .map_err(|e| format!("Nova could not write Fortnite's Engine.ini ({e}). Close Fortnite and the Epic Games Launcher, then try again."))?;
+
+        // VERIFY. A write that "succeeded" is not the same as a file the game will read: antivirus
+        // and controlled-folder-access can silently discard it, and a sync client can restore the
+        // previous copy a moment later. Read it back and confirm our port is actually on disk.
+        //
+        // This matters more than any other check here, because the failure is invisible and fatal.
+        // Without the patch the client falls back to the SHIPPED xmpp-service-prod address, Cobalt
+        // rewrites the host to 127.0.0.1, and the port defaults to the ws:// default of 80 — where
+        // nothing listens. The game logs `New XMPP connection configured to Server=[ws://127.0.0.1:80]`,
+        // the socket dies, and ~400ms later it reports `AppES: closing code 0` and force-logs-out
+        // with "Fortnite was not started correctly". That dialog blames the launcher; the real cause
+        // is this file. Fail here, loudly, instead of launching into a guaranteed logout.
+        match std::fs::read_to_string(&engine_ini_path) {
+            Ok(readback) if readback.contains("ServerAddr=\"ws://127.0.0.1:3551\"") => {
+                println!("Local Engine.ini patched and verified (XMPP -> 127.0.0.1:3551).");
+                Ok(())
+            }
+            Ok(_) => Err(
+                "Nova wrote Fortnite's Engine.ini but the change did not stick. Antivirus or \
+                 Controlled Folder Access is most likely reverting it. Allow Nova to write to \
+                 %LOCALAPPDATA%\\FortniteGame\\Saved\\Config\\WindowsClient, then try again."
+                    .to_string(),
+            ),
+            Err(e) => Err(format!(
+                "Nova patched Fortnite's Engine.ini but could not read it back to confirm ({e})."
+            )),
         }
     } else {
-        eprintln!("LOCALAPPDATA not found, skipping local INI patch");
+        Err("Windows did not report a LOCALAPPDATA folder, so Nova cannot find Fortnite's config."
+            .to_string())
     }
 }
 
@@ -838,7 +880,7 @@ pub async fn launch_fn(
     eor: bool,
     headless: bool,
 ) -> Result<bool, String> {
-    patch_local_engine_ini();
+    patch_local_engine_ini()?;
     // Only for the window the PLAYER sees. The headless server has no display to get wrong, and it is
     // the thing that breaks these settings in the first place.
     if !headless {
@@ -969,7 +1011,7 @@ pub async fn launch_server_only(
     // The XMPP / party-system INI has to be in place for THIS instance too. It was previously only
     // written by launch_fn, so a host whose flow reached the server launch first ran against
     // whatever Engine.ini happened to be on disk.
-    patch_local_engine_ini();
+    patch_local_engine_ini()?;
 
     let fort_args = build_fortnite_args(&account_id, &token, eor, true);
 
@@ -1013,7 +1055,7 @@ pub async fn launch_client_only(
     }
 
     // Same reason as launch_server_only: this path can be the first one to start a game process.
-    patch_local_engine_ini();
+    patch_local_engine_ini()?;
     repair_client_display_settings();
 
     let fort_args = build_fortnite_args(&account_id, &token, eor, false);
