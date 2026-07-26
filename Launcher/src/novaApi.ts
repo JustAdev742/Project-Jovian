@@ -152,7 +152,7 @@ export async function proxyIsForwarding(coordinator: string): Promise<LinkCheck>
   try {
     ({ data: local } = await axios.get(`${BACKEND}/nova/api/info`, { timeout: 4000 }));
   } catch {
-    return { ok: false, reason: "no-listener", detail: "nothing is answering on 127.0.0.1:3551 — the proxy didn't start (is Node installed?)" };
+    return { ok: false, reason: "no-listener", detail: "nothing is answering on 127.0.0.1:3551 — the proxy didn’t start (is Node installed?)" };
   }
   if (local?.startedAt && local.startedAt === upstream?.startedAt) {
     return { ok: true, reason: "ok", detail: "connected to the shared Nova coordinator" };
@@ -199,7 +199,7 @@ export async function getLogs(limit = 250): Promise<{ logs: LogEntry[]; statuses
       level: "warn",
       source: "launcher",
       msg: "No log source is running. The local Nova host service (127.0.0.1:3552) isn't answering, " +
-           "so this PC can't host — press Play to start it, or check nova-agent.log next to the launcher.",
+           "so this PC can’t host — press Play to start it, or check nova-agent.log next to the launcher.",
     }],
     statuses: [{
       source: "host service",

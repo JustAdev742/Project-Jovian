@@ -141,8 +141,13 @@ export const Config = {
   CLOUDSTORAGE_DIR: path.resolve(__dirname, '..', 'data', 'cloudstorage'),
   PROFILES_DIR: path.resolve(__dirname, '..', 'data', 'profiles'),
 
-  /** Database */
-  DB_PATH: path.resolve(__dirname, '..', 'data', 'nova.db'),
+  /** Database.
+   *  NOVA_DB_PATH exists so a test run can be pointed at a scratch file. Without it every local
+   *  experiment writes into the one real database, and "did my new endpoint work" and "did I just
+   *  edit live player accounts" become the same question. */
+  DB_PATH: process.env.NOVA_DB_PATH
+    ? path.resolve(process.env.NOVA_DB_PATH)
+    : path.resolve(__dirname, '..', 'data', 'nova.db'),
 
   /** Ensure directories exist */
   init() {

@@ -1,6 +1,8 @@
 // @ts-ignore
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import fs from 'fs';
+// Node's crypto, explicitly — the bare global `crypto` is Web Crypto, which has no scrypt.
+import * as crypto from 'crypto';
 import { Config } from './config';
 import { generateUUID } from './utils/uuid';
 
@@ -187,6 +189,34 @@ export async function initDatabase(): Promise<SqlJsDatabase> {
       match_id TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    -- ─────────────────────────────────────────────────────────────────────────────────────────────
+    -- LAUNCHER ACCOUNTS
+    --
+    -- The person, as distinct from the Fortnite profile they play on. Until now there was no such
+    -- thing: an account id was just md5(whatever you typed as a username), no password was ever
+    -- checked, and the "link" between a login and a game profile was that hash agreeing with itself.
+    --
+    -- fortnite_account_id is the real relationship — one launcher account owns one accounts row, and
+    -- both are created together at sign-up so they can never drift apart.
+    --
+    -- COLLATE NOCASE on username and email so "Scott" and "scott" cannot both be registered; the
+    -- UNIQUE index then enforces it at the storage layer rather than trusting the check above it.
+    -- ─────────────────────────────────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS launcher_accounts (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL,
+      fortnite_account_id TEXT NOT NULL UNIQUE,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_login TEXT,
+      FOREIGN KEY (fortnite_account_id) REFERENCES accounts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_launcher_username ON launcher_accounts(username);
+    CREATE INDEX IF NOT EXISTS idx_launcher_email    ON launcher_accounts(email);
+    CREATE INDEX IF NOT EXISTS idx_launcher_fnid     ON launcher_accounts(fortnite_account_id);
   `);
 
   // Ensure default account
@@ -251,6 +281,162 @@ export function ensureAccount(accountId: string, displayName: string): string {
     [accountId, 999999, 0]);
   saveDb();
   return accountId;
+}
+
+// ═══════════════════════════════════════════════
+//  LAUNCHER ACCOUNTS  (the person, and their password)
+// ═══════════════════════════════════════════════
+
+export interface LauncherAccount {
+  id: string;
+  username: string;
+  email: string;
+  fortnite_account_id: string;
+  created_at: string;
+  last_login: string | null;
+}
+
+/**
+ * scrypt, from Node's own crypto — deliberately no new dependency for something this sensitive.
+ *
+ * Chosen over a plain hash because it is memory-hard: a stolen database cannot be run through a GPU
+ * at millions of guesses a second. The salt is per-account, so two people with the same password
+ * still get different hashes and one cracked password reveals nothing about the other.
+ */
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_COST = 16384; // N — ~16 MB of memory per hash
+
+function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
+  const useSalt = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, useSalt, SCRYPT_KEYLEN, { N: SCRYPT_COST }).toString('hex');
+  return { hash, salt: useSalt };
+}
+
+/** Constant-time compare, so a wrong password cannot be narrowed down by how fast it was rejected. */
+export function verifyPassword(password: string, storedHash: string, salt: string): boolean {
+  try {
+    const { hash } = hashPassword(password, salt);
+    const a = Buffer.from(hash, 'hex');
+    const b = Buffer.from(storedHash, 'hex');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+function rowToLauncherAccount(row: any[]): LauncherAccount {
+  return {
+    id: row[0] as string,
+    username: row[1] as string,
+    email: row[2] as string,
+    fortnite_account_id: row[3] as string,
+    created_at: row[4] as string,
+    last_login: (row[5] as string) ?? null,
+  };
+}
+
+const LA_COLS = 'id, username, email, fortnite_account_id, created_at, last_login';
+
+export function getLauncherAccountByUsername(username: string): LauncherAccount | undefined {
+  const r = db.exec(`SELECT ${LA_COLS} FROM launcher_accounts WHERE username = ? COLLATE NOCASE`, [username.trim()]);
+  if (!r.length || !r[0].values.length) return undefined;
+  return rowToLauncherAccount(r[0].values[0]);
+}
+
+export function getLauncherAccountByEmail(email: string): LauncherAccount | undefined {
+  const r = db.exec(`SELECT ${LA_COLS} FROM launcher_accounts WHERE email = ? COLLATE NOCASE`, [email.trim()]);
+  if (!r.length || !r[0].values.length) return undefined;
+  return rowToLauncherAccount(r[0].values[0]);
+}
+
+/** Sign-in accepts either identifier, because making someone remember which one they used is rude. */
+export function getLauncherAccountByLogin(login: string): LauncherAccount | undefined {
+  return getLauncherAccountByUsername(login) || getLauncherAccountByEmail(login);
+}
+
+export function getLauncherAccountByFortniteId(accountId: string): LauncherAccount | undefined {
+  const r = db.exec(`SELECT ${LA_COLS} FROM launcher_accounts WHERE fortnite_account_id = ?`, [accountId]);
+  if (!r.length || !r[0].values.length) return undefined;
+  return rowToLauncherAccount(r[0].values[0]);
+}
+
+/** Check the supplied password against a launcher account. Returns the account only on success. */
+export function authenticateLauncher(login: string, password: string): LauncherAccount | undefined {
+  const acct = getLauncherAccountByLogin(login);
+  if (!acct) return undefined;
+  const r = db.exec('SELECT password_hash, password_salt FROM launcher_accounts WHERE id = ?', [acct.id]);
+  if (!r.length || !r[0].values.length) return undefined;
+  const [hash, salt] = r[0].values[0] as [string, string];
+  if (!verifyPassword(password, hash, salt)) return undefined;
+  db.run("UPDATE launcher_accounts SET last_login = datetime('now') WHERE id = ?", [acct.id]);
+  saveDb();
+  return { ...acct, last_login: new Date().toISOString() };
+}
+
+export type RegisterError = 'username-taken' | 'email-taken';
+
+/**
+ * Create a launcher account and its Fortnite account together, in that order, as one operation.
+ *
+ * Both are made here on purpose. The old flow minted a game account lazily from whatever string
+ * arrived as a username, which is how the database ended up with 98 orphans nobody could log into.
+ */
+export function createLauncherAccount(
+  username: string, email: string, password: string,
+): { ok: true; account: LauncherAccount } | { ok: false; error: RegisterError } {
+  const u = username.trim();
+  const e = email.trim();
+
+  if (getLauncherAccountByUsername(u)) return { ok: false, error: 'username-taken' };
+  if (getLauncherAccountByEmail(e)) return { ok: false, error: 'email-taken' };
+
+  // The display name is the username, so the name in game is the name they signed up with.
+  const fortniteId = crypto.randomBytes(16).toString('hex');
+  ensureAccount(fortniteId, u);
+  db.run('UPDATE accounts SET email = ? WHERE id = ?', [e, fortniteId]);
+
+  const { hash, salt } = hashPassword(password);
+  const id = crypto.randomBytes(16).toString('hex');
+  db.run(
+    `INSERT INTO launcher_accounts (id, username, email, password_hash, password_salt, fortnite_account_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, u, e, hash, salt, fortniteId],
+  );
+  saveDb();
+
+  return { ok: true, account: { id, username: u, email: e, fortnite_account_id: fortniteId, created_at: new Date().toISOString(), last_login: null } };
+}
+
+/** Change a password on an existing launcher account (account settings). */
+export function setLauncherPassword(launcherId: string, password: string): void {
+  const { hash, salt } = hashPassword(password);
+  db.run('UPDATE launcher_accounts SET password_hash = ?, password_salt = ? WHERE id = ?', [hash, salt, launcherId]);
+  saveDb();
+}
+
+/**
+ * Adopt a pre-existing Fortnite account into a new launcher account, keeping its locker and stats.
+ * This is the migration path for accounts that existed before launcher accounts did.
+ */
+export function claimExistingAccount(
+  fortniteAccountId: string, username: string, email: string, password: string,
+): { ok: true; account: LauncherAccount } | { ok: false; error: RegisterError | 'already-claimed' | 'no-such-account' } {
+  if (!getAccount(fortniteAccountId)) return { ok: false, error: 'no-such-account' };
+  if (getLauncherAccountByFortniteId(fortniteAccountId)) return { ok: false, error: 'already-claimed' };
+  const u = username.trim();
+  const e = email.trim();
+  if (getLauncherAccountByUsername(u)) return { ok: false, error: 'username-taken' };
+  if (getLauncherAccountByEmail(e)) return { ok: false, error: 'email-taken' };
+
+  const { hash, salt } = hashPassword(password);
+  const id = crypto.randomBytes(16).toString('hex');
+  db.run(
+    `INSERT INTO launcher_accounts (id, username, email, password_hash, password_salt, fortnite_account_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, u, e, hash, salt, fortniteAccountId],
+  );
+  saveDb();
+  return { ok: true, account: { id, username: u, email: e, fortnite_account_id: fortniteAccountId, created_at: new Date().toISOString(), last_login: null } };
 }
 
 // ═══════════════════════════════════════════════
