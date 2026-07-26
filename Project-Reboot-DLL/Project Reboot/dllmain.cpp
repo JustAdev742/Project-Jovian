@@ -116,7 +116,52 @@ static LONG CALLBACK RebootCrashHandler(EXCEPTION_POINTERS* Info)
                 log << std::format("fault RVA (FortniteClient exe): 0x{:X}\n", Addr - GameBase);
             if (DllBase && Addr >= DllBase && (!GameBase || DllBase >= GameBase))
                 log << std::format("fault RVA (Reboot dll):         0x{:X}\n", Addr - DllBase);
-            log << "See crash.dmp for the full stack (open with the matching game build).\n";
+
+            // ── The call stack, in the log itself ────────────────────────────────────────────
+            //
+            // crash.dmp used to be the only record of HOW we got here, and it was useless in
+            // practice: MiniDumpNormal stores no memory, and there are no public PDBs for
+            // FortniteClient-Win64-Shipping.exe, so opening it showed nothing readable. A crash
+            // that can only be diagnosed on the machine it happened on cannot be diagnosed at all
+            // when that machine belongs to someone else.
+            //
+            // Each frame is printed as module+RVA. That is enough to tell whether the fault came
+            // in through one of OUR hooks or purely through engine code — which is the first
+            // question worth answering, and it needs no symbols and no debugger.
+            if (Info && Info->ContextRecord)
+            {
+                CONTEXT Ctx = *Info->ContextRecord;   // StackWalk64 mutates this — never pass the original
+                STACKFRAME64 Frame = {};
+                Frame.AddrPC.Offset = Ctx.Rip;    Frame.AddrPC.Mode = AddrModeFlat;
+                Frame.AddrFrame.Offset = Ctx.Rbp; Frame.AddrFrame.Mode = AddrModeFlat;
+                Frame.AddrStack.Offset = Ctx.Rsp; Frame.AddrStack.Mode = AddrModeFlat;
+
+                log << "stack (module+RVA, newest first):\n";
+                for (int i = 0; i < 24; ++i)
+                {
+                    if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(),
+                                     &Frame, &Ctx, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr))
+                        break;
+                    const uintptr_t Pc = (uintptr_t)Frame.AddrPC.Offset;
+                    if (!Pc) break;
+
+                    HMODULE Mod = nullptr;
+                    char Name[MAX_PATH] = {};
+                    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                           (LPCWSTR)Pc, &Mod) && Mod)
+                    {
+                        GetModuleFileNameA(Mod, Name, sizeof(Name) - 1);
+                        const char* Leaf = strrchr(Name, '\\');
+                        log << std::format("  [{:02}] {}+0x{:X}\n", i,
+                                           Leaf ? Leaf + 1 : Name, Pc - (uintptr_t)Mod);
+                    }
+                    else
+                    {
+                        log << std::format("  [{:02}] 0x{:016X} (no module)\n", i, Pc);
+                    }
+                }
+            }
+            log << "crash.dmp holds the same crash with memory, if a debugger is available.\n";
             log.flush();
         }
     }
@@ -129,8 +174,17 @@ static LONG CALLBACK RebootCrashHandler(EXCEPTION_POINTERS* Info)
             Mei.ThreadId = GetCurrentThreadId();
             Mei.ExceptionPointers = Info;
             Mei.ClientPointers = FALSE;
+            // MiniDumpNormal stores thread stacks and nothing else — no memory, no data segments.
+            // With no PDBs for the game that dump is unreadable, which is why the last one came
+            // back empty. These flags capture what the stack actually points AT, plus globals and
+            // thread state, and still avoid a multi-gigabyte full-memory dump of Fortnite.
+            const int DumpFlags =
+                MiniDumpWithIndirectlyReferencedMemory |
+                MiniDumpWithDataSegs |
+                MiniDumpWithThreadInfo |
+                MiniDumpWithUnloadedModules;
             MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), File,
-                MiniDumpNormal, (Info ? &Mei : nullptr), nullptr, nullptr);
+                (MINIDUMP_TYPE)DumpFlags, (Info ? &Mei : nullptr), nullptr, nullptr);
             CloseHandle(File);
         }
     }
