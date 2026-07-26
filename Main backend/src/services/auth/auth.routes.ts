@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { generateAccessToken, generateRefreshToken, generateClientToken, verifyToken } from './token.service';
-import { ensureAccount, getAccount, storeToken } from '../../database';
+import { ensureAccount, getAccount, storeToken, getLauncherAccountByLogin, authenticateLauncher } from '../../database';
 import { Errors } from '../../utils/error-handler';
 import { generateUUID } from '../../utils/uuid';
 import crypto from 'crypto';
@@ -110,6 +110,21 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
       // device_auth / any grant that already carries the account id.
       accountId = body.account_id;
       displayName = getAccount(accountId)?.display_name || body?.username?.split('@')[0] || 'NovaPlayer';
+    } else if (body?.username && getLauncherAccountByLogin(String(body.username))) {
+      // ── A REAL ACCOUNT EXISTS FOR THIS LOGIN — THE PASSWORD MUST BE RIGHT ───────────────────
+      // Without this, the launcher's own /nova/api/launcher/login could verify passwords all it
+      // liked and anyone could still walk in through this older endpoint, which never checked one.
+      // A registered login is only usable here with its actual password.
+      const verified = authenticateLauncher(String(body.username), String(body.password || ''));
+      if (!verified) {
+        return reply.status(401).send({
+          errorCode: 'errors.com.epicgames.account.invalid_account_credentials',
+          errorMessage: 'Incorrect username or password.',
+          numericErrorCode: 18031,
+        });
+      }
+      accountId = verified.fortnite_account_id;
+      displayName = getAccount(accountId)?.display_name || verified.username;
     } else if (body?.username) {
       // Human sign-in through the launcher: derive a DETERMINISTIC accountId from the login so the
       // same credentials are always the same account.

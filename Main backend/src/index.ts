@@ -8,6 +8,7 @@ import { initDatabase } from './database';
 import { authMiddleware } from './middleware/auth.middleware';
 import { versionRouter } from './middleware/version-router';
 import { authRoutes } from './services/auth/auth.routes';
+import { launcherAuthRoutes } from './services/auth/launcher.routes';
 import { mcpRoutes } from './services/mcp/mcp.routes';
 import { lightswitchRoutes } from './services/lightswitch/lightswitch.routes';
 import { storefrontRoutes } from './services/storefront/storefront.routes';
@@ -98,6 +99,7 @@ async function main() {
 
     // Register all route modules
     await app.register(authRoutes);
+    await app.register(launcherAuthRoutes);
     await app.register(mcpRoutes);
     await app.register(lightswitchRoutes);
     await app.register(storefrontRoutes);
