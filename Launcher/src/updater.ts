@@ -7,6 +7,32 @@
 import { checkUpdate, installUpdate, onUpdaterEvent, type UpdateManifest } from "@tauri-apps/api/updater";
 import { relaunch } from "@tauri-apps/api/process";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/tauri";
+import { AGENT_PORT } from "./novaApi";
+
+/**
+ * Stop everything the launcher spawned out of its own install folder, before an update overwrites it.
+ *
+ * Windows will not let a running executable be replaced. The launcher runs nova-proxy AND the host
+ * agent from `resources/node/node.exe` inside the install directory, and those keep running after the
+ * launcher window closes — so the installer reaches that file, finds it locked, and stops dead on
+ * "Error opening file for writing". The update then half-applies: some files replaced, some not.
+ *
+ * Every call is best-effort. A machine where the proxy was never started should still update.
+ */
+async function releaseInstalledFiles(): Promise<void> {
+  // The proxy, by the PID the launcher recorded when it started it.
+  await invoke("stop_proxy").catch(() => {});
+  // The host agent. It outlives the launcher on purpose (so a match survives closing the window),
+  // which is exactly why it has to be stopped explicitly here.
+  await invoke("free_port", { port: AGENT_PORT }).catch(() => {});
+  // ...and whatever is on 3551, in case the proxy was started by an older build that didn't record
+  // its PID.
+  await invoke("free_port", { port: 3551 }).catch(() => {});
+  // Windows releases the file handle asynchronously after the process exits. Installing immediately
+  // can still hit the lock, and this is a one-off cost on a path the user already expects to wait on.
+  await new Promise((r) => setTimeout(r, 1500));
+}
 
 export type UpdatePhase =
   | "idle"          // nothing has been asked yet
@@ -105,6 +131,10 @@ export async function install(onState: (s: UpdateState) => void, version?: strin
     } catch { /* older API surface — status events alone will do */ }
 
     emit({ progress: 1 });
+    // MUST happen before installUpdate(). See releaseInstalledFiles above — without it the NSIS
+    // installer hits a locked node.exe and halts mid-write.
+    onState({ phase: "downloading", version, progress: 2 } as UpdateState);
+    await releaseInstalledFiles();
     await installUpdate();
     const done: UpdateState = { phase: "ready", version, progress: 100 };
     onState(done);
@@ -137,6 +167,10 @@ export async function restart(): Promise<void> {
 function friendly(e: unknown): string {
   const raw = typeof e === "string" ? e : (e as Error)?.message || String(e);
   if (/signature|pubkey|verify/i.test(raw)) return "That update failed its signature check, so it wasn’t installed.";
+  // The classic Windows one: something is still running out of the install folder.
+  if (/opening file for writing|being used by another process|sharing violation|os error 32/i.test(raw)) {
+    return "A Nova process is still running, so the files couldn’t be replaced. Close Nova completely (and any Fortnite window) and try again.";
+  }
   if (/fetch|network|dns|timed? ?out|ENOTFOUND|ECONNREFUSED/i.test(raw)) return "Couldn’t reach the update server — check your internet connection.";
   if (/404|not found|valid release/i.test(raw)) return "No update information was published yet.";
   if (/permission|denied|access/i.test(raw)) return "Windows blocked the update. Try running the launcher as administrator.";

@@ -270,6 +270,27 @@ async fn main() {
             window.on_window_event(|event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     carter::kill();
+
+                    // Stop the helpers this launcher started — but ONLY if the player's game has
+                    // already exited.
+                    //
+                    // Two reasons this matters. The obvious one: the host agent answering the
+                    // coordinator's elections on behalf of somebody who has closed the launcher
+                    // means matches get handed to a machine nobody is watching.
+                    //
+                    // The one that actually bit us: both helpers run `resources/node/node.exe` from
+                    // INSIDE the install folder, and Windows will not let a running executable be
+                    // overwritten. A helper left over from a previous session makes the next update
+                    // fail halfway through with "Error opening file for writing", which is a
+                    // miserable thing to hand someone who pressed Update.
+                    //
+                    // The guard is the point. The agent is deliberately allowed to outlive the
+                    // launcher window while a match is in progress, because killing it would drop
+                    // every player connected through this machine.
+                    if !is_fortnite_client_running() {
+                        host::stop_proxy();
+                        let _ = host::free_port(3552); // the host agent
+                    }
                 }
             });
 
