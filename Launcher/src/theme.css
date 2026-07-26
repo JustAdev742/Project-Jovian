@@ -360,6 +360,45 @@ h1 {
   }
 }
 
+/* Bypass block. Parked above the window until focused, then slides into the top-left corner as the
+   first thing Tab reaches. Not built on .sr-only — see the note at its use site. */
+/* Hidden with the SAME clip technique as .sr-only below, because that one is demonstrably working
+   in this app (it is what hides every rail label). Offsetting it with `top` or a percentage
+   transform did not hold — the element kept computing to its focused position — and a skip link
+   that is permanently visible is worse than none at all. Clip collapses it to a 1px box that
+   nothing can nudge back on screen; :focus restores it to a real button. */
+.skip-link {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.skip-link:focus {
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 60;
+  width: auto;
+  height: 2.75rem;
+  margin: 0;
+  padding-inline: 1rem;
+  overflow: visible;
+  clip: auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: var(--shadow-float);
+}
+
 /* Names for icon-only controls. */
 .sr-only {
   position: absolute;

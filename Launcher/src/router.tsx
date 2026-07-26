@@ -4,7 +4,7 @@
 // The launcher API and the session live here rather than inside a screen: the launch sequence keeps
 // running while the player moves between Home, Logs and Settings, and re-creating it on navigation
 // would abandon a match in progress.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { routeVariants } from "./motion";
@@ -49,11 +49,33 @@ function Shell() {
   const location = useLocation();
 
   const [user, setUser] = useState<Session | null>(() => loadSession());
+  const firstRender = useRef(true);
   const [update, setUpdate] = useState<UpdateState>(IDLE);
 
   // Keep the session in step with what's stored — sign-in and sign-out both write it, and this is
   // the one place that reads it back.
   useEffect(() => { setUser(loadSession()); }, [location.pathname]);
+
+  /* Announce the new screen, and put the keyboard on it.
+     In a single-page app the window never reloads, so nothing tells a screen reader the screen
+     changed — someone pressing a nav item hears silence and has to go hunting to find out where
+     they landed. Two fixes: name the window after the screen (which also labels the taskbar entry,
+     since this is a desktop app), and move focus to <main> so the next Tab starts in the content
+     rather than back at the top of the rail. */
+  useEffect(() => {
+    const name = {
+      "/play": "Play", "/library": "Library", "/logs": "Logs",
+      "/account": "Account", "/settings": "Settings", "/signin": "Sign in",
+    }[location.pathname];
+    document.title = name ? `${name} · Project Nova` : "Project Nova";
+
+    // Skip the very first render — stealing focus the moment the app opens is hostile.
+    if (firstRender.current) { firstRender.current = false; return; }
+    const main = document.getElementById("main");
+    // preventScroll: the route wrapper is already animating; letting focus scroll as well produces
+    // two competing movements.
+    main?.focus({ preventScroll: true });
+  }, [location.pathname]);
 
   const notifyFn = useCallback(
     (t: {

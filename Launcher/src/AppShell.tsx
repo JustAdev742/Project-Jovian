@@ -54,6 +54,17 @@ export default function AppShell({
 
   return (
     <div className={`ambient grain h-full w-full flex ${live ? "is-live" : ""}`}>
+      {/* Bypass block (WCAG 2.4.1). Five nav items sit before the content on every screen, and a
+          keyboard user otherwise tabs through all of them to reach anything. Off-screen until
+          focused, then it lands in place as the first thing Tab reaches. */}
+      {/* Positioned off-screen rather than using .sr-only + focus:not-sr-only. Our .sr-only lives
+          outside Tailwind's layers, and unlayered CSS beats layered utilities regardless of order —
+          so focus:not-sr-only silently lost and the link stayed invisible even when focused. Its
+          own transform sidesteps the whole question. */}
+      <a href="#main" className="skip-link">
+        Skip to content
+      </a>
+
       {/* ── Rail ───────────────────────────────────────────────────────────────────────────────
           Translucent chrome with content scrolling under it; the hairline reads as the edge of the
           glass rather than a drawn border. */}
@@ -130,8 +141,12 @@ export default function AppShell({
 
       {/* ── Content ────────────────────────────────────────────────────────────────────────── */}
       <div className="relative z-10 flex-1 min-w-0 flex flex-col">
-        {/* scroll-fade-b: content dissolves into the ribbon instead of being cut off by a rule. */}
-        <main className="flex-1 min-h-0 overflow-y-auto scroll-fade-b">{children}</main>
+        {/* tabIndex={-1} so the skip link and the route-change handler can move focus here. Without
+            a focusable target, "Skip to content" moves the scroll position but leaves the keyboard
+            exactly where it was, which is worse than not having it. */}
+        <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto scroll-fade-b outline-none">
+          {children}
+        </main>
         <StatusRibbon role={role} status={status} meshIp={meshIp} user={user} />
       </div>
     </div>
