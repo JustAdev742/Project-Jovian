@@ -21,14 +21,24 @@ import { AGENT_PORT } from "./novaApi";
  * Every call is best-effort. A machine where the proxy was never started should still update.
  */
 async function releaseInstalledFiles(): Promise<void> {
+  // BOUNDED, because this is best-effort cleanup that must never be able to block the update.
+  //
+  // free_port shells out to netstat and taskkill and enumerates every process on the machine. On a
+  // slow or busy laptop that is seconds; if it stalls, an unbounded await here strands the install
+  // before it has even started downloading — the progress bar sits at 2% forever with no error.
+  // Failing to stop a helper only risks the "file in use" error, which is recoverable and explained.
+  // Hanging here is not recoverable at all, so a timeout is strictly the better trade.
+  const bounded = <T,>(p: Promise<T>) =>
+    withTimeout(p, 15_000, "Stopping Nova's background services").catch(() => undefined);
+
   // The proxy, by the PID the launcher recorded when it started it.
-  await invoke("stop_proxy").catch(() => {});
+  await bounded(invoke("stop_proxy"));
   // The host agent. It outlives the launcher on purpose (so a match survives closing the window),
   // which is exactly why it has to be stopped explicitly here.
-  await invoke("free_port", { port: AGENT_PORT }).catch(() => {});
+  await bounded(invoke("free_port", { port: AGENT_PORT }));
   // ...and whatever is on 3551, in case the proxy was started by an older build that didn't record
   // its PID.
-  await invoke("free_port", { port: 3551 }).catch(() => {});
+  await bounded(invoke("free_port", { port: 3551 }));
   // Windows releases the file handle asynchronously after the process exits. Installing immediately
   // can still hit the lock, and this is a one-off cost on a path the user already expects to wait on.
   await new Promise((r) => setTimeout(r, 1500));
