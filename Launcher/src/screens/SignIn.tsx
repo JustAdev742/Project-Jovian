@@ -101,7 +101,7 @@ export default function SignIn() {
   };
 
   return (
-    <div className="ambient h-full w-full grid place-items-center px-6 overflow-y-auto">
+    <div className="ambient grain h-full w-full grid place-items-center px-6 overflow-y-auto">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}

@@ -24,9 +24,6 @@ export const spring: Transition = { type: "spring", bounce: 0, duration: 0.38 };
 /** For small, frequent things: toggles, the nav indicator. Quicker, still no overshoot. */
 export const springSnappy: Transition = { type: "spring", bounce: 0, duration: 0.26 };
 
-/** Only where the user's own momentum preceded the motion. */
-export const springBouncy: Transition = { type: "spring", bounce: 0.22, duration: 0.42 };
-
 /* ── Tweens ─────────────────────────────────────────────────────────────────────────────────────
    For motion with a fixed distance and no chance of interruption — page content arriving, a fade.
    All under the 300ms UI ceiling. */
@@ -34,7 +31,6 @@ export const springBouncy: Transition = { type: "spring", bounce: 0.22, duration
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 
 export const tween = { duration: 0.24, ease: EASE_OUT_EXPO } satisfies Transition;
-export const tweenFast = { duration: 0.15, ease: EASE_OUT_EXPO } satisfies Transition;
 
 /** Exits are faster than entrances. A leaving element has stopped being interesting — holding it on
  *  screen for as long as it took to arrive makes the whole interface feel slower than it is. */
@@ -71,6 +67,24 @@ export const listItemVariants: Variants = {
   exit: { opacity: 0, scale: 0.97, transition: tweenExit },
 };
 
+/* ── Orchestrated entrance ──────────────────────────────────────────────────────────────────────
+   One composed arrival for a whole screen, rather than a dozen elements each doing their own thing.
+   A single sequence reads as the interface assembling itself; scattered independent animations read
+   as jitter.
+
+   Kept to ~350ms end to end. This is the screen the launcher opens on and someone opening it wants
+   to press Play, not watch a performance — the orchestration exists to direct the eye to the button
+   on the first frame, then get out of the way. */
+export const stageVariants: Variants = {
+  initial: {},
+  animate: { transition: { staggerChildren: 0.055, delayChildren: 0.02 } },
+};
+
+export const stageItemVariants: Variants = {
+  initial: { opacity: 0, y: 12 },
+  animate: { opacity: 1, y: 0, transition: { duration: 0.3, ease: EASE_OUT_EXPO } },
+};
+
 /* ── Overlays ───────────────────────────────────────────────────────────────────────────────────
    Glass arrives as a material: blur and scale resolve together, so it reads as a real surface
    coming into focus rather than a rectangle fading in.
@@ -98,11 +112,5 @@ export const dialogVariants: Variants = {
    on a spring because it's the interface responding. */
 export const pressable = {
   whileTap: { scale: 0.975 },
-  transition: springSnappy,
-} as const;
-
-/** Never scale text-bearing surfaces that fill the window — it blurs during the transform. */
-export const pressableSubtle = {
-  whileTap: { scale: 0.99 },
   transition: springSnappy,
 } as const;

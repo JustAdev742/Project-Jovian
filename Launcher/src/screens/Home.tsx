@@ -15,7 +15,7 @@ import {
   getServerStats, getAccountSummary, getBuildInfo,
   type ServerStats, type AccountSummary, type BuildInfo,
 } from "../novaApi";
-import { spring, listItemVariants } from "../motion";
+import { spring, stageVariants, stageItemVariants } from "../motion";
 import type { LauncherApi } from "../useLauncher";
 import type { Session } from "../auth";
 import { getFolderName } from "../useLauncher";
@@ -57,17 +57,23 @@ export default function Home({ api, user }: { api: LauncherApi; user: Session | 
   ];
 
   return (
-    <div className="px-8 py-8 pb-12 max-w-5xl">
-      <header className="mb-7">
+    <motion.div
+      variants={stageVariants}
+      initial="initial"
+      animate="animate"
+      className="px-8 py-8 pb-12 max-w-5xl"
+    >
+      <motion.header variants={stageItemVariants} className="mb-7">
         <h1 className="font-display text-3xl text-text">
           {user ? `Welcome back, ${user.displayName}` : "Welcome to Nova"}
         </h1>
         <p className="text-sm text-text-2 mt-1.5">
           {stats.online ? "Connected to the shared world." : "Press Play to connect and find a match."}
         </p>
-      </header>
+      </motion.header>
 
       {/* ── Play ───────────────────────────────────────────────────────────────────────────── */}
+      <motion.div variants={stageItemVariants}>
       <Card className="overflow-hidden">
         <div className="p-6 flex flex-col sm:flex-row sm:items-center gap-6">
           <div className="min-w-0 flex-1">
@@ -114,11 +120,12 @@ export default function Home({ api, user }: { api: LauncherApi; user: Session | 
         {/* While launching, the ribbon carries the detail — this only says something is moving. */}
         {api.isLaunching && <ProgressIndeterminate tone={live ? "live" : "accent"} label="Launching" />}
       </Card>
+      </motion.div>
 
       {/* ── Live figures ───────────────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-        {cards.map((c, i) => (
-          <motion.div key={c.label} custom={i} variants={listItemVariants} initial="initial" animate="animate">
+        {cards.map((c) => (
+          <motion.div key={c.label} variants={stageItemVariants}>
             <Card className="px-4 py-4">
               <Stat icon={c.icon} label={c.label} value={c.value} tone={c.tone} />
             </Card>
@@ -174,6 +181,6 @@ export default function Home({ api, user }: { api: LauncherApi; user: Session | 
           </div>
         </Card>
       )}
-    </div>
+    </motion.div>
   );
 }

@@ -53,7 +53,7 @@ export default function AppShell({
   };
 
   return (
-    <div className={`ambient h-full w-full flex ${live ? "is-live" : ""}`}>
+    <div className={`ambient grain h-full w-full flex ${live ? "is-live" : ""}`}>
       {/* ── Rail ───────────────────────────────────────────────────────────────────────────────
           Translucent chrome with content scrolling under it; the hairline reads as the edge of the
           glass rather than a drawn border. */}

@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
-/* Bundled, not fetched. A desktop app that loads its styling from a CDN is unstyled offline. */
-@import "@fontsource-variable/inter";
-@import "@fontsource-variable/space-grotesk";
+/* Bundled, not fetched. A desktop app that loads its styling from a CDN is unstyled offline.
+   Archivo's wdth axis is imported deliberately — the display voice is EXPANDED, not just bold. */
+@import "@fontsource-variable/archivo/wdth.css";
+@import "@fontsource-variable/ibm-plex-sans";
 @import "@fontsource-variable/jetbrains-mono";
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -97,8 +98,16 @@
   --text-3xl--line-height: 1.08;
   --text-3xl--letter-spacing: -0.03em;
 
-  --font-display: "Space Grotesk Variable", "Space Grotesk", system-ui, sans-serif;
-  --font-sans: "Inter Variable", Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Type has a point of view.
+     Display is Archivo pushed WIDE — an expanded grotesque reads as confident and built rather
+     than merely large, and it gives the launcher a voice at a glance. Body is IBM Plex Sans:
+     humanist, with real character in the a/g/l, drawn for technical interfaces and unusually
+     sturdy at 13px, which is where most of this UI lives. Mono is JetBrains, because the log
+     viewer is a first-class screen and not an afterthought.
+     (Deliberately NOT Inter or Space Grotesk — both are the reflex choice, and they make an
+     interface look generated rather than designed.) */
+  --font-display: "Archivo Variable", Archivo, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, Consolas, monospace;
 
   --radius-lg: 1rem;
@@ -165,7 +174,18 @@ h3,
 .font-display {
   font-family: var(--font-display);
   font-weight: 600;
+  /* The width axis is the voice. 112 is wide enough to read as deliberate at a glance without
+     tipping into a novelty display face — and it only applies to headings, so body copy keeps
+     normal proportions and stays comfortable to read. */
+  font-variation-settings: "wdth" 112;
   /* Tracking comes from the size token, not from here — see the --text-* pairs above. */
+}
+
+/* The largest headings go wider still. Scale and width increasing together is what makes a
+   display size feel like a different voice rather than the same text enlarged. */
+h1 {
+  font-variation-settings: "wdth" 118;
+  font-weight: 700;
 }
 
 /* ── Focus ────────────────────────────────────────────────────────────────────────────────────
@@ -178,24 +198,46 @@ h3,
 }
 
 /* ── Materials ────────────────────────────────────────────────────────────────────────────────
-   Translucent chrome that content scrolls under, with a bright top edge — the highlight a real
-   pane of glass catches. Heavier blur on larger surfaces, so a big surface reads as thicker. */
+   Surfaces are SOLID, separated by shadow and a lit top edge rather than by blur.
+
+   The previous version was frosted glass on every layer. Heavy backdrop-filter is the reflex move
+   in dark UI right now, it costs real GPU time on every scroll, and it makes the text sitting on it
+   slightly muddy. Depth here comes from the honest tools instead: a stepped surface ramp, a
+   two-part shadow (tight contact + wide lift), and a one-pixel highlight along the top edge where
+   light would actually catch. A trace of blur stays on the chrome only — just enough to suggest
+   depth where content passes beneath it. */
 .material-chrome {
-  background: color-mix(in srgb, var(--color-surface-1) 72%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  background: color-mix(in srgb, var(--color-surface-1) 94%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.045);
 }
 
 .material-raised {
-  background: color-mix(in srgb, var(--color-surface-1) 92%, transparent);
+  background: var(--color-surface-1);
   box-shadow: var(--shadow-raised), inset 0 1px 0 0 rgb(255 255 255 / 0.04);
 }
 
 .material-float {
-  background: color-mix(in srgb, var(--color-surface-2) 88%, transparent);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  box-shadow: var(--shadow-float), inset 0 1px 0 0 rgb(255 255 255 / 0.06);
+  background: var(--color-surface-2);
+  box-shadow: var(--shadow-float), inset 0 1px 0 0 rgb(255 255 255 / 0.07);
+}
+
+/* ── Grain ────────────────────────────────────────────────────────────────────────────────────
+   A fixed film of noise over the whole window, below the UI and above the ambient field.
+
+   Large flat areas of near-black band visibly on cheap panels, and perfectly smooth gradients are
+   the thing that makes a dark interface look rendered rather than made. A few percent of grain
+   breaks the banding up and gives the surfaces a texture. Inlined as an SVG turbulence filter so
+   there is no image to load and nothing to go missing offline. */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.032;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* Scroll edge effect: where scrolling content meets floating chrome, fade it out instead of
@@ -298,6 +340,8 @@ h3,
   .material-raised { background: var(--color-surface-1); }
   .material-float  { background: var(--color-surface-2); }
   .ambient::before { display: none; }
+  /* Grain is texture, not information — it goes with the rest of the atmosphere. */
+  .grain::after { display: none; }
 }
 
 /* More contrast: solid surfaces and a defined edge on everything interactive. */

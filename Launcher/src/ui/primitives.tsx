@@ -18,14 +18,18 @@ type Variant = "primary" | "secondary" | "ghost" | "danger" | "live";
 type Size = "sm" | "md" | "lg";
 
 const VARIANTS: Record<Variant, string> = {
+  // The accent carries a coloured glow, not just a grey drop shadow. On a dark interface a shadow
+  // in the element's own hue reads as the thing emitting light rather than casting it — which is
+  // what makes the primary action feel like the live object on the screen instead of another card.
   primary:
-    "bg-accent text-bg font-semibold shadow-[0_1px_2px_rgb(0_0_0/0.3)] hover:bg-accent-hi active:bg-accent-lo",
+    "bg-accent text-bg font-semibold shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_20px_-6px_var(--color-accent)] hover:bg-accent-hi hover:shadow-[0_1px_2px_rgb(0_0_0/0.35),0_8px_26px_-6px_var(--color-accent)] active:bg-accent-lo",
   secondary:
     "bg-surface-2 text-text border border-edge/70 hover:bg-surface-3 hover:border-edge",
   ghost: "text-text-2 hover:text-text hover:bg-surface-2",
   danger: "text-danger border border-danger/40 hover:bg-danger/10 hover:border-danger/60",
-  // Reserved for hosting — see theme.css.
-  live: "bg-live text-bg font-semibold shadow-[0_1px_2px_rgb(0_0_0/0.3)] hover:bg-live/90 active:bg-live-lo",
+  // Reserved for hosting — see theme.css. Same glow treatment, warm, so the primary action itself
+  // reports that this machine is the one serving the match.
+  live: "bg-live text-bg font-semibold shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_20px_-6px_var(--color-live)] hover:bg-live/90 active:bg-live-lo",
 };
 
 const SIZES: Record<Size, string> = {
@@ -408,6 +412,10 @@ export function Dialog({
           />
           <motion.div
             ref={panel}
+            // tabIndex={-1} + outline-none below: this panel is never reached by Tab, it only takes
+            // focus programmatically so a screen reader announces the dialog. There is no keyboard
+            // focus to indicate here, so suppressing the ring removes nothing — every control
+            // inside it still gets the global :focus-visible treatment.
             tabIndex={-1}
             role="dialog"
             aria-modal="true"
