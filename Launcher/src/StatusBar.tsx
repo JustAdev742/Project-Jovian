@@ -4,7 +4,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { Users, Swords, Coins, Trophy, Server, Loader2, Play } from "lucide-react";
-import { getServerStats, getAccountSummary, startBackend, type ServerStats, type AccountSummary } from "./novaApi";
+import { getServerStats, getAccountSummary, startBackend, p2pMode, COORDINATOR, type ServerStats, type AccountSummary } from "./novaApi";
 
 type Props = {
   user: { accountId?: string; email?: string; token?: string; password?: string; displayName?: string } | null;
@@ -26,8 +26,13 @@ export default function StatusBar({ user }: Props) {
     setStats(s);
     if (s.online && accountId && token) {
       setAcct(await getAccountSummary(accountId, token, user?.displayName || user?.email?.split("@")[0] || "Player"));
-    } else if (!s.online && !autoStarted.current) {
-      // Auto-start the backend once if it isn't up when the launcher opens.
+    } else if (!s.online && !autoStarted.current && !p2pMode()) {
+      // Auto-start a standalone backend only in NON-P2P mode.
+      //
+      // In P2P mode 3551 belongs to nova-proxy, and starting a standalone backend here squats that
+      // port before the proxy can have it — so the game never reaches the coordinator, and because a
+      // standalone backend is not the host agent (which lives on 3552), the launcher then waits
+      // forever on "Starting the local host service…". One stray call, two failures.
       autoStarted.current = true;
       startBackend();
     }
@@ -43,7 +48,9 @@ export default function StatusBar({ user }: Props) {
 
   const onStart = async () => {
     setStarting(true);
-    await startBackend();
+    // Same reasoning as above: in P2P mode this must start the HOST AGENT, not a standalone backend
+    // that would fight the proxy for 3551.
+    await startBackend(p2pMode() ? COORDINATOR : undefined);
     // give the backend a few seconds to bind, then refresh a few times. Tracked in a ref so it's
     // also cleared on unmount (was leaking + calling setState on an unmounted component).
     let tries = 0;
