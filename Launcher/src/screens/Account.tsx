@@ -25,8 +25,8 @@ export default function Account({ user }: { user: Session | null }) {
   const [pwError, setPwError] = useState<string | undefined>();
 
   useEffect(() => {
-    if (!user?.accountId) return;
-    getProfile(user.accountId).then(setProfile);
+    if (!user?.accountId || !user?.token) return;
+    getProfile(user.token).then(setProfile);
     if (user.token) {
       getAccountSummary(user.accountId, user.token, user.displayName).then(setSummary);
     }

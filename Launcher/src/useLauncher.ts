@@ -102,6 +102,19 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
   const hostingRef = useRef(false);
   /** Which server PID we've already injected into, so a 3s poll can't fire injection repeatedly. */
   const injectedPidRef = useRef<number | null>(null);
+  /**
+   * Generation counter for watchHostState.
+   *
+   * That watcher is an unbounded 3-second poll that only ends when the player's game is seen
+   * running and then exits. Two cases left it running forever: a launch where the game never
+   * appears (so it never sees it go), and unmount — signing out tore down the component while the
+   * loop carried on polling and calling setState into a dead tree. Pressing Play again then started
+   * a SECOND loop alongside the first, both fighting over the same status line and both able to
+   * fire injection.
+   *
+   * Bumping this invalidates every older watcher; each iteration checks it and returns.
+   */
+  const watchGen = useRef(0);
 
   const fail = useCallback((title: string, body?: string) => notify({ kind: "error", title, body }), [notify]);
 
@@ -133,10 +146,12 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     else localStorage.removeItem("buildPath");
   }, [path]);
 
-  // Clean up every timer this hook owns, in one place.
+  // Clean up every timer this hook owns, in one place — and stop the host watcher, which is a
+  // loop rather than an interval and so would otherwise survive unmount.
   useEffect(() => () => {
     if (announceRef.current) clearInterval(announceRef.current);
     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    watchGen.current += 1;
   }, []);
 
   /* ── is the game still up? ─────────────────────────────────────────────────────────────────── */
@@ -309,9 +324,14 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     let sawClient = false;
     let announced = false;
     const address = meshIp || "127.0.0.1";
+    // Claim this generation. Any watcher started later — or an unmount — makes this one stale.
+    const gen = ++watchGen.current;
+    // Nothing has answered yet; used only to stop an unreachable agent polling in silence forever.
+    let consecutiveAgentFailures = 0;
 
     for (;;) {
       await new Promise((r) => setTimeout(r, 3000));
+      if (watchGen.current !== gen) return; // superseded or unmounted
 
       // Player closed the game — clear the host config so the agent stops the server and drops out
       // of the coordinator's registry.
@@ -334,7 +354,17 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       let host: any = null;
       try {
         host = await (await fetch(`${AGENT}/nova/api/host/status`)).json();
-      } catch { continue; }
+        consecutiveAgentFailures = 0;
+      } catch {
+        // The agent is not answering. Retrying silently forever is how this used to spin at 3s
+        // intervals for the rest of the session with nothing on screen explaining why hosting
+        // never happened. Give it a couple of minutes, say so, and stop.
+        if (++consecutiveAgentFailures >= 40) {
+          setStatus("Lost contact with the local host service — this PC can’t host until you press Play again.");
+          return;
+        }
+        continue;
+      }
 
       // Registration is NOT done here. The agent publishes and heartbeats its own server, because it
       // is the only thing that knows whether that process is still alive — a launcher-side heartbeat

@@ -9,7 +9,7 @@ import {
   setLauncherPassword,
   getAccount,
 } from '../../database';
-import { generateAccessToken, generateRefreshToken } from './token.service';
+import { generateAccessToken, generateRefreshToken, verifyToken } from './token.service';
 import { storeToken } from '../../database';
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -61,6 +61,42 @@ function sessionFor(launcher: { id: string; username: string; email: string; for
   };
 }
 
+/* ── Throttle ───────────────────────────────────────────────────────────────────────────────────
+   Password guessing was unlimited. scrypt makes each attempt cost something, but "slow" is not
+   "bounded" — an attacker with a wordlist and patience still gets through, and every attempt also
+   burns coordinator CPU that the people actually playing need.
+
+   Keyed by login rather than by IP on purpose: every player reaches the coordinator through the
+   Tailscale funnel, so from the server's side they ALL share one source address. An IP-keyed
+   limiter would lock out the whole player base the moment one person fat-fingered a password.
+
+   Deliberately small and in-process. A shared store would be better with more than one backend;
+   there is one, and an in-memory counter that works today beats a Redis dependency that doesn't
+   exist yet. */
+const FAILS = new Map<string, { n: number; until: number }>();
+const MAX_FAILS = 8;
+const LOCKOUT_MS = 10 * 60_000;
+
+function throttleKey(login: string) { return login.toLowerCase().trim(); }
+
+/** Returns remaining lockout ms, or 0 if the caller may proceed. */
+function lockedFor(login: string): number {
+  const e = FAILS.get(throttleKey(login));
+  if (!e) return 0;
+  if (Date.now() > e.until) { FAILS.delete(throttleKey(login)); return 0; }
+  return e.n >= MAX_FAILS ? e.until - Date.now() : 0;
+}
+
+function noteFailure(login: string) {
+  const k = throttleKey(login);
+  const e = FAILS.get(k);
+  // Each failure pushes the window out, so a slow drip can't reset the count by waiting.
+  if (e && Date.now() <= e.until) { e.n += 1; e.until = Date.now() + LOCKOUT_MS; }
+  else FAILS.set(k, { n: 1, until: Date.now() + LOCKOUT_MS });
+}
+
+function clearFailures(login: string) { FAILS.delete(throttleKey(login)); }
+
 export async function launcherAuthRoutes(fastify: FastifyInstance): Promise<void> {
 
   /**
@@ -98,13 +134,24 @@ export async function launcherAuthRoutes(fastify: FastifyInstance): Promise<void
     if (!login) return reply.status(400).send({ ok: false, field: 'login', message: 'Enter your username or email.' });
     if (!password) return reply.status(400).send({ ok: false, field: 'password', message: 'Enter your password.' });
 
+    const wait = lockedFor(login);
+    if (wait > 0) {
+      const mins = Math.max(1, Math.ceil(wait / 60000));
+      return reply.status(429).send({
+        ok: false, field: 'password',
+        message: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`,
+      });
+    }
+
     const acct = authenticateLauncher(login, password);
     if (!acct) {
+      noteFailure(login);
       // One message for both cases on purpose: saying "no such user" would let anyone enumerate who
       // has an account here.
       return reply.status(401).send({ ok: false, field: 'password', message: 'Incorrect username or password.' });
     }
 
+    clearFailures(login);
     const fn = getAccount(acct.fortnite_account_id);
     if (fn?.banned) return reply.status(403).send({ ok: false, field: 'login', message: 'This account has been banned.' });
 
@@ -135,10 +182,32 @@ export async function launcherAuthRoutes(fastify: FastifyInstance): Promise<void
 
   /**
    * POST /nova/api/launcher/claim  { accountId, username, email, password }
+   * Header: x-nova-admin-key
+   *
    * Migration path: put a launcher login on a Fortnite account that predates launcher accounts, so
    * its locker, stats and V-Bucks carry over instead of starting again.
+   *
+   * ── WHY THIS NEEDS AN ADMIN KEY ────────────────────────────────────────────────────────────────
+   * It shipped open, and that was an account-takeover hole. The only thing it asked for was the
+   * target accountId, and an accountId is not a secret — the launcher shows you your own with a
+   * Copy button, and it travels in query strings. Anyone holding one could bind their own
+   * username/email/password to that account and inherit its locker, V-Bucks and stats.
+   *
+   * There is no way to prove ownership of a pre-accounts account from the outside: those accounts
+   * never had a password, and the old login flow issued tokens to anyone who asked for a name. So
+   * possession of a token proves nothing either, and the honest answer is that claiming is an
+   * operator action, not a self-service one. NOVA_ADMIN_KEY must be set for this route to work at
+   * all; unset means claiming is simply off.
    */
   fastify.post('/nova/api/launcher/claim', async (request, reply) => {
+    const adminKey = process.env.NOVA_ADMIN_KEY;
+    const presented = request.headers['x-nova-admin-key'];
+    if (!adminKey || typeof presented !== 'string' || presented !== adminKey) {
+      // Deliberately vague and identical whether the key is unset or wrong — a different message
+      // for each would tell a prober which of the two it is.
+      return reply.status(404).send({ ok: false, message: 'Not found.' });
+    }
+
     const b = (request.body || {}) as any;
     const accountId = String(b.accountId || '').trim();
     const username = String(b.username || '').trim();
@@ -163,10 +232,24 @@ export async function launcherAuthRoutes(fastify: FastifyInstance): Promise<void
     return reply.send({ ok: true, ...sessionFor(result.account) });
   });
 
-  /** GET /nova/api/launcher/me?accountId= — profile for the account-management page. */
+  /**
+   * GET /nova/api/launcher/me — profile for the account-management page.
+   * Header: Authorization: bearer <access token>
+   *
+   * The account comes from the TOKEN, never from a query parameter. It used to take
+   * `?accountId=`, unauthenticated, and hand back that account's email address, creation date and
+   * last-login time to anyone who asked — and account ids are not secret. That was an email
+   * harvester with a REST interface.
+   */
   fastify.get('/nova/api/launcher/me', async (request, reply) => {
-    const q = request.query as Record<string, string>;
-    const acct = q.accountId ? getLauncherAccountByFortniteId(q.accountId) : undefined;
+    const header = request.headers.authorization || '';
+    const token = header.replace(/^bearer\s+/i, '').trim();
+    const claims = token ? verifyToken(token) : null;
+    if (!claims?.sub) {
+      return reply.status(401).send({ ok: false, message: 'Sign in to view your account.' });
+    }
+    // Whatever the caller asked for is irrelevant — you get your own profile or nothing.
+    const acct = getLauncherAccountByFortniteId(claims.sub);
     if (!acct) return reply.status(404).send({ ok: false, message: 'No launcher account for that id.' });
     const fn = getAccount(acct.fortnite_account_id);
     return reply.send({
@@ -185,8 +268,18 @@ export async function launcherAuthRoutes(fastify: FastifyInstance): Promise<void
   /** POST /nova/api/launcher/password  { login, currentPassword, newPassword } */
   fastify.post('/nova/api/launcher/password', async (request, reply) => {
     const b = (request.body || {}) as any;
-    const acct = authenticateLauncher(String(b.login || ''), String(b.currentPassword || ''));
-    if (!acct) return reply.status(401).send({ ok: false, field: 'password', message: 'Current password is incorrect.' });
+    const login = String(b.login || '');
+    const wait = lockedFor(login);
+    if (wait > 0) {
+      const mins = Math.max(1, Math.ceil(wait / 60000));
+      return reply.status(429).send({ ok: false, field: 'password', message: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.` });
+    }
+    const acct = authenticateLauncher(login, String(b.currentPassword || ''));
+    if (!acct) {
+      noteFailure(login);
+      return reply.status(401).send({ ok: false, field: 'password', message: 'Current password is incorrect.' });
+    }
+    clearFailures(login);
     const next = String(b.newPassword || '');
     if (next.length < 8) return reply.status(400).send({ ok: false, field: 'password', message: 'Passwords need to be at least 8 characters.' });
     setLauncherPassword(acct.id, next);

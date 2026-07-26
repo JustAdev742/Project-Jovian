@@ -346,7 +346,15 @@ pub fn free_port(port: u16) -> Result<bool, String> {
             None => continue,
         };
         // Only local listeners we recognise — never a random pid parsed out of unexpected output.
-        if !line.contains(&format!("127.0.0.1:{}", port)) && !line.contains(&format!("0.0.0.0:{}", port)) {
+        //
+        // The address must be followed by whitespace. Matching on the bare prefix meant freeing
+        // 3551 also matched a listener on 35510 or 35519 and killed it: netstat prints
+        // "127.0.0.1:35510" which contains "127.0.0.1:3551". Unlikely, but the failure mode is
+        // "we silently killed someone else's server", which is not a thing to leave to luck.
+        let addressed_here = line
+            .split_whitespace()
+            .any(|tok| tok == format!("127.0.0.1:{}", port) || tok == format!("0.0.0.0:{}", port));
+        if !addressed_here {
             continue;
         }
         let is_node = sys

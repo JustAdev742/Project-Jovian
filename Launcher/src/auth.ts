@@ -35,13 +35,31 @@ export type AuthResult = { ok: true; session: Session } | { ok: false; error: Au
 
 const SESSION_KEY = "user";
 
-/** Persisted session, or null. Anything malformed is discarded rather than half-trusted. */
+/**
+ * Persisted session, or null. Anything malformed OR EXPIRED is discarded rather than half-trusted.
+ *
+ * The expiry check is not optional. Without it a token from days ago still looks like a valid
+ * session: the launcher shows you signed in, greets you by name, and then every authenticated call
+ * quietly fails — V-Bucks and level read as zero, the account page is empty — with nothing anywhere
+ * saying "your session ran out". Being sent to the sign-in screen is a worse-looking but far more
+ * honest outcome.
+ */
 export function loadSession(): Session | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const s = JSON.parse(raw);
     if (!s?.accountId || !s?.token || !s?.username) return null;
+
+    if (s.expiresAt) {
+      const expires = new Date(s.expiresAt).getTime();
+      // A minute of slack so a token about to lapse doesn't expire mid-launch. An unparseable date
+      // is treated as fine — a bad timestamp shouldn't sign someone out of a working session.
+      if (Number.isFinite(expires) && expires < Date.now() + 60_000) {
+        localStorage.removeItem(SESSION_KEY);
+        return null;
+      }
+    }
     return s as Session;
   } catch {
     return null;
@@ -122,10 +140,17 @@ export type Profile = {
   banned?: boolean;
 };
 
-export async function getProfile(accountId: string): Promise<Profile | null> {
+/**
+ * Your own profile.
+ *
+ * The account is identified by the TOKEN, not by an id in the query string. It used to pass
+ * `?accountId=` to an unauthenticated endpoint, which meant anyone could read anyone's email by
+ * supplying their id — and ids are on display in this very screen.
+ */
+export async function getProfile(token: string): Promise<Profile | null> {
   try {
     const { data } = await axios.get(`${authBase()}/nova/api/launcher/me`, {
-      params: { accountId },
+      headers: { Authorization: `bearer ${token}` },
       timeout: 8000,
     });
     return data?.ok ? (data as Profile) : null;

@@ -65,8 +65,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         return list;
       }
       id = `t${++seq.current}`;
-      // Cap the stack. Beyond a handful they cover the app they're describing.
-      return [...list, { ...t, id }].slice(-4);
+      const next = [...list, { ...t, id }];
+      if (next.length <= 4) return next;
+      // Cap the stack — beyond a handful they cover the app they are describing. But drop the
+      // oldest DISMISSABLE one first: errors never auto-clear precisely because someone has to
+      // read them, and silently evicting one to make room for a transient "Copied" defeats that.
+      const victim = next.findIndex((x) => x.kind !== "error") ;
+      if (victim !== -1) { next.splice(victim, 1); return next; }
+      return next.slice(-4); // all errors — keep the newest, nothing better to do
     });
 
     if (id && TTL[t.kind] > 0 && !timers.current.has(id)) {
