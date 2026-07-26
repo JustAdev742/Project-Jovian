@@ -210,6 +210,25 @@ export async function getLogs(limit = 250): Promise<{ logs: LogEntry[]; statuses
   };
 }
 
+/**
+ * What content the backend is currently serving.
+ *
+ * This is DATA, not chrome. The season and build used to be typed into the interface as a headline,
+ * which meant a content update turned the launcher into a liar until someone remembered to edit a
+ * JSX string. Asking the backend means the launcher describes whatever it is actually running.
+ */
+export type BuildInfo = { name: string; season: number; chapter: number; build: string; version: string };
+
+export async function getBuildInfo(): Promise<BuildInfo | null> {
+  try {
+    const { data } = await axios.get(`${BACKEND}/nova/api/info`, { timeout: 3000 });
+    if (!data?.build) return null;
+    return data as BuildInfo;
+  } catch {
+    return null;
+  }
+}
+
 /** Backend-served news feed (returns null when offline so the UI can fall back to defaults). */
 export async function getNews(): Promise<any[] | null> {
   try {

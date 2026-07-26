@@ -65,8 +65,8 @@ export default function Account({ user }: { user: Session | null }) {
   return (
     <div className="px-8 py-7 max-w-2xl">
       <header className="mb-6">
-        <h1 className="font-display text-[26px] font-bold text-text">Account</h1>
-        <p className="text-[13px] text-muted mt-1">Your sign-in details and the game account they unlock.</p>
+        <h1 className="font-display text-2xl font-bold text-text">Account</h1>
+        <p className="text-sm text-text-2 mt-1">Your sign-in details and the game account they unlock.</p>
       </header>
 
       <div className="space-y-3.5">
@@ -75,7 +75,7 @@ export default function Account({ user }: { user: Session | null }) {
           <div className="p-5 flex items-center gap-4">
             {/* Initial rather than an avatar upload — one less thing to host, and it's never empty. */}
             <div
-              className="size-14 shrink-0 rounded-xl bg-frost/10 border border-frost/25 grid place-items-center text-frost font-display text-xl font-bold"
+              className="size-14 shrink-0 rounded-xl bg-accent/10 border border-accent/25 grid place-items-center text-accent font-display text-xl font-bold"
               aria-hidden
             >
               {user.displayName.slice(0, 1).toUpperCase()}
@@ -83,17 +83,17 @@ export default function Account({ user }: { user: Session | null }) {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="font-display text-lg font-semibold text-text truncate">{user.displayName}</h2>
-                {profile?.banned && <Badge tone="bad"><ShieldAlert aria-hidden size={11} />Banned</Badge>}
+                {profile?.banned && <Badge tone="danger"><ShieldAlert aria-hidden size={11} />Banned</Badge>}
               </div>
-              <p className="text-[13px] text-muted flex items-center gap-1.5 mt-0.5 truncate">
+              <p className="text-sm text-text-2 flex items-center gap-1.5 mt-0.5 truncate">
                 <Mail aria-hidden size={13} className="shrink-0" />
                 <span className="truncate selectable">{user.email}</span>
               </p>
             </div>
             {summary && (
               <div className="shrink-0 text-right">
-                <div className="text-[10.5px] uppercase tracking-[0.08em] text-faint font-medium">V-Bucks</div>
-                <div className="font-display text-lg font-bold text-beacon tabular-nums">{summary.vbucks.toLocaleString()}</div>
+                <div className="text-2xs uppercase text-text-3 font-medium">V-Bucks</div>
+                <div className="font-display text-lg font-bold text-live tabular-nums">{summary.vbucks.toLocaleString()}</div>
               </div>
             )}
           </div>
@@ -109,9 +109,9 @@ export default function Account({ user }: { user: Session | null }) {
                 <button
                   onClick={copyId}
                   aria-label="Copy your Fortnite account id"
-                  className="shrink-0 size-7 grid place-items-center rounded-md text-faint hover:text-text hover:bg-surface-3 cursor-pointer"
+                  className="shrink-0 size-7 grid place-items-center rounded-md text-text-3 hover:text-text hover:bg-surface-3 cursor-pointer"
                 >
-                  {copied ? <Check aria-hidden size={13} className="text-good" /> : <Copy aria-hidden size={13} />}
+                  {copied ? <Check aria-hidden size={13} className="text-ok" /> : <Copy aria-hidden size={13} />}
                 </button>
               }
             />
@@ -167,11 +167,11 @@ function Detail({
   icon: React.ReactNode; label: string; value: string; mono?: boolean; action?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-[var(--radius-control)] bg-surface-2 border border-line px-3.5 py-2.5 flex items-center gap-2.5">
-      <span className="text-faint shrink-0">{icon}</span>
+    <div className="rounded-[var(--radius-md)] bg-surface-2 border border-hairline px-3.5 py-2.5 flex items-center gap-2.5">
+      <span className="text-text-3 shrink-0">{icon}</span>
       <div className="min-w-0 flex-1">
-        <div className="text-[10.5px] uppercase tracking-[0.08em] text-faint font-medium">{label}</div>
-        <div className={`text-[13px] text-text truncate selectable ${mono ? "font-mono text-[12px]" : ""}`} title={value}>
+        <div className="text-2xs uppercase text-text-3 font-medium">{label}</div>
+        <div className={`text-sm text-text truncate selectable ${mono ? "font-mono text-xs" : ""}`} title={value}>
           {value}
         </div>
       </div>

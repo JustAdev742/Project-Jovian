@@ -1,68 +1,68 @@
 // src/AppShell.tsx
-// The frame every signed-in screen lives in: an icon rail on the left, content in the middle, and
-// the status ribbon pinned along the bottom.
+// The frame every signed-in screen lives in: a rail on the left, content in the middle, a status
+// ribbon along the bottom.
 //
-// THE RIBBON IS THE POINT OF THIS DESIGN. Nova has no company servers — when someone presses Play,
-// the coordinator picks a player's PC to run the match, and it might be yours. That fact has no
-// equivalent in a normal launcher and it deserves more than a green dot, so it gets a permanent
-// strip that changes temperature: ice while you're a client, amber the moment your machine is
-// carrying other people's match. Colour is the state, not decoration on top of it.
+// THE RIBBON IS THE IDEA. Nova has no company servers — press Play and the coordinator picks a
+// player's PC to run the match, possibly yours. Nothing in an ordinary launcher expresses that, so
+// it gets a permanent strip that changes temperature: neutral while you're a client, --live the
+// moment your machine is carrying other people's game. Colour IS the state, not decoration over it.
+//
+// Nav labels name their contents ("Play", "Library", "Logs") rather than vague umbrellas —
+// "Home" tells you nothing about what you'd find there, and the label, the route and the page
+// heading all use the same word so you always know where you landed.
 import React from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "motion/react";
 import {
-  Snowflake, Home, Library, Terminal, Settings as SettingsIcon,
+  Gamepad2, Library, ScrollText, Settings as SettingsIcon,
   UserRound, LogOut, Radio, Wifi, WifiOff, Download,
 } from "lucide-react";
+import { Mark } from "./ui/Mark";
+import { springSnappy, tween } from "./motion";
 import type { MeshRole } from "./useLauncher";
 import type { Session } from "./auth";
 import { clearSession } from "./auth";
 
 const NAV = [
-  { to: "/home", label: "Home", icon: Home },
+  { to: "/play", label: "Play", icon: Gamepad2 },
   { to: "/library", label: "Library", icon: Library },
-  { to: "/logs", label: "Logs", icon: Terminal },
+  { to: "/logs", label: "Logs", icon: ScrollText },
   { to: "/account", label: "Account", icon: UserRound },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 export default function AppShell({
-  user,
-  role,
-  status,
-  meshIp,
-  updateReady,
-  onUpdateClick,
-  children,
+  user, role, status, meshIp, updateReady, onUpdateClick, children,
 }: {
   user: Session | null;
   role: MeshRole;
   status: string;
   meshIp?: string | null;
-  /** Set when an update is downloaded and waiting, so the rail can advertise it. */
   updateReady?: string | null;
   onUpdateClick?: () => void;
   children: React.ReactNode;
 }) {
   const navigate = useNavigate();
-  const hosting = role === "hosting";
+  const live = role === "hosting";
 
   const signOut = () => {
-    // Only the SESSION goes. The build library, selected path and settings survive a sign-out —
-    // they describe this machine, not this person.
+    // Only the SESSION goes. The build library, selected path and settings describe this machine,
+    // not this person, so they survive a sign-out.
     clearSession();
     navigate("/signin");
   };
 
   return (
-    <div className={`nova-ambient h-full w-full flex ${hosting ? "is-hosting" : ""}`}>
-      {/* ── Rail ───────────────────────────────────────────────────────────────────────────── */}
+    <div className={`ambient h-full w-full flex ${live ? "is-live" : ""}`}>
+      {/* ── Rail ───────────────────────────────────────────────────────────────────────────────
+          Translucent chrome with content scrolling under it; the hairline reads as the edge of the
+          glass rather than a drawn border. */}
       <nav
         aria-label="Main"
-        className="relative z-10 w-[68px] shrink-0 flex flex-col items-center gap-1 py-4 border-r border-line bg-surface/60 backdrop-blur-xl"
+        className="material-chrome relative z-20 w-[4.5rem] shrink-0 flex flex-col items-center gap-1 py-4 border-r border-hairline"
       >
-        <div className="size-9 rounded-lg bg-frost/10 border border-frost/25 grid place-items-center text-frost mb-4">
-          <Snowflake aria-hidden size={18} />
+        <div className={`size-9 grid place-items-center mb-4 transition-colors duration-[var(--dur-slow)] ${live ? "text-live" : "text-accent"}`}>
+          <Mark size={22} live={live} />
         </div>
 
         {NAV.map(({ to, label, icon: Icon }) => (
@@ -71,31 +71,33 @@ export default function AppShell({
             to={to}
             className={({ isActive }) =>
               [
-                "group relative w-11 h-11 grid place-items-center rounded-[var(--radius-control)]",
-                "transition-colors duration-200 cursor-pointer",
-                isActive ? "text-frost bg-frost/10" : "text-muted hover:text-text hover:bg-surface-2",
+                "group relative w-11 h-11 grid place-items-center rounded-[var(--radius-md)]",
+                "transition-colors duration-[var(--dur-base)] cursor-pointer",
+                isActive ? "text-accent" : "text-text-3 hover:text-text hover:bg-surface-2",
               ].join(" ")
             }
           >
             {({ isActive }) => (
               <>
-                <Icon aria-hidden size={19} />
-                {/* The icons are the only navigation, so each needs a real name for screen readers
-                    and a tooltip for everyone else. */}
-                <span className="sr-only">{label}</span>
-                <span
-                  role="tooltip"
-                  className="pointer-events-none absolute left-[54px] z-30 whitespace-nowrap rounded-md bg-surface-3 border border-line px-2 py-1 text-[12px] text-text opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-                >
-                  {label}
-                </span>
+                {/* The active pill sits BEHIND the icon and is shared between items via layoutId,
+                    so it slides to the new route instead of blinking out and in. */}
                 {isActive && (
                   <motion.span
                     layoutId="rail-active"
-                    className="absolute left-0 h-6 w-[2.5px] rounded-r-full bg-frost"
-                    transition={{ type: "spring", stiffness: 480, damping: 36 }}
+                    className="absolute inset-0 rounded-[var(--radius-md)] bg-accent/12 border border-accent/20"
+                    transition={springSnappy}
                   />
                 )}
+                <Icon aria-hidden size={19} className="relative z-10" />
+                {/* Icons are the only navigation, so each needs a real name for screen readers and
+                    a tooltip for everyone else. */}
+                <span className="sr-only">{label}</span>
+                <span
+                  role="tooltip"
+                  className="material-float pointer-events-none absolute left-[3.5rem] z-30 whitespace-nowrap rounded-[var(--radius-sm)] px-2 py-1 text-xs text-text opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-[opacity,transform] duration-[var(--dur-base)]"
+                >
+                  {label}
+                </span>
               </>
             )}
           </NavLink>
@@ -103,28 +105,33 @@ export default function AppShell({
 
         <div className="mt-auto flex flex-col items-center gap-1">
           {updateReady && (
-            <button
+            <motion.button
               onClick={onUpdateClick}
-              className="relative w-11 h-11 grid place-items-center rounded-[var(--radius-control)] text-frost hover:bg-frost/10 cursor-pointer"
-              aria-label={`Update to version ${updateReady}`}
+              whileTap={{ scale: 0.94 }}
+              transition={springSnappy}
+              className="relative w-11 h-11 grid place-items-center rounded-[var(--radius-md)] text-accent hover:bg-accent/10 cursor-pointer transition-colors"
+              aria-label={`Update available: version ${updateReady}`}
             >
               <Download aria-hidden size={19} />
-              <span className="absolute top-2 right-2 size-2 rounded-full bg-frost ring-2 ring-surface" />
-            </button>
+              <span className="absolute top-2 right-2 size-2 rounded-full bg-accent ring-2 ring-surface-1" />
+            </motion.button>
           )}
-          <button
+          <motion.button
             onClick={signOut}
-            className="w-11 h-11 grid place-items-center rounded-[var(--radius-control)] text-muted hover:text-bad hover:bg-bad/10 transition-colors duration-200 cursor-pointer"
+            whileTap={{ scale: 0.94 }}
+            transition={springSnappy}
+            className="w-11 h-11 grid place-items-center rounded-[var(--radius-md)] text-text-3 hover:text-danger hover:bg-danger/10 transition-colors duration-[var(--dur-base)] cursor-pointer"
             aria-label="Sign out"
           >
             <LogOut aria-hidden size={18} />
-          </button>
+          </motion.button>
         </div>
       </nav>
 
       {/* ── Content ────────────────────────────────────────────────────────────────────────── */}
       <div className="relative z-10 flex-1 min-w-0 flex flex-col">
-        <main className="flex-1 min-h-0 overflow-y-auto">{children}</main>
+        {/* scroll-fade-b: content dissolves into the ribbon instead of being cut off by a rule. */}
+        <main className="flex-1 min-h-0 overflow-y-auto scroll-fade-b">{children}</main>
         <StatusRibbon role={role} status={status} meshIp={meshIp} user={user} />
       </div>
     </div>
@@ -134,76 +141,60 @@ export default function AppShell({
 /* ── The ribbon ─────────────────────────────────────────────────────────────────────────────── */
 
 function StatusRibbon({
-  role,
-  status,
-  meshIp,
-  user,
+  role, status, meshIp, user,
 }: {
-  role: MeshRole;
-  status: string;
-  meshIp?: string | null;
-  user: Session | null;
+  role: MeshRole; status: string; meshIp?: string | null; user: Session | null;
 }) {
-  const hosting = role === "hosting";
+  const live = role === "hosting";
   const connected = role !== "offline";
 
   return (
     <footer
       className={[
-        "shrink-0 h-11 flex items-center gap-3 px-4 border-t backdrop-blur-xl transition-colors duration-500",
-        hosting ? "border-beacon/30 bg-beacon/[0.07]" : "border-line bg-surface/60",
+        "material-chrome relative z-20 shrink-0 h-11 flex items-center gap-3 px-4 border-t",
+        "transition-colors duration-[var(--dur-slow)]",
+        live ? "border-live/30" : "border-hairline",
       ].join(" ")}
     >
-      {/* Role. The one element in the app allowed to be warm. */}
       <div className="flex items-center gap-2 shrink-0">
         <span className="relative grid place-items-center size-4">
-          {hosting ? <Radio aria-hidden size={14} className="text-beacon" />
-            : connected ? <Wifi aria-hidden size={14} className="text-frost" />
-            : <WifiOff aria-hidden size={14} className="text-faint" />}
-          {hosting && (
-            // A slow pulse, only while hosting. Motion here means "this machine is carrying a
-            // match right now" — it stops the moment that stops being true.
+          {live ? <Radio aria-hidden size={14} className="text-live" />
+            : connected ? <Wifi aria-hidden size={14} className="text-accent" />
+            : <WifiOff aria-hidden size={14} className="text-text-3" />}
+          {live && (
+            // A slow pulse, only while hosting. It means "this machine is carrying a match right
+            // now" and stops the instant that stops being true.
             <motion.span
-              className="absolute inset-0 rounded-full bg-beacon/25"
-              animate={{ scale: [1, 1.9, 1], opacity: [0.6, 0, 0.6] }}
+              className="absolute inset-0 rounded-full bg-live/25"
+              animate={{ scale: [1, 1.9, 1], opacity: [0.55, 0, 0.55] }}
               transition={{ duration: 2.4, repeat: Infinity, ease: "easeOut" }}
             />
           )}
         </span>
-        <span
-          className={`text-[12.5px] font-semibold tracking-tight ${hosting ? "text-beacon" : connected ? "text-frost" : "text-faint"}`}
-        >
-          {hosting ? "Hosting" : connected ? "Connected" : "Offline"}
+        <span className={`text-xs font-semibold ${live ? "text-live" : connected ? "text-accent" : "text-text-3"}`}>
+          {live ? "Hosting" : connected ? "Connected" : "Offline"}
         </span>
       </div>
 
-      <span className="w-px h-4 bg-line shrink-0" aria-hidden />
+      <span className="w-px h-4 bg-hairline shrink-0" aria-hidden />
 
-      {/* Whatever the launcher is doing, in words. aria-live so it's announced as it changes,
-          politely — this updates during a launch and must not interrupt anything. */}
-      <p
-        aria-live="polite"
-        className="text-[12.5px] text-muted truncate min-w-0 flex-1"
-        title={status || undefined}
-      >
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.span
-            key={status}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4, transition: { duration: 0.1 } }}
-            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="inline-block"
-          >
-            {status || (connected ? "Ready when you are." : "Press Play to connect.")}
-          </motion.span>
-        </AnimatePresence>
+      {/* What the launcher is doing, in words. aria-live so it's announced as it changes — politely,
+          because this updates throughout a launch and must not interrupt anything. */}
+      <p aria-live="polite" className="text-xs text-text-2 truncate min-w-0 flex-1" title={status || undefined}>
+        <motion.span
+          key={status}
+          initial={{ opacity: 0, y: 3 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={tween}
+          className="inline-block"
+        >
+          {status || (connected ? "Ready when you are." : "Press Play to connect.")}
+        </motion.span>
       </p>
 
-      {/* Machine identity, in mono because it's data. */}
-      <div className="shrink-0 flex items-center gap-3 text-[11.5px] text-faint font-mono selectable">
+      <div className="shrink-0 flex items-center gap-3 text-2xs text-text-3 font-mono selectable">
         {meshIp && <span title="This machine’s address on the player network">{meshIp}</span>}
-        {user && <span className="text-muted">{user.username}</span>}
+        {user && <span className="text-text-2">{user.username}</span>}
       </div>
     </footer>
   );

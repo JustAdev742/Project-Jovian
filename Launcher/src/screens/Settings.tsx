@@ -52,8 +52,8 @@ export default function Settings({
   return (
     <div className="px-8 py-7 max-w-2xl">
       <header className="mb-6">
-        <h1 className="font-display text-[26px] font-bold text-text">Settings</h1>
-        <p className="text-[13px] text-muted mt-1">How Nova plays, connects and updates.</p>
+        <h1 className="font-display text-2xl font-bold text-text">Settings</h1>
+        <p className="text-sm text-text-2 mt-1">How Nova plays, connects and updates.</p>
       </header>
 
       <div className="space-y-3.5">
@@ -64,24 +64,24 @@ export default function Settings({
             title="Updates"
             subtitle={`You're running Nova ${version}`}
             action={
-              update.phase === "current" ? <Badge tone="good"><CheckCircle2 aria-hidden size={11} />Up to date</Badge> :
-              update.phase === "available" ? <Badge tone="frost"><Download aria-hidden size={11} />{update.version} available</Badge> :
-              update.phase === "ready" ? <Badge tone="good"><CheckCircle2 aria-hidden size={11} />Ready to restart</Badge> :
-              update.phase === "error" ? <Badge tone="bad"><AlertCircle aria-hidden size={11} />Check failed</Badge> : null
+              update.phase === "current" ? <Badge tone="ok"><CheckCircle2 aria-hidden size={11} />Up to date</Badge> :
+              update.phase === "available" ? <Badge tone="accent"><Download aria-hidden size={11} />{update.version} available</Badge> :
+              update.phase === "ready" ? <Badge tone="ok"><CheckCircle2 aria-hidden size={11} />Ready to restart</Badge> :
+              update.phase === "error" ? <Badge tone="danger"><AlertCircle aria-hidden size={11} />Check failed</Badge> : null
             }
           />
           <div className="p-5">
             {update.phase === "downloading" ? (
               <div>
                 <div className="flex items-baseline justify-between mb-2">
-                  <p className="text-[13px] text-text">Downloading Nova {update.version}…</p>
-                  <span className="text-[12.5px] text-muted font-mono tabular-nums">{Math.round(update.progress)}%</span>
+                  <p className="text-sm text-text">Downloading Nova {update.version}…</p>
+                  <span className="text-xs text-text-2 font-mono tabular-nums">{Math.round(update.progress)}%</span>
                 </div>
                 <Progress value={update.progress} label={`Downloading Nova ${update.version}`} />
               </div>
             ) : update.phase === "ready" ? (
               <div className="flex items-center justify-between gap-4 flex-wrap">
-                <p className="text-[13px] text-muted">
+                <p className="text-sm text-text-2">
                   Nova {update.version} is installed. It takes effect when the launcher restarts.
                 </p>
                 <Button icon={<RotateCw aria-hidden size={15} />} onClick={() => void updater.restart()}>
@@ -92,14 +92,14 @@ export default function Settings({
               <div>
                 <div className="flex items-center justify-between gap-4 flex-wrap">
                   <div className="min-w-0">
-                    <p className="text-[13px] font-medium text-text">Nova {update.version} is available</p>
-                    {update.date && <p className="text-[12.5px] text-faint mt-0.5">Released {formatDate(update.date)}</p>}
+                    <p className="text-sm font-medium text-text">Nova {update.version} is available</p>
+                    {update.date && <p className="text-xs text-text-3 mt-0.5">Released {formatDate(update.date)}</p>}
                   </div>
                   <Button icon={<Download aria-hidden size={15} />} onClick={install}>Install update</Button>
                 </div>
                 {update.notes && (
-                  <div className="mt-3.5 pt-3.5 border-t border-line">
-                    <p className="text-[12.5px] text-muted whitespace-pre-wrap leading-relaxed selectable max-h-40 overflow-y-auto">
+                  <div className="mt-3.5 pt-3.5 border-t border-hairline">
+                    <p className="text-xs text-text-2 whitespace-pre-wrap leading-relaxed selectable max-h-40 overflow-y-auto">
                       {update.notes}
                     </p>
                   </div>
@@ -107,7 +107,7 @@ export default function Settings({
               </div>
             ) : (
               <div className="flex items-center justify-between gap-4 flex-wrap">
-                <p className="text-[13px] text-muted">
+                <p className="text-sm text-text-2">
                   {update.phase === "error"
                     ? update.error
                     : "Nova checks for updates when it starts. You can also check now."}
@@ -128,7 +128,7 @@ export default function Settings({
         {/* ── Network ────────────────────────────────────────────────────────────────────────── */}
         <Card>
           <CardHeader title="Network" subtitle="Who you can play with" />
-          <div className="px-5 divide-y divide-line">
+          <div className="px-5 divide-y divide-hairline">
             <Switch
               checked={api.p2pMode}
               onChange={api.toggleP2p}
@@ -136,10 +136,10 @@ export default function Settings({
               description="Join the shared Nova world, where any player’s PC can host a match. Turn this off to play alone on this machine — useful for testing, but nobody else can reach you."
             />
             <div className="py-3.5">
-              <p className="text-[13px] font-medium text-text">Coordinator</p>
-              <p className="text-[12.5px] text-faint font-mono mt-1 break-all selectable">{COORDINATOR}</p>
+              <p className="text-sm font-medium text-text">Coordinator</p>
+              <p className="text-xs text-text-3 font-mono mt-1 break-all selectable">{COORDINATOR}</p>
               {api.mesh && (
-                <p className="text-[12.5px] text-muted mt-2 flex items-start gap-1.5">
+                <p className="text-xs text-text-2 mt-2 flex items-start gap-1.5">
                   <Info aria-hidden size={13} className="mt-[3px] shrink-0" />
                   <span>
                     Player network: {api.mesh.connected ? `connected${api.mesh.ip ? ` as ${api.mesh.ip}` : ""}` : "not connected"}
