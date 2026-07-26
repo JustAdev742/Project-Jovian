@@ -91,9 +91,11 @@ export function registerDynamicServer(
     lastSeen: Date.now(),
   });
   if (!existing) {
-    console.log(`[Matchmaking] Registered gameserver ${address}:${port} playlist=${pl}`);
-    clearPendingForServer(pl);
+    console.log(`[Matchmaking] Registered gameserver ${address}:${port} playlist=${pl} status=${status}`);
   }
+  // Same rule as the HTTP registration path: a server that is still booting has NOT satisfied the
+  // host election, so it must not release the reservation. See the note there.
+  if (status === 'ready') clearPendingForServer(pl);
 }
 
 /** Remove a dynamic server this backend registered. */
@@ -402,6 +404,24 @@ function decideHost(
     return { host: false, reason: 'another-host-pending' };
   }
 
+  // Belt and braces: a server that has REGISTERED but is still booting is also "someone bringing a
+  // server up", even if its reservation has since expired. Without this, a host that takes longer
+  // than HOST_ELECTION_WAIT_MS to reach the lobby loses its claim and a second machine is elected
+  // on top of it — the same double-host, just via a slower route.
+  // Same playlist/region semantics resolveGameServer uses: '*' matches anything.
+  const pl = (playlist || '').toLowerCase();
+  const rg = (region || '').toUpperCase();
+  const booting = [...gameServers.values()].some(
+    (e) =>
+      isLive(e) &&
+      e.status === 'starting' &&
+      (e.playlist === '*' || e.playlist === pl) &&
+      (e.region === '*' || !rg || e.region === rg),
+  );
+  if (booting) {
+    return { host: false, reason: 'another-host-pending' };
+  }
+
   // Capability-based selection among announced mesh machines.
   const candidates = liveCandidates();
   const me = candidates.find(c => c.accountId === accountId);
@@ -634,8 +654,16 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
       lastSeen: Date.now(),
     };
     gameServers.set(key, entry);
-    clearPendingForServer(playlist); // a live server satisfies any pending host-election for this playlist
-    if (!existing) console.log(`[Matchmaking] Gameserver registered: ${address}:${port} playlist=${playlist} region=${region}`);
+    // Only a READY server releases the host reservation.
+    //
+    // This used to clear on any registration, including `starting`. That opened a window nobody
+    // was guarding: the reservation was gone, but joinability requires status 'ready', and a
+    // Fortnite server takes 60-90 seconds to get there. Any second machine polling in between saw
+    // "someone is waiting, no joinable server, nobody reserved" and was elected too — so one
+    // waiting player produced two servers, and the second machine started hosting the moment its
+    // launcher opened, before its own player had finished loading.
+    if (entry.status === 'ready') clearPendingForServer(playlist);
+    if (!existing) console.log(`[Matchmaking] Gameserver registered: ${address}:${port} playlist=${playlist} region=${region} status=${entry.status}`);
     return reply.send({ success: true, key, ttlMs: DYNAMIC_TTL_MS });
   });
 
