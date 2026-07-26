@@ -73,9 +73,30 @@ export async function currentVersion(): Promise<string> {
  * Never throws: a failed check is a normal condition (no internet, GitHub down, running a dev build
  * with no updater endpoint) and must not take the launcher down with it. Startup calls this quietly.
  */
+/**
+ * Nothing here is allowed to hang forever.
+ *
+ * checkUpdate() does not always reject when it cannot get an answer — it can simply never settle.
+ * A stalled connection (captive portal, DNS blackhole, a half-open socket after the machine wakes)
+ * leaves the await pending for the life of the process. That is the difference between "no update
+ * found" and "we never found out", and the second one used to look like the first: no error, no
+ * retry, no button, and a Settings card sitting on "Checking…" indefinitely. Reinstalling appeared
+ * to fix it only because it restarted the process.
+ */
+function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms),
+    ),
+  ]);
+}
+
+const CHECK_TIMEOUT_MS = 20_000;
+
 export async function check(): Promise<UpdateState> {
   try {
-    const { shouldUpdate, manifest } = await checkUpdate();
+    const { shouldUpdate, manifest } = await withTimeout(checkUpdate(), CHECK_TIMEOUT_MS, "The update check");
     if (!shouldUpdate || !manifest) return { phase: "current", progress: 0 };
     const m = manifest as UpdateManifest;
     return {
@@ -135,7 +156,11 @@ export async function install(onState: (s: UpdateState) => void, version?: strin
     // installer hits a locked node.exe and halts mid-write.
     onState({ phase: "downloading", version, progress: 2 } as UpdateState);
     await releaseInstalledFiles();
-    await installUpdate();
+    // Bounded for the same reason as the check, but far more generously: this is a ~33 MB download
+    // that then runs an installer, and someone on a slow line is not stuck, they are waiting. Ten
+    // minutes is long enough that no real install trips it, and short enough that a dead connection
+    // eventually says so instead of leaving the progress bar up until the app is closed.
+    await withTimeout(installUpdate(), 10 * 60_000, "The update download");
     const done: UpdateState = { phase: "ready", version, progress: 100 };
     onState(done);
     return done;
@@ -166,6 +191,7 @@ export async function restart(): Promise<void> {
  */
 function friendly(e: unknown): string {
   const raw = typeof e === "string" ? e : (e as Error)?.message || String(e);
+  if (/timed out/i.test(raw)) return "The update server didn’t respond. Nova will try again shortly.";
   if (/signature|pubkey|verify/i.test(raw)) return "That update failed its signature check, so it wasn’t installed.";
   // The classic Windows one: something is still running out of the install folder.
   if (/opening file for writing|being used by another process|sharing violation|os error 32/i.test(raw)) {

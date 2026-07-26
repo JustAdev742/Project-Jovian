@@ -18,8 +18,7 @@ import Settings from "./screens/Settings";
 import Account from "./screens/Account";
 import { useLauncher } from "./useLauncher";
 import { loadSession, type Session } from "./auth";
-import * as updater from "./updater";
-import { IDLE, type UpdateState } from "./updater";
+import { useUpdateCheck } from "./useUpdateCheck";
 
 export default function Main() {
   return (
@@ -50,7 +49,6 @@ function Shell() {
 
   const [user, setUser] = useState<Session | null>(() => loadSession());
   const firstRender = useRef(true);
-  const [update, setUpdate] = useState<UpdateState>(IDLE);
 
   // Keep the session in step with what's stored — sign-in and sign-out both write it, and this is
   // the one place that reads it back.
@@ -89,30 +87,20 @@ function Shell() {
 
   const api = useLauncher(user, notifyFn);
 
-  /* Check for an update on startup, quietly.
-     Quietly matters: a failed check is normal (offline, GitHub down, a dev build with no endpoint)
-     and must not greet someone with an error the moment the launcher opens. Only an update that
-     genuinely EXISTS is worth interrupting for, and even then it's a notification with an action —
-     never a modal blocking the app someone just opened to play a game. */
-  useEffect(() => {
-    let cancelled = false;
-    const id = window.setTimeout(async () => {
-      const res = await updater.check();
-      if (cancelled) return;
-      if (res.phase !== "available") {
-        if (res.phase === "current") setUpdate(res);
-        return;
-      }
-      setUpdate(res);
-      notify({
-        kind: "info",
-        title: `Nova ${res.version} is available`,
-        body: "Install it from Settings whenever you’re ready.",
-        action: { label: "Go to Settings", onClick: () => navigate("/settings") },
-      });
-    }, 2500); // after the window has settled, so it never competes with first paint
-    return () => { cancelled = true; window.clearTimeout(id); };
+  /* Update checking lives in useUpdateCheck: it retries a failed check with backoff, records the
+     failure so the UI can say so, re-checks periodically, and retries the moment the machine comes
+     back online. The previous version fired once 2.5s after launch and threw the failure away,
+     which is why the update button sometimes never appeared. */
+  const onUpdateAvailable = useCallback((version: string) => {
+    notify({
+      kind: "info",
+      title: `Nova ${version} is available`,
+      body: "Install it from Settings whenever you're ready.",
+      action: { label: "Go to Settings", onClick: () => navigate("/settings") },
+    });
   }, [notify, navigate]);
+
+  const { state: update, setState: setUpdate, checkNow } = useUpdateCheck(onUpdateAvailable);
 
   const signedIn = !!user;
 
@@ -147,7 +135,7 @@ function Shell() {
                   <Route path="/library" element={<Page><Library api={api} /></Page>} />
                   <Route path="/logs" element={<Page><Logs /></Page>} />
                   <Route path="/account" element={<Page><Account user={user} /></Page>} />
-                  <Route path="/settings" element={<Page><Settings api={api} update={update} setUpdate={setUpdate} /></Page>} />
+                  <Route path="/settings" element={<Page><Settings api={api} update={update} setUpdate={setUpdate} onCheckNow={checkNow} /></Page>} />
                   <Route path="*" element={<Navigate to="/play" replace />} />
                 </Routes>
               </AnimatePresence>

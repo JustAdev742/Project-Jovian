@@ -3,7 +3,7 @@
 //
 // Each switch says what it changes in the player's terms and what the consequence is. "P2P mode" is
 // meaningless on its own; "play with everyone else, or keep this PC to itself" is the actual choice.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, RefreshCw, CheckCircle2, AlertCircle, RotateCw, Info } from "lucide-react";
 import { Button, Card, CardHeader, Switch, Progress, Badge } from "../ui/primitives";
 import { useToast } from "../ui/toast";
@@ -17,23 +17,40 @@ export default function Settings({
   api,
   update,
   setUpdate,
+  onCheckNow,
 }: {
   api: LauncherApi;
   update: UpdateState;
   setUpdate: (s: UpdateState) => void;
+  /** Runs the shared checker, so a manual check resets the retry backoff too. */
+  onCheckNow: () => Promise<void>;
 }) {
   const { notify } = useToast();
   const [version, setVersion] = useState("…");
 
   useEffect(() => { updater.currentVersion().then(setVersion); }, []);
 
+  // Delegates to the shared checker rather than calling updater.check() directly. Pressing this
+  // also clears the failure count and puts the background schedule back on its normal cadence —
+  // a manual check that didn't reset the backoff would leave the app still waiting 15 minutes.
   const check = async () => {
-    setUpdate({ phase: "checking", progress: 0 });
-    const next = await updater.check();
-    setUpdate(next);
-    if (next.phase === "current") notify({ kind: "success", title: "Nova is up to date", body: `You’re on ${version}.` });
-    if (next.phase === "error") notify({ kind: "error", title: "Couldn’t check for updates", body: next.error });
+    await onCheckNow();
   };
+
+  // Report the OUTCOME, once the shared checker has written it back. Doing this inside `check`
+  // would race the state update it triggers.
+  const lastReported = useRef<string | null>(null);
+  useEffect(() => {
+    const key = `${update.phase}:${update.version ?? ""}:${update.error ?? ""}`;
+    if (lastReported.current === key) return;
+    if (update.phase === "current") {
+      lastReported.current = key;
+      notify({ kind: "success", title: "Nova is up to date", body: `You’re on ${version}.` });
+    } else if (update.phase === "error") {
+      lastReported.current = key;
+      notify({ kind: "error", title: "Couldn’t check for updates", body: update.error });
+    }
+  }, [update.phase, update.version, update.error, version, notify]);
 
   const install = async () => {
     const done = await updater.install(setUpdate, update.version);
@@ -109,8 +126,10 @@ export default function Settings({
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <p className="text-sm text-text-2">
                   {update.phase === "error"
-                    ? update.error
-                    : "Nova checks for updates when it starts. You can also check now."}
+                    // Say it failed AND that it keeps trying — otherwise this reads as a dead end
+                    // and the only obvious fix is reinstalling.
+                    ? `${update.error} Nova will keep trying.`
+                    : "Nova checks for updates automatically. You can also check now."}
                 </p>
                 <Button
                   variant="secondary"
