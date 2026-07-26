@@ -13,7 +13,7 @@
 //   • A failure is RECORDED, so the UI can say "couldn't check" rather than implying it never tried.
 //   • The launcher stays open for hours, so it keeps checking — a release published at midday should
 //     be noticed by an app that opened at nine.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import * as updater from "./updater";
 import { IDLE, type UpdateState } from "./updater";
 
@@ -108,4 +108,35 @@ export function useUpdateCheck(onAvailable?: (version: string) => void): UpdateC
   const checkNow = useCallback(async () => { await runRef.current(true); }, []);
 
   return { state, setState, checkNow };
+}
+
+/* ── Context ────────────────────────────────────────────────────────────────────────────────────
+   Update state reaches screens through CONTEXT, never through props.
+
+   This is not a style preference, it is the fix for a real bug. The screens live inside
+   <AnimatePresence mode="wait"> wrapping <Routes key={pathname}>, and AnimatePresence renders its
+   children from an internal cache so it can hold an outgoing screen on-screen while it animates
+   out. A prop passed into an element inside that tree is captured when the element is created —
+   so Settings kept rendering whatever `update` was at the moment you navigated to it, and never
+   saw the update arrive.
+
+   The symptom was a launcher contradicting itself: the rail badge (rendered OUTSIDE the animated
+   tree, so it stayed live) showed an update available, while the Updates card an inch away still
+   read "Nova checks for updates automatically."
+
+   Context is read during render, not captured at element creation, so it goes straight through the
+   caching. Any future live state a screen needs should travel this way for the same reason. */
+
+const UpdateContext = createContext<UpdateCheck | null>(null);
+
+export const UpdateProvider = UpdateContext.Provider;
+
+export function useUpdate(): UpdateCheck {
+  const ctx = useContext(UpdateContext);
+  if (!ctx) {
+    // A missing provider should not blank a screen — return an inert value and let the UI render
+    // its idle state.
+    return { state: IDLE, setState: () => {}, checkNow: async () => {} };
+  }
+  return ctx;
 }

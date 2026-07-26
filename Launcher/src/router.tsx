@@ -18,7 +18,7 @@ import Settings from "./screens/Settings";
 import Account from "./screens/Account";
 import { useLauncher } from "./useLauncher";
 import { loadSession, type Session } from "./auth";
-import { useUpdateCheck } from "./useUpdateCheck";
+import { useUpdateCheck, UpdateProvider } from "./useUpdateCheck";
 
 export default function Main() {
   return (
@@ -100,7 +100,8 @@ function Shell() {
     });
   }, [notify, navigate]);
 
-  const { state: update, setState: setUpdate, checkNow } = useUpdateCheck(onUpdateAvailable);
+  const updateCheck = useUpdateCheck(onUpdateAvailable);
+  const update = updateCheck.state;
 
   const signedIn = !!user;
 
@@ -113,6 +114,7 @@ function Shell() {
           !signedIn ? (
             <Navigate to="/signin" replace />
           ) : (
+            <UpdateProvider value={updateCheck}>
             <AppShell
               user={user}
               role={api.role}
@@ -135,11 +137,12 @@ function Shell() {
                   <Route path="/library" element={<Page><Library api={api} /></Page>} />
                   <Route path="/logs" element={<Page><Logs /></Page>} />
                   <Route path="/account" element={<Page><Account user={user} /></Page>} />
-                  <Route path="/settings" element={<Page><Settings api={api} update={update} setUpdate={setUpdate} onCheckNow={checkNow} /></Page>} />
+                  <Route path="/settings" element={<Page><Settings api={api} /></Page>} />
                   <Route path="*" element={<Navigate to="/play" replace />} />
                 </Routes>
               </AnimatePresence>
             </AppShell>
+            </UpdateProvider>
           )
         }
       />

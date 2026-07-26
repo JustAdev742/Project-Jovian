@@ -11,20 +11,13 @@ import type { LauncherApi } from "../useLauncher";
 import { COORDINATOR } from "../novaApi";
 import { formatDate } from "../format";
 import * as updater from "../updater";
-import type { UpdateState } from "../updater";
+import { useUpdate } from "../useUpdateCheck";
 
-export default function Settings({
-  api,
-  update,
-  setUpdate,
-  onCheckNow,
-}: {
-  api: LauncherApi;
-  update: UpdateState;
-  setUpdate: (s: UpdateState) => void;
-  /** Runs the shared checker, so a manual check resets the retry backoff too. */
-  onCheckNow: () => Promise<void>;
-}) {
+export default function Settings({ api }: { api: LauncherApi }) {
+  // From CONTEXT, not props. This screen renders inside AnimatePresence, which caches its children
+  // — a prop would be frozen at whatever it was when you navigated here, which is exactly why the
+  // rail could show an update while this card claimed there wasn't one. See useUpdateCheck.ts.
+  const { state: update, setState: setUpdate, checkNow: onCheckNow } = useUpdate();
   const { notify } = useToast();
   const [version, setVersion] = useState("…");
 
