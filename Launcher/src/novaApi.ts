@@ -16,6 +16,17 @@ export const BACKEND = "http://127.0.0.1:3551";
 export const AGENT = "http://127.0.0.1:3552";
 export const AGENT_PORT = 3552;
 
+/**
+ * Is the launcher in shared-coordinator mode? Default yes; Settings can turn it off for single-PC.
+ *
+ * Anything that starts a backend has to know this. In P2P mode 3551 belongs to nova-proxy and the
+ * backend must run as a host agent on AGENT_PORT — starting a standalone one there instead takes the
+ * port the game needs and leaves the agent missing.
+ */
+export function p2pMode(): boolean {
+  return localStorage.getItem("p2pMode") !== "false";
+}
+
 /** The global coordinator. In P2P mode the local proxy forwards BACKEND → here, so every backend
  *  call in the launcher and the game goes through one address. Single source of truth: change the
  *  deployment here, not in each screen. */
