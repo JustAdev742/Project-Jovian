@@ -15,10 +15,10 @@ const LEVELS = ["all", "info", "warn", "error"] as const;
 type Level = (typeof LEVELS)[number];
 
 const LEVEL_COLOR: Record<string, string> = {
-  error: "text-bad",
+  error: "text-danger",
   warn: "text-warn",
-  info: "text-frost",
-  debug: "text-faint",
+  info: "text-accent",
+  debug: "text-text-3",
 };
 
 export default function Logs() {
@@ -85,8 +85,8 @@ export default function Logs() {
     <div className="px-8 py-7 h-full flex flex-col min-h-0 max-w-6xl">
       <header className="flex items-end justify-between gap-4 mb-5 shrink-0">
         <div>
-          <h1 className="font-display text-[26px] font-bold text-text">Logs</h1>
-          <p className="text-[13px] text-muted mt-1">Live output from the host service and in-game components.</p>
+          <h1 className="font-display text-2xl font-bold text-text">Logs</h1>
+          <p className="text-sm text-text-2 mt-1">Live output from the host service and in-game components.</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -112,8 +112,8 @@ export default function Logs() {
       {statuses.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-3.5 shrink-0">
           {statuses.map((s) => (
-            <Badge key={s.source} tone={s.healthy ? "good" : "bad"}>
-              <span className={`size-1.5 rounded-full ${s.healthy ? "bg-good" : "bg-bad"}`} aria-hidden />
+            <Badge key={s.source} tone={s.healthy ? "ok" : "danger"}>
+              <span className={`size-1.5 rounded-full ${s.healthy ? "bg-ok" : "bg-danger"}`} aria-hidden />
               {s.source}: {s.text}
             </Badge>
           ))}
@@ -125,18 +125,19 @@ export default function Logs() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Filter…"
+          spellCheck={false}
           aria-label="Filter log messages"
-          className="flex-1 h-9 rounded-[var(--radius-control)] bg-surface-2 border border-line-strong px-3 text-[13px] text-text placeholder:text-faint focus:border-frost"
+          className="flex-1 h-9 rounded-[var(--radius-md)] bg-surface-2 border border-edge px-3 text-sm text-text placeholder:text-text-3 focus:border-accent"
         />
-        <div className="flex rounded-[var(--radius-control)] border border-line-strong overflow-hidden" role="group" aria-label="Filter by level">
+        <div className="flex rounded-[var(--radius-md)] border border-edge overflow-hidden" role="group" aria-label="Filter by level">
           {LEVELS.map((l) => (
             <button
               key={l}
               onClick={() => setLevel(l)}
               aria-pressed={level === l}
               className={[
-                "h-9 px-3 text-[12.5px] font-medium capitalize transition-colors duration-150 cursor-pointer",
-                level === l ? "bg-frost/15 text-frost" : "text-muted hover:text-text hover:bg-surface-2",
+                "h-9 px-3 text-xs font-medium capitalize transition-colors duration-150 cursor-pointer",
+                level === l ? "bg-accent/15 text-accent" : "text-text-2 hover:text-text hover:bg-surface-2",
               ].join(" ")}
             >
               {l}
@@ -157,16 +158,16 @@ export default function Logs() {
             }
           />
         ) : (
-          <div ref={scroller} onScroll={onScroll} className="flex-1 min-h-0 overflow-y-auto font-mono text-[12px] leading-[1.65] p-3.5 selectable">
+          <div ref={scroller} onScroll={onScroll} className="flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-[1.65] p-3.5 selectable">
             {filtered.map((l, i) => (
               <div key={i} className="log-row flex gap-2.5 hover:bg-surface-2/60 px-1.5 -mx-1.5 rounded">
-                <span className="text-faint shrink-0 tabular-nums">
+                <span className="text-text-3 shrink-0 tabular-nums">
                   {formatClock(l.ts)}
                 </span>
-                <span className={`shrink-0 w-11 uppercase text-[10.5px] pt-[3px] font-semibold ${LEVEL_COLOR[(l.level || "").toLowerCase()] || "text-faint"}`}>
+                <span className={`shrink-0 w-11 uppercase text-2xs pt-[3px] font-semibold ${LEVEL_COLOR[(l.level || "").toLowerCase()] || "text-text-3"}`}>
                   {l.level || "log"}
                 </span>
-                {l.source && <span className="shrink-0 text-frost/60">{l.source}</span>}
+                {l.source && <span className="shrink-0 text-accent/60">{l.source}</span>}
                 <span className="text-text/90 break-all whitespace-pre-wrap">{l.msg}</span>
               </div>
             ))}

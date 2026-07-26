@@ -6,7 +6,8 @@
 // would abandon a match in progress.
 import { useCallback, useEffect, useState } from "react";
 import { HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { MotionConfig } from "framer-motion";
+import { AnimatePresence, MotionConfig, motion } from "motion/react";
+import { routeVariants } from "./motion";
 import { ToastProvider, useToast } from "./ui/toast";
 import AppShell from "./AppShell";
 import SignIn from "./screens/SignIn";
@@ -27,11 +28,12 @@ export default function Main() {
     // route but "/" would 404 on reload.
     <HashRouter>
       {/* reducedMotion="user" is NOT redundant with the @media rule in theme.css.
-          That rule zeroes CSS animation and transition durations, but Framer Motion animates in
-          JavaScript — it writes transforms frame by frame, so no CSS override can reach it. Without
-          this every motion.div in the app keeps moving for someone who asked the OS for less
-          motion. Framer still lets transform-free properties like opacity through, so things
-          continue to appear and disappear; they just stop flying. */}
+          That rule zeroes CSS animation and transition durations, but Motion animates in JavaScript
+          — it writes transforms frame by frame, so no CSS override can reach it. Without this,
+          every motion element keeps flying for someone who asked the OS for less motion. Motion
+          still lets opacity through, so things continue to appear and disappear; they just stop
+          moving. State-bearing motion (the Switch thumb, the Progress bar) is deliberately CSS
+          rather than JS, so it still ARRIVES under reduced motion — it just arrives instantly. */}
       <MotionConfig reducedMotion="user">
         <ToastProvider>
           <Shell />
@@ -94,7 +96,7 @@ function Shell() {
 
   return (
     <Routes>
-      <Route path="/signin" element={signedIn ? <Navigate to="/home" replace /> : <SignIn />} />
+      <Route path="/signin" element={signedIn ? <Navigate to="/play" replace /> : <SignIn />} />
       <Route
         path="*"
         element={
@@ -109,18 +111,48 @@ function Shell() {
               updateReady={update.phase === "available" || update.phase === "ready" ? update.version ?? null : null}
               onUpdateClick={() => navigate("/settings")}
             >
-              <Routes>
-                <Route path="/home" element={<Home api={api} user={user} />} />
-                <Route path="/library" element={<Library api={api} />} />
-                <Route path="/logs" element={<Logs />} />
-                <Route path="/account" element={<Account user={user} />} />
-                <Route path="/settings" element={<Settings api={api} update={update} setUpdate={setUpdate} />} />
-                <Route path="*" element={<Navigate to="/home" replace />} />
-              </Routes>
+              {/* mode="wait" so the outgoing screen clears before the incoming one arrives.
+                  Overlapping them cross-fades two full pages on top of each other, which reads as
+                  a flicker rather than a transition. The `key` is the pathname — without it
+                  AnimatePresence sees one stable child and never animates. */}
+              <AnimatePresence mode="wait" initial={false}>
+                {/* `key` only — do NOT also pass `location`. These <Routes> sit inside a parent
+                    <Route path="*">, and handing them an explicit absolute location makes every
+                    child path fail to match, so everything falls through to the catch-all and the
+                    app silently pins itself to /play. The key alone is what AnimatePresence needs. */}
+                <Routes key={location.pathname}>
+                  <Route path="/play" element={<Page><Home api={api} user={user} /></Page>} />
+                  <Route path="/library" element={<Page><Library api={api} /></Page>} />
+                  <Route path="/logs" element={<Page><Logs /></Page>} />
+                  <Route path="/account" element={<Page><Account user={user} /></Page>} />
+                  <Route path="/settings" element={<Page><Settings api={api} update={update} setUpdate={setUpdate} /></Page>} />
+                  <Route path="*" element={<Navigate to="/play" replace />} />
+                </Routes>
+              </AnimatePresence>
             </AppShell>
           )
         }
       />
     </Routes>
+  );
+}
+
+/**
+ * Route transition wrapper.
+ *
+ * `h-full` matters: Logs sizes its scroller against the height of this element, and a wrapper that
+ * only hugs its content would collapse that screen to nothing.
+ */
+function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div
+      variants={routeVariants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      className="h-full"
+    >
+      {children}
+    </motion.div>
   );
 }

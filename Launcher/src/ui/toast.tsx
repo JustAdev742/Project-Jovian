@@ -11,7 +11,8 @@
 //   • Identical messages collapse rather than stacking — a 3-second poll that fails will fail
 //     twenty times, and twenty identical toasts is a wall, not information.
 import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
+import { spring, tweenExit } from "../motion";
 import { CheckCircle2, AlertTriangle, XCircle, Info, X } from "lucide-react";
 
 export type ToastKind = "success" | "error" | "warn" | "info";
@@ -102,17 +103,17 @@ export function useToast(): Ctx {
 }
 
 const ICONS: Record<ToastKind, React.ReactNode> = {
-  success: <CheckCircle2 aria-hidden size={17} className="text-good" />,
-  error: <XCircle aria-hidden size={17} className="text-bad" />,
+  success: <CheckCircle2 aria-hidden size={17} className="text-ok" />,
+  error: <XCircle aria-hidden size={17} className="text-danger" />,
   warn: <AlertTriangle aria-hidden size={17} className="text-warn" />,
-  info: <Info aria-hidden size={17} className="text-frost" />,
+  info: <Info aria-hidden size={17} className="text-accent" />,
 };
 
 const EDGE: Record<ToastKind, string> = {
   success: "border-l-good",
   error: "border-l-bad",
   warn: "border-l-warn",
-  info: "border-l-frost",
+  info: "border-l-accent",
 };
 
 function ToastViewport({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: string) => void }) {
@@ -133,23 +134,24 @@ function ToastViewport({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: str
             aria-live={t.kind === "error" ? "assertive" : "polite"}
             initial={{ opacity: 0, x: 24, scale: 0.97 }}
             animate={{ opacity: 1, x: 0, scale: 1 }}
-            // Exit faster than enter — a leaving element shouldn't hold attention.
-            exit={{ opacity: 0, x: 24, scale: 0.97, transition: { duration: 0.15 } }}
-            transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-            className={`pointer-events-auto rounded-[var(--radius-control)] bg-surface-2 border border-line border-l-2 ${EDGE[t.kind]} shadow-xl shadow-black/40 px-3.5 py-3`}
+            // Leaves the way it arrived — right, never off in a new direction — and faster than it
+            // entered, because a departing element has stopped being interesting.
+            exit={{ opacity: 0, x: 24, scale: 0.97, transition: tweenExit }}
+            transition={spring}
+            className={`pointer-events-auto rounded-[var(--radius-md)] bg-surface-2 border border-hairline border-l-2 ${EDGE[t.kind]} shadow-xl shadow-black/40 px-3.5 py-3`}
           >
             <div className="flex items-start gap-2.5">
               <span className="mt-0.5 shrink-0">{ICONS[t.kind]}</span>
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-semibold text-text leading-snug">{t.title}</p>
-                {t.body && <p className="text-[12.5px] text-muted mt-1 leading-relaxed selectable">{t.body}</p>}
+                <p className="text-sm font-semibold text-text leading-snug">{t.title}</p>
+                {t.body && <p className="text-xs text-text-2 mt-1 leading-relaxed selectable">{t.body}</p>}
                 {t.action && (
                   <button
                     onClick={() => {
                       t.action!.onClick();
                       dismiss(t.id);
                     }}
-                    className="mt-2 text-[12.5px] font-semibold text-frost hover:text-frost-dim cursor-pointer"
+                    className="mt-2 text-xs font-semibold text-accent hover:text-accent-hi cursor-pointer"
                   >
                     {t.action.label}
                   </button>
@@ -158,7 +160,7 @@ function ToastViewport({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: str
               <button
                 onClick={() => dismiss(t.id)}
                 aria-label="Dismiss notification"
-                className="shrink-0 size-6 grid place-items-center rounded-md text-faint hover:text-text hover:bg-surface-3 cursor-pointer"
+                className="shrink-0 size-6 grid place-items-center rounded-md text-text-3 hover:text-text hover:bg-surface-3 cursor-pointer"
               >
                 <X aria-hidden size={14} />
               </button>

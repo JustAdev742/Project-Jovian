@@ -3,9 +3,11 @@
 // moves a field rather than replacing the page — the eye keeps its place.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import { Snowflake, ArrowRight } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { ArrowRight } from "lucide-react";
 import { Button, Field } from "../ui/primitives";
+import { Mark } from "../ui/Mark";
+import { tween, tweenExit } from "../motion";
 import { useToast } from "../ui/toast";
 import { register, login, checkAvailability, saveSession, type AuthError } from "../auth";
 
@@ -88,7 +90,7 @@ export default function SignIn() {
       title: mode === "signup" ? `Welcome to Nova, ${result.session.username}` : `Welcome back, ${result.session.username}`,
       body: mode === "signup" ? "Your Fortnite account is linked and ready." : undefined,
     });
-    navigate("/home");
+    navigate("/play");
   };
 
   const swap = (next: Mode) => {
@@ -99,20 +101,22 @@ export default function SignIn() {
   };
 
   return (
-    <div className="nova-ambient h-full w-full grid place-items-center px-6 overflow-y-auto">
+    <div className="ambient h-full w-full grid place-items-center px-6 overflow-y-auto">
       <motion.div
-        initial={{ opacity: 0, y: 12 }}
+        initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        transition={tween}
         className="relative z-10 w-full max-w-[22rem] py-10"
       >
-        {/* Identity. Season 7 was the ice season — the mark is a snowflake, not a generic shield. */}
-        <div className="flex flex-col items-center text-center mb-8">
-          <div className="size-11 rounded-xl bg-frost/10 border border-frost/25 grid place-items-center text-frost mb-4">
-            <Snowflake aria-hidden size={21} />
+        {/* Identity is the PRODUCT, not the content it currently launches. No season, no chapter,
+            no game — a build number belongs on the Play screen next to the build it describes, and
+            the tagline describes what Nova is rather than what version of Fortnite it runs. */}
+        <div className="flex flex-col items-center text-center mb-9">
+          <div className="size-12 rounded-[var(--radius-md)] bg-accent/10 border border-accent/20 grid place-items-center text-accent mb-5">
+            <Mark size={24} />
           </div>
-          <h1 className="font-display text-[27px] font-bold tracking-tight text-text">Project Nova</h1>
-          <p className="text-[13px] text-muted mt-1.5">Season 7 · Chapter 1 · Player-hosted</p>
+          <h1 className="font-display text-2xl text-text">Project Nova</h1>
+          <p className="text-sm text-text-2 mt-2">Player-hosted matches. No servers, no queues.</p>
         </div>
 
         <form onSubmit={submit} noValidate className="space-y-4">
@@ -123,8 +127,8 @@ export default function SignIn() {
                 layout
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0, transition: { duration: 0.12 } }}
-                transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                exit={{ opacity: 0, transition: tweenExit }}
+                transition={tween}
               >
                 <Field
                   ref={(el) => { firstField.current = el; fields.current.login = el; }}
@@ -143,8 +147,8 @@ export default function SignIn() {
                 layout
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0, transition: { duration: 0.12 } }}
-                transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                exit={{ opacity: 0, transition: tweenExit }}
+                transition={tween}
                 className="space-y-4"
               >
                 <Field
@@ -201,7 +205,7 @@ export default function SignIn() {
           </motion.div>
         </form>
 
-        <motion.p layout className="text-center text-[13px] text-muted mt-6">
+        <motion.p layout className="text-center text-sm text-text-2 mt-6">
           {mode === "signin" ? "New to Nova?" : "Already have an account?"}{" "}
           <button
             type="button"
@@ -209,7 +213,7 @@ export default function SignIn() {
             // inline-block + padding so the hit area clears the 24px minimum. It sits inside a
             // sentence, which exempts it from that rule — but it is the only route to sign-up, and
             // a 20px-tall primary action is mean regardless of what the rule permits.
-            className="inline-block py-1 px-0.5 font-semibold text-frost hover:text-frost-dim cursor-pointer"
+            className="inline-block py-1 px-0.5 font-semibold text-accent hover:text-accent-hi cursor-pointer"
           >
             {mode === "signin" ? "Create an account" : "Sign in"}
           </button>
