@@ -245,35 +245,74 @@ pub fn kill() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
-pub fn kill_epic() {
-    // Each switch as its own argv element. The previous form passed "taskkill /F /IM" as ONE
-    // argument; cmd happens to strip the quotes and run it anyway, but that is an accident of cmd's
-    // quote handling rather than something to rely on.
-    let cmd = std::process::Command::new("cmd")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(&["/C", "taskkill", "/F", "/IM", "EpicGamesLauncher.exe"])
-        .spawn();
+/// Is this EpicGamesLauncher.exe the EOS bootstrapper the GAME depends on?
+///
+/// `p.cmd()` is a slice of OsString, so it is flattened to a lossy String before matching, and the
+/// comparison is case-insensitive — the flag's casing is Epic's to change, not ours.
+fn is_eos_bootstrapper(p: &sysinfo::Process) -> bool {
+    let cmdline = p
+        .cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    cmdline.contains("-eosbootstrappedflag") || cmdline.contains("-epicportal")
+}
 
-    if cmd.is_err() {
-        return;
+pub fn kill_epic() {
+    // Spares the EOS bootstrapper, for the same reason suppress_epic_launcher does: killing that
+    // particular EpicGamesLauncher.exe drops the game's app-services connection and it logs itself
+    // out with "Fortnite was not started correctly". This runs early enough that the bootstrapper
+    // usually does not exist yet — but "usually" is exactly the kind of assumption that produced a
+    // bug reproducing on one machine and not another, so it is checked rather than assumed.
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    for p in system.processes().values() {
+        if !p.name().eq_ignore_ascii_case("EpicGamesLauncher.exe") {
+            continue;
+        }
+        if is_eos_bootstrapper(p) {
+            continue;
+        }
+        // Each switch as its own argv element. The previous form passed "taskkill /F /IM" as ONE
+        // argument; cmd happens to strip the quotes and run it anyway, but that is an accident of
+        // cmd's quote handling rather than something to rely on.
+        let _ = std::process::Command::new("cmd")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(&["/C", "taskkill", "/F", "/PID", &p.pid().to_string()])
+            .spawn();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
-/// Keep the Epic Games Launcher shut for a while after we start the game.
+/// Close an Epic Games Launcher window the player did not ask for — and ONLY that one.
 ///
-/// kill_epic() only fires once, BEFORE the game starts, so anything that opens EGL later wins. And
-/// something does: EGL's own log shows it started with
+/// ── WHY THIS IS NARROW NOW ──────────────────────────────────────────────────────────────────────
+/// This used to kill every EpicGamesLauncher.exe it saw for two minutes after launch, and that was
+/// the cause of "Fortnite was not started correctly and needs to be closed."
 ///
-///     EpicGamesLauncher.exe ... -EOSBootstrappedFlag -ForcedRestart
+/// The game's own log gives the mechanism exactly:
 ///
-/// `-EOSBootstrappedFlag` means the EOS bootstrapper started it — part of the normal Fortnite launch
-/// chain, not something we invoke directly — so there is no single call of ours to remove. A short
-/// watchdog closes it whenever it appears during the launch window instead.
+///     LogInit: Error: AppES: closing code 0
+///     LogOnlineAccount: ForceLogout requested. Local=false
+///       LogoutReason=[Fortnite was not started correctly and needs to be closed. ...]
 ///
-/// Deliberately time-boxed: it stops after `seconds`, so if the player opens the Epic Games Launcher
-/// themselves later, nothing fights them for it.
+/// `Local=false` means the client did not decide that itself — the logout followed its connection
+/// to Epic's app-services bootstrapper dropping. That bootstrapper IS an EpicGamesLauncher.exe
+/// process, started as part of the normal launch chain with `-EOSBootstrappedFlag`. Killing it
+/// severs a connection the game depends on, and the game responds by logging out with a message
+/// blaming the way it was started. The old comment here even noted the process was part of the
+/// launch chain, and killed it anyway.
+///
+/// It looked intermittent because it is a race: whether the bootstrapper appears (and is killed)
+/// inside the window varies by machine speed and by whether EGL is installed at all. One PC would
+/// play fine while another failed every time on the same build.
+///
+/// So the watchdog now leaves the bootstrapped instance completely alone and closes only an EGL
+/// that was started some other way — the storefront window popping up over the game, which is what
+/// this was ever meant to stop.
 pub fn suppress_epic_launcher(seconds: u64) {
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
@@ -282,17 +321,19 @@ pub fn suppress_epic_launcher(seconds: u64) {
         while std::time::Instant::now() < deadline {
             system.refresh_all();
 
-            // Only shell out when it is actually there — no point spawning taskkill on a timer.
-            let running = system
-                .processes()
-                .values()
-                .any(|p| p.name().eq_ignore_ascii_case("EpicGamesLauncher.exe"));
-
-            if running {
-                println!("[Epic] Epic Games Launcher opened during launch — closing it.");
+            for p in system.processes().values() {
+                if !p.name().eq_ignore_ascii_case("EpicGamesLauncher.exe") {
+                    continue;
+                }
+                // The bootstrapper the GAME needs. Identified by its own command line rather than
+                // by timing, so this is a fact about the process instead of a guess.
+                if is_eos_bootstrapper(p) {
+                    continue;
+                }
+                println!("[Epic] Closing a stray Epic Games Launcher window (pid {}).", p.pid());
                 let _ = std::process::Command::new("cmd")
                     .creation_flags(CREATE_NO_WINDOW)
-                    .args(&["/C", "taskkill", "/F", "/IM", "EpicGamesLauncher.exe"])
+                    .args(&["/C", "taskkill", "/F", "/PID", &p.pid().to_string()])
                     .spawn();
             }
 
