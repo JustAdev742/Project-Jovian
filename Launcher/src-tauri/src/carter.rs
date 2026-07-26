@@ -509,19 +509,84 @@ async fn dll_replace(path: &str, app: AppHandle) -> Result<bool, String> {
 
     println!("Looking for Cobalt.dll at: {:?}", cobalt_path);
 
-    if cobalt_path.exists() {
-        if let Err(e) = std::fs::copy(&cobalt_path, &nvidia_path) {
-            println!("Failed to copy Cobalt.dll: {}", e);
-            return Err("Failed to copy Cobalt.dll".to_string());
-        } else {
-            println!("Successfully copied Cobalt.dll to GFSDK_Aftermath_Lib.x64.dll");
-        }
-    } else {
+    if !cobalt_path.exists() {
         println!("Cobalt.dll not found in launcher directory");
         return Err("Cobalt.dll not found".to_string());
     }
 
+    // ── Check the DLL is intact BEFORE writing it into the game ─────────────────────────────────
+    //
+    // This used to be `exists()` and copy. A truncated or zero-byte Cobalt.dll passes `exists()`
+    // perfectly well, gets written over the engine's Aftermath library, and Fortnite then dies the
+    // instant it loads it — no window, no crash log, not even a Saved folder, because UE never gets
+    // far enough to make one. From the outside that is indistinguishable from "the game is broken",
+    // and the only thing that actually fixes it is a reinstall, which is a miserable answer.
+    //
+    // An interrupted update is enough to produce exactly that file, and we have already seen an
+    // install halt part-way through on this project.
+    if let Err(reason) = validate_dll(&cobalt_path) {
+        println!("Cobalt.dll failed its integrity check: {}", reason);
+        return Err(format!(
+            "Nova's game files are damaged ({reason}). Reinstall Nova — the update was probably interrupted."
+        ));
+    }
+
+    if let Err(e) = std::fs::copy(&cobalt_path, &nvidia_path) {
+        println!("Failed to copy Cobalt.dll: {}", e);
+        return Err("Failed to copy Cobalt.dll".to_string());
+    }
+
+    // And confirm what landed, rather than trusting the copy. A disk that filled up mid-write, or
+    // an antivirus that quarantined the file the moment it appeared, both return Ok(()) here.
+    match std::fs::metadata(&nvidia_path) {
+        Ok(m) if m.len() == std::fs::metadata(&cobalt_path).map(|s| s.len()).unwrap_or(0) => {
+            println!("Successfully copied Cobalt.dll to GFSDK_Aftermath_Lib.x64.dll ({} bytes)", m.len());
+        }
+        Ok(m) => {
+            return Err(format!(
+                "Nova could not install its game files correctly (wrote {} bytes). Check that your antivirus isn't removing them.",
+                m.len()
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "Nova could not install its game files ({e}). Check that your antivirus isn't removing them."
+            ));
+        }
+    }
+
     Ok(true)
+}
+
+/// Is this actually a 64-bit Windows DLL, and not a truncated download or an empty placeholder?
+///
+/// Deliberately cheap: read the first bytes and the length. The point is to catch the file being
+/// obviously wrong — not to verify it is the RIGHT build, which a hash would do and which would
+/// then need updating on every rebuild.
+pub fn validate_dll(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let len = std::fs::metadata(path).map_err(|e| format!("unreadable: {e}"))?.len();
+    // Any real DLL here is tens of kilobytes. 4 KB is comfortably below the smallest plausible
+    // build and comfortably above "empty" or "a few stray bytes".
+    if len < 4096 {
+        return Err(format!("{} is only {} bytes", file_leaf(path), len));
+    }
+
+    let mut head = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map_err(|e| format!("unreadable: {e}"))?;
+    // Every PE image starts "MZ". A partial download, an HTML error page saved as a .dll, or a
+    // quarantined stub will not.
+    if &head != b"MZ" {
+        return Err(format!("{} is not a valid Windows library", file_leaf(path)));
+    }
+    Ok(())
+}
+
+fn file_leaf(p: &std::path::Path) -> String {
+    p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string())
 }
 
 /// Extra args for the instance that will become the SERVER. `-nullrhi` is the important one: it

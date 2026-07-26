@@ -245,6 +245,14 @@ pub fn inject_reboot(dll_path: Option<String>, pid: Option<u32>) -> Result<bool,
     if !std::path::Path::new(&dll).exists() {
         return Err(format!("Reboot DLL not found at {}", dll));
     }
+    // Same check the game files get in carter::dll_replace, for the same reason: a truncated or
+    // quarantined DLL passes exists() and then fails at injection, or worse takes the server down
+    // with it. Say which file is wrong while we still can.
+    if let Err(reason) = crate::carter::validate_dll(std::path::Path::new(&dll)) {
+        return Err(format!(
+            "Nova's server files are damaged ({reason}). Reinstall Nova — the update was probably interrupted."
+        ));
+    }
 
     // Target the instance we actually launched as the server. Once the host is also playing there
     // are TWO processes with this exact name, and "first by name" is a coin flip — injecting into
