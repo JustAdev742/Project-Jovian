@@ -1,0 +1,46 @@
+// Version resource.
+//
+// This is not cosmetic. A DLL with no version information, no company and no description is one of
+// the cheapest heuristics an anti-malware product has for "probably not legitimate software", and
+// this file gets copied into a game directory under another product's filename
+// (GFSDK_Aftermath_Lib.x64.dll), which on its own looks like masquerading. Carrying honest metadata
+// that says plainly what this binary is, who ships it and what it does is both the accurate thing
+// to do and the single highest-value change for avoiding a false positive.
+//
+// Keep FILEVERSION / PRODUCTVERSION in sync with COBALT_VERSION in settings.h.
+
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"        // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "Project Nova"
+            VALUE "FileDescription",  "Cobalt - redirects Fortnite's online services to a local Project Nova server"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "Cobalt"
+            VALUE "OriginalFilename", "Cobalt.dll"
+            VALUE "ProductName",      "Project Nova Launcher"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "LegalCopyright",   "Cobalt is open source (see LICENSE). Not affiliated with, endorsed by, or connected to Epic Games."
+            VALUE "Comments",         "Loaded into the Fortnite client by the Project Nova Launcher. Rewrites Epic service URLs to a backend on 127.0.0.1 and disables TLS peer verification for those requests, because the local server uses a self-signed certificate. Logs everything it does to the launcher's Logs tab and to %LOCALAPPDATA%\\ProjectNova\\Logs\\cobalt.log."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

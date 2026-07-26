@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
+  <metadata>
+    <id>Detours</id>
+    <version>4.0.1</version>
+    <title>Microsoft Detours</title>
+    <authors>Microsoft</authors>
+    <owners>Microsoft</owners>
+    <developmentDependency>true</developmentDependency>
+    <requireLicenseAcceptance>true</requireLicenseAcceptance>
+    <licenseUrl>https://github.com/microsoft/Detours/blob/master/LICENSE.md</licenseUrl>
+    <projectUrl>http://research.microsoft.com/sn/detours/</projectUrl>
+    <description>Microsoft Research Detours
+
+https://github.com/microsoft/Detours</description>
+    <summary></summary>
+    <copyright>Copyright (c) Microsoft Corporation. All rights reserved.</copyright>
+    <tags>detours,win32,native</tags>
+  </metadata>
+</package>

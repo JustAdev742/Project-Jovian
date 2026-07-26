@@ -1,0 +1,13 @@
+{
+  "name": "nova-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local bridge: 127.0.0.1:3551 -> the Nova global coordinator. Cobalt is hard-coded to redirect the game to 127.0.0.1:3551, so this forwards that (HTTP + WebSocket, with TLS to the coordinator) up to the shared server on clientfinder.tail0a8fd0.ts.net:8443. Run one per player machine in global P2P mode.",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  }
+}

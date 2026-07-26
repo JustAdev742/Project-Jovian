@@ -1,0 +1,37 @@
+# ── Never publish ───────────────────────────────────────────────────────────────
+# Live account databases and per-machine config. data/nova.db holds real accounts.
+**/data/
+*.db
+*.db.tmp
+.env
+.env.*
+!.env.example
+**/certs/
+*.log
+*.dmp
+
+# The updater signing key must never be near this repo — it lives in
+# %USERPROFILE%\.nova-updater\. Belt and braces in case it is ever copied in.
+*.key
+nova-updater*
+
+# ── Build output and dependencies (all regenerable) ─────────────────────────────
+**/node_modules/
+**/target/
+**/dist/
+**/x64/
+**/.vs/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Staged installer payload: ~136 MB of binaries rebuilt by the release process.
+# See RELEASING.md for how to recreate it.
+Launcher/src-tauri/resources/
+
+# ── Local snapshots and scratch ─────────────────────────────────────────────────
+_backup-*/
+Nova-Multiplayer-Test/
+Nova-Multiplayer-Test.zip

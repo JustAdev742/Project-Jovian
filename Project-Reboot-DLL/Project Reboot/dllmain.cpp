@@ -1,0 +1,719 @@
+#include <MinHook.h>
+#include <Windows.h>
+#include <iostream>
+#include <fstream>
+
+#include "ai.h"
+#include "patterns.h"
+#include "server.h"
+#include "helper.h"
+#include "processevent.h"
+#include "inventory.h"
+#include "abilities.h"
+#include "build.h"
+#include "gui.h"
+#include "edit.h"
+#include "loot.h"
+#include "interaction.h"
+#include <intrin.h>
+#include <DbgHelp.h>
+#include <ctime>
+#pragma comment(lib, "Dbghelp.lib")
+
+#ifdef MILXNOR_H
+#include "milxnor.h"
+#endif
+
+// DEFINE_LOG_CATEGORY_STATIC(LogInit, ELogLevel::All)
+
+__int64 rettrue() { return 1; }
+__int64 retfalse() { return 0; }
+// ENetMode: NM_Standalone=0, NM_DedicatedServer=1, NM_ListenServer=2, NM_Client=3.
+// The dedicated build forces GetNetMode() to 1; a listen server (host plays) must report 2 so the
+// engine keeps a local player and spawns the host's pawn.
+__int64 retlistenserver() { return 2; }
+__int64 printretandretfalse()
+{
+    if (Defines::test2)
+    {
+        auto retaddy = __int64(_ReturnAddress()) - __int64(GetModuleHandleW(0));
+
+        if (retaddy != 0x1b0f70f)
+            std::cout << retaddy << '\n'; // std::format("0x{:x}\n", retaddy);
+    }
+
+    return 0;
+}
+
+// ── CRASH DIAGNOSTICS ────────────────────────────────────────────────────────────────────────────
+// Stock Reboot logs only to a console window that dies WITH the process on an access violation, so a
+// crash left the operator with nothing to debug ("i wasn't able to get a log"). On any unhandled
+// exception this writes, next to the exe:
+//   * crash.log  — timestamp, exception code, and the faulting address as an RVA relative to BOTH the
+//                  game exe and this DLL, so it can be matched to a specific line, and
+//   * crash.dmp  — a full minidump (open in Visual Studio / WinDbg with the matching build).
+// Both survive the crash on disk. The handler is deliberately dependency-light and never assumes a
+// pointer is valid, so it can run even from a corrupted state.
+//
+// It's installed as a VECTORED handler, not via SetUnhandledExceptionFilter: UE4/Fortnite installs
+// its OWN unhandled-exception filter during engine init (which runs AFTER this DLL attaches), so a
+// SetUnhandledExceptionFilter hook would be silently overridden and never fire. A vectored handler
+// runs first and can't be displaced. It only acts on genuinely fatal faults and returns
+// CONTINUE_SEARCH so the normal crash path still proceeds afterwards.
+static volatile LONG g_InCrashHandler = 0;
+
+static LONG CALLBACK RebootCrashHandler(EXCEPTION_POINTERS* Info)
+{
+    auto Rec = (Info ? Info->ExceptionRecord : nullptr);
+    if (!Rec)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    uint32_t Code = (uint32_t)Rec->ExceptionCode;
+
+    // Fatal, non-recoverable faults only. First-chance C++/SEH exceptions, breakpoints, guard-page
+    // hits, etc. are NOT crashes — dumping on those would be a false alarm.
+    switch (Code)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Double-fault / re-entrancy guard — only ever write one dump.
+    if (InterlockedCompareExchange(&g_InCrashHandler, 1, 0) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    uintptr_t Addr = (uintptr_t)Rec->ExceptionAddress;
+
+    uintptr_t GameBase = (uintptr_t)GetModuleHandleW(nullptr);
+
+    // Resolve THIS DLL's base from the handler's own address, so it works whatever the DLL is named.
+    HMODULE DllMod = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCWSTR)&RebootCrashHandler, &DllMod);
+    uintptr_t DllBase = (uintptr_t)DllMod;
+
+    {
+        std::ofstream log("crash.log", std::ios::app);
+        if (log.is_open())
+        {
+            std::time_t now = std::time(nullptr);
+            char when[64] = {};
+            ctime_s(when, sizeof(when), &now);
+
+            log << "\n==== Project Reboot crash ====\n";
+            log << "time:          " << when;
+            log << std::format("exceptionCode: 0x{:08X}\n", Code);
+            log << std::format("faultAddress:  0x{:016X}\n", Addr);
+            log << std::format("gameBase:      0x{:016X}\n", GameBase);
+            log << std::format("dllBase:       0x{:016X}\n", DllBase);
+            if (GameBase && Addr >= GameBase)
+                log << std::format("fault RVA (FortniteClient exe): 0x{:X}\n", Addr - GameBase);
+            if (DllBase && Addr >= DllBase && (!GameBase || DllBase >= GameBase))
+                log << std::format("fault RVA (Reboot dll):         0x{:X}\n", Addr - DllBase);
+            log << "See crash.dmp for the full stack (open with the matching game build).\n";
+            log.flush();
+        }
+    }
+
+    if (HANDLE File = CreateFileA("crash.dmp", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr))
+    {
+        if (File != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION Mei = {};
+            Mei.ThreadId = GetCurrentThreadId();
+            Mei.ExceptionPointers = Info;
+            Mei.ClientPointers = FALSE;
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), File,
+                MiniDumpNormal, (Info ? &Mei : nullptr), nullptr, nullptr);
+            CloseHandle(File);
+        }
+    }
+
+    // This is a VECTORED handler, so it fires on FIRST-CHANCE exceptions — before the game has had
+    // a chance to handle them. It cannot tell a fatal fault from one UE recovers from, and UE does
+    // recover from some routinely (the AV at FortniteClient.exe+0x1242250 has been logged 8+ times
+    // across sessions with the server carrying on each time). Calling that "[Crash] unhandled
+    // exception" made a recoverable, expected exception look like the server had died.
+    //
+    // The authoritative record of a REAL crash is UE's own symbolicated
+    // "LogWindows: Error: === Critical error: ===" block in FortniteGame.log, which resolves Reboot
+    // frames to file and line. Say so, instead of pre-empting it.
+    std::cout << std::format(
+        "\n[Exception] first-chance 0x{:08X} at 0x{:016X} (RVA 0x{:X}) - dump written.\n"
+        "[Exception] The game OFTEN RECOVERS from these. Treat it as a crash only if the server\n"
+        "[Exception] actually stops. The real callstack is the '=== Critical error: ===' block in\n"
+        "[Exception] FortniteGame\\Saved\\Logs\\FortniteGame.log.\n",
+        Code, Addr, (GameBase && Addr >= GameBase) ? (Addr - GameBase) : 0);
+    std::cout.flush();
+
+    return EXCEPTION_CONTINUE_SEARCH; // logged; let the normal crash path (UE4 / OS) proceed
+}
+
+DWORD WINAPI Initialize(LPVOID)
+{
+    // Install FIRST, before any hook runs, so even an early crash is captured. First arg 1 = run
+    // before any previously-registered vectored handler.
+    AddVectoredExceptionHandler(1, RebootCrashHandler);
+
+    // No AllocConsole. This used to open a second console window for the server, separate from the
+    // launcher — closing it killed the server with it, and nothing was recorded.
+    //
+    // Reboot's output still goes everywhere it needs to: Cobalt is loaded into this same process
+    // (it is the SSL/redirect shim) and redirects std::cout process-wide to the launcher's Logs tab
+    // and to %LOCALAPPDATA%\ProjectNova\Logs\cobalt.log. Every std::cout in Reboot is unchanged and
+    // lands there — that is how "[Locker] applying backpack: ..." shows up in that file today.
+    // If Cobalt is somehow not present, std::cout simply goes nowhere; nothing breaks.
+
+    std::ios::sync_with_stdio(false);
+
+    // Log::Init();
+
+    if (MH_Initialize() != MH_OK)
+    {
+        MessageBoxA(0, "MinHook failed to initialize", "Project Reboot V2", MB_ICONERROR);
+        return 1;
+    }
+
+    std::cout << std::format("Base Address 0x{:x}\n", (uintptr_t)GetModuleHandleW(0));
+
+    std::ofstream aaa("baseaddress.log", std::ios_base::app);
+
+    if (aaa.is_open())
+        aaa << std::format("Base: 0x{:x}", (uintptr_t)GetModuleHandleW(0)) << '\n';
+
+    if (!InitializePatterns())
+    {
+        MessageBoxA(0, "Failed to setup patterns", "Project Reboot V2", MB_ICONERROR);
+        return 1;
+    }
+
+    constexpr bool bHookPreLogin = false;
+
+    if constexpr (bHookPreLogin)
+    {
+        uintptr_t PreLoginAddr = 0;
+
+        if (Engine_Version == 423)
+            PreLoginAddr = Memory::FindPattern("48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 81 EC ? ? ? ? 48 8B 9C 24 ? ? ? ? 33 FF");
+
+        std::cout << "PreLoginAddr: " << PreLoginAddr << '\n';
+
+        MH_CreateHook((PVOID)PreLoginAddr, rettrue, nullptr);
+        MH_EnableHook((PVOID)PreLoginAddr);
+    }
+
+    if (Engine_Version <= 422)
+    {
+        // aStatNetdebugwi
+        uintptr_t NetDebugAddr = Memory::FindPattern("40 55 56 41 56 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 01"); // 5.41 // tested on 7.3
+
+        std::cout << "NetDebugAddr: " << NetDebugAddr << '\n';
+
+        MH_CreateHook((PVOID)NetDebugAddr, rettrue, nullptr);
+        MH_EnableHook((PVOID)NetDebugAddr);
+    }
+
+    if (Fortnite_Version == 7.30)
+    {
+        static auto hookthisaddr = Memory::FindPattern("48 89 5C 24 ? 57 48 83 EC 30 48 8B 01 48 8B F9 FF 90 ? ? ? ? 48 8B D8 48 85 C0 0F 84 ? ? ? ? 48 83 78 ? ?");
+
+        MH_CreateHook((PVOID)hookthisaddr, retfalse, nullptr);
+        MH_EnableHook((PVOID)hookthisaddr);
+    }
+
+    if (Fortnite_Season >= 17)
+    {
+        auto sigcrash = Memory::FindPattern("48 89 5C 24 ? 48 89 6C 24 ? 56 57 41 54 41 56 41 57 48 81 EC ? ? ? ? 65 48 8B 04 25 ? ? ? ? 4C 8B F9");
+
+        std::cout << "sigcrash: " << sigcrash << '\n';
+
+        MH_CreateHook((PVOID)sigcrash, retfalse, nullptr);
+        MH_EnableHook((PVOID)sigcrash);
+    }
+
+    if (Fortnite_Season >= 22)
+    {
+        auto afq = Memory::FindPattern("40 55 53 56 57 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B F1 E8 ? ? ? ? 48 8B CE E8 ? ? ? ? 45 33 FF 48 85 C0 74 5A 48");
+
+        std::cout << "afq: " << afq << '\n';
+
+        MH_CreateHook((PVOID)afq, retfalse, nullptr);
+        MH_EnableHook((PVOID)afq);
+    }
+
+    static auto CheckPawnOverlapAddress = Memory::FindPattern("48 8B C4 48 89 58 08 48 89 70 10 57 48 81 EC ? ? ? ? 48 8B BA ? ? ? ? 48 8B DA 0F 29 70 E8 48 8B F1 0F");
+
+    if (!CheckPawnOverlapAddress)
+        CheckPawnOverlapAddress = Memory::FindPattern("48 8B C4 57 48 81 EC ? ? ? ? 4C 8B 82 ? ? ? ? 48 8B F9 0F 29 70 E8 0F 29 78 D8 44 0F 29 40 ? F3"); // s4
+
+    std::cout << "CheckPawnOverlapAddress: " << CheckPawnOverlapAddress << '\n';
+
+    MH_CreateHook((PVOID)CheckPawnOverlapAddress, retfalse, nullptr); // This only happens with StartPlay/StartMatch and on older versions.
+    MH_EnableHook((PVOID)CheckPawnOverlapAddress);
+
+    auto Base = __int64(GetModuleHandleW(0));
+
+    // if (false)
+    {
+        bool bIsSettingGIsClient = true;
+        bool bSetGIsClientSuccessful = false;
+
+        if (bIsSettingGIsClient)
+        {
+            uintptr_t GIsClientAddr = 0; // Memory::FindPattern("8A 05 ? ? ? ? F6 D8 1B C0 F7 D8 FF C0 EB 05 B8", true, 2); // 18.40
+            uintptr_t GIsServerAddr = 0;
+
+            if (Engine_Version == 421 || Engine_Version == 422) // got on 5.41
+            {
+                GIsClientAddr = Memory::FindPattern("80 3D ? ? ? ? ? 74 17 48 8D 15 ? ? ? ? 48", true, 2);
+                GIsServerAddr = Memory::FindPattern("80 3D ? ? ? ? ? 75 40 80 3D ? ? ? ? ? 48 8D 05", true, 2);
+            }
+
+            else if (Engine_Version == 423)
+            {
+                GIsClientAddr = Memory::FindPattern("C6 05 ? ? ? ? ? 44 88 64 24 ? C6 05", true, 2);
+                GIsServerAddr = Memory::FindPattern("80 3D ? ? ? ? ? 75 0D F6 83 ? ? ? ? ? 0F", true, 2); // 8.51
+            }
+
+            else if (Engine_Version == 425)
+            {
+                GIsClientAddr = Memory::FindPattern("80 3D ? ? ? ? ? 74 04 84 DB 75 15 80 3D ? ? ? ? ? 0F", true, 2);
+                GIsServerAddr = Memory::FindPattern("80 3D ? ? ? ? ? 0F 84 ? ? ? ? 84 C0 0F 84 ? ? ? ? 49 8B", true, 2);
+            }
+
+            else if (Engine_Version == 500)
+            {
+                GIsClientAddr = Memory::FindPattern("80 3D ? ? ? ? ? 48 8B DA 0F 84 ? ? ? ? 48", true, 2);
+                GIsServerAddr = Memory::FindPattern("80 3D ? ? ? ? ? 0F 85 ? ? ? ? F6 83", true, 2);
+            }
+
+            if (Fortnite_Version == 12.41)
+            {
+                GIsClientAddr = __int64(GetModuleHandleW(0)) + 0x8237B86;
+                GIsServerAddr = __int64(GetModuleHandleW(0)) + 0x8237B87;
+            }
+
+            std::cout << "GIsClientAddr: " << GIsClientAddr << '\n';
+            std::cout << "GIsServerAddr: " << GIsServerAddr << '\n';
+
+            std::cout << std::format("GIsClientAddr: 0x{:x}\n", (uintptr_t)GIsClientAddr - Base);
+            std::cout << std::format("GIsServerAddr: 0x{:x}\n", (uintptr_t)GIsServerAddr - Base);
+
+            if (GIsClientAddr)
+            {
+                std::cout << "BefroreClient: " << *(bool*)(GIsClientAddr) << '\n';
+                // Dedicated server forces GIsClient=false (no local player). A listen server keeps
+                // it true so the host has a local player and can play in this same process.
+                if (!Defines::bHostCanPlay)
+                    *(bool*)(GIsClientAddr) = false;
+                else
+                    std::cout << "[HostCanPlay] leaving GIsClient=true (listen server)\n";
+            }
+
+            if (GIsServerAddr)
+            {
+                std::cout << "BefroreServer: " << *(bool*)(GIsServerAddr) << '\n';
+                *(bool*)(GIsServerAddr) = true;
+            }
+
+            if (Fortnite_Version == 20.40)
+            {
+                auto IsGameServerForEvent = __int64(GetModuleHandleW(0)) + 0x5CD2B88;
+
+                std::cout << "IsGameServerForEvent: " << IsGameServerForEvent << '\n';
+
+                MH_CreateHook((PVOID)IsGameServerForEvent, rettrue, nullptr);
+                MH_EnableHook((PVOID)IsGameServerForEvent);
+            }
+
+            if (Fortnite_Version == 12.41)
+            {
+                auto skidder = __int64(GetModuleHandleW(0) + 0x42ACE40);
+
+                MH_CreateHook((PVOID)skidder, rettrue, nullptr);
+                MH_EnableHook((PVOID)skidder);
+            }
+
+            bSetGIsClientSuccessful = GIsClientAddr;
+        }
+    }
+
+    MH_CreateHook((PVOID)CanActivateAbilityAddress, rettrue, nullptr); // TODO: Find a better fix
+    MH_EnableHook((PVOID)CanActivateAbilityAddress);
+
+    MH_CreateHook((PVOID)HandleReloadCostAddress, Inventory::HandleReloadCost, (PVOID*)&Defines::HandleReloadCost);
+    MH_EnableHook((PVOID)HandleReloadCostAddress);
+
+    MH_CreateHook((PVOID)ProcessEventAddress, ProcessEventDetour, (PVOID*)&ProcessEventO);
+    MH_EnableHook((PVOID)ProcessEventAddress);
+
+    if (WorldGetNetModeAddress && NoMCPAddress)
+    {
+        // Listen server → GetNetMode() must be NM_ListenServer(2); dedicated → NM_DedicatedServer(1).
+        LPVOID netModeDetour = Defines::bHostCanPlay ? (LPVOID)&retlistenserver : (LPVOID)&rettrue;
+        MH_CreateHook((PVOID)WorldGetNetModeAddress, netModeDetour, nullptr);
+        MH_EnableHook((PVOID)WorldGetNetModeAddress);
+
+        MH_CreateHook((PVOID)NoMCPAddress, rettrue, nullptr);
+        MH_EnableHook((PVOID)NoMCPAddress);
+    }
+    else
+    {
+        std::cout << "Unable to enable GetNetMode fix!\n";
+        std::cout << "NoMCPAddress: " << NoMCPAddress << '\n';
+        std::cout << "WorldGetNetModeAddress: " << WorldGetNetModeAddress << '\n';
+    }
+
+    std::cout << "Initialized\n";
+    // LOG(LogInit, All, L"Initialized");
+    std::cout << "Fortnite_Season: " << Fortnite_Season << '\n';
+    std::cout << "GiveAbilityS14ABOVE: " << Defines::GiveAbilityS14ABOVE << '\n';
+    std::cout << "GiveAbilityAddress: " << GiveAbilityAddress << '\n';
+
+    FFortItemEntry::ItemEntryStruct = FindObjectSlow("ScriptStruct /Script/FortniteGame.FortItemEntry", false);
+    FastTArray::FastArraySerializerStruct = FindObjectSlow("ScriptStruct /Script/Engine.FastArraySerializer", false);
+    Abilities::GameplayAbilitySpecClass = FindObjectSlow("ScriptStruct /Script/GameplayAbilities.GameplayAbilitySpec", false);
+    Editing::EditToolDefinition = FindObject("/Game/Items/Weapons/BuildingTools/EditTool.EditTool");
+
+    static auto SizeOfGameplayAbilitySpec = Helper::GetSizeOfClass(Abilities::GameplayAbilitySpecClass);
+
+    std::cout << "SizeOfGameplayAbilitySpec: " << SizeOfGameplayAbilitySpec << '\n';
+    std::cout << "SizeOfPredictionKey: " << Helper::GetSizeOfClass(FindObjectSlow("ScriptStruct /Script/GameplayAbilities.PredictionKey", false)) << '\n';
+    std::cout << "SizeOfItemEntryStruct: " << Helper::GetSizeOfClass(FFortItemEntry::ItemEntryStruct) << '\n';
+    
+    auto aasig = Memory::FindPattern("48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 40 48 89 11 48 8B D9 48 8B 42 30 48 85 C0 75 07 48 8B 82 ? ? ? ? 48");
+
+    if (!aasig)
+        aasig = Memory::FindPattern("48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 40 48 89 11");
+
+    std::cout << std::format("NetViewerConstructor: 0x{:x}\n", (uintptr_t)aasig - Base);
+
+    // Level.Free();
+
+    std::cout << "Full Version: " << Helper::GetEngineVersion().ToString() << '\n';
+    std::cout << std::format("Engine Version {} Version {} CL {}\n", Helper::GetEngineVer(), Helper::GetFortniteVersion(), Helper::GetNetCL());
+
+    if (Fortnite_Version != 22.4)
+    {
+        auto matchmaking = Memory::FindPattern("83 BD ? ? ? ? 01 7F 18 49 8D 4D D8 48 8B D6 E8 ? ? ? ? 48");
+
+        matchmaking = matchmaking ? matchmaking : Memory::FindPattern("83 7D 88 01 7F 0D 48 8B CE E8");
+
+        Defines::bMatchmakingSupported = matchmaking && Engine_Version >= 420;
+        int idx = 0;
+
+        if (Defines::bMatchmakingSupported) // now check if it leads to the right place and where the jg is at
+        {
+            for (int i = 0; i < 9; i++)
+            {
+                auto byte = (uint8_t*)(matchmaking + i);
+
+                if (IsBadReadPtr(byte))
+                    continue;
+
+                // std::cout << std::format("[{}] 0x{:x}\n", i, (int)*byte);
+
+                if (*byte == 0x7F)
+                {
+                    Defines::bMatchmakingSupported = true;
+                    idx = i;
+                    break;
+                }
+
+                Defines::bMatchmakingSupported = false;
+            }
+        }
+
+        std::cout << "Matchmaking will " << (Defines::bMatchmakingSupported ? "be supported\n" : "not be supported\n");
+
+        if (Defines::bMatchmakingSupported)
+        {
+            std::cout << "idx: " << idx << '\n';
+
+            auto before = (uint8_t*)(matchmaking + idx);
+
+            std::cout << "before byte: " << (int)*before << '\n';
+
+            *before = 0x74;
+        }
+    }
+    /* else
+    {
+        auto sigg = Memory::FindPattern("83 7C 24 ? ? 0F 8F ? ? ? ? 44 39 3D ? ? ? ? 41 8A DF 74 33 48 8B 0D ? ? ? ? 48 85 C9 74 27");
+
+        for (int i = 0; i < 100; i++)
+        {
+            auto byte = (uint8_t*)(sigg + i);
+
+            if (IsBadReadPtr(byte))
+                continue;
+
+            if (*byte == 0x1)
+            {
+                std::cout << "found!\n";
+                *byte = 0x5;
+                break;
+            }
+        }
+    } */
+
+    std::cout << "patched!\n";
+  
+    if (Defines::bIsGoingToPlayMainEvent)
+    {
+        if (Fortnite_Season == 16)
+        {
+            Defines::MapName = "Apollo_Terrain_Yogurt";
+        }
+    }
+    else
+    {
+        if (Defines::bIsCreative)
+        {
+            if (Fortnite_Season >= 7 && Engine_Version < 424)
+            {
+                static auto CreativePlaylist = FindObject("/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2");
+
+                std::cout << "CreativePlaylist: " << CreativePlaylist << '\n';
+
+                if (CreativePlaylist)
+                {
+                    static auto AdditionalLevelsOffset = CreativePlaylist->GetOffset("AdditionalLevels");
+
+                    auto AdditionalLevels = Get<TArray<TSoftObjectPtr>>(CreativePlaylist, AdditionalLevelsOffset); // TArray<TSoftObjectPtr<class UWorld>>
+
+                    std::cout << "AdditionalLevels: " << AdditionalLevels->Num() << '\n';
+
+                    for (int i = 0; i < AdditionalLevels->Num(); i++)
+                    {
+                        auto& AdditionalLevel = AdditionalLevels->At(i);
+
+                        auto CurrentLevelName = AdditionalLevel.ObjectID.AssetPathName.ToString();
+                        std::cout << std::format("[{}] {}\n", i, CurrentLevelName);
+                    }
+
+                    auto& LevelToOpen = AdditionalLevels->At(AdditionalLevels->Num() - 1);
+
+                    auto LevelName = LevelToOpen.ObjectID.AssetPathName.ToString();
+
+                    LevelName = LevelName.substr(0, LevelName.find_last_of("."));
+
+                    std::cout << "LevelName: " << LevelName << '\n';
+
+                    // FString levelName = std::wstring(LevelName.begin(), LevelName.end()).c_str();
+                    Defines::MapName = LevelName;
+                }
+            }
+            else
+            {
+                std::cout << "You are on a version that either doesn't have creative or we don't support creative for it!\n";
+                Defines::bIsCreative = false;
+            }
+        }
+        else
+        {
+            Defines::MapName = Engine_Version < 424 ? "Athena_Terrain" : (Engine_Version < 500 ? "Apollo_Terrain" : "Artemis_Terrain");
+        }
+    }
+
+    // Defines::MapName = "Creative_NoApollo_Terrain";
+
+    std::cout << "skidda!\n";
+
+    // [Nova] Cheat menu DISABLED — run matches normally with no cheats.
+    // The GuiThread only draws the ImGui cheat/host menu; the match-hosting logic below
+    // (SwitchLevel travel + RPC hooks) runs independently, so removing it changes nothing else.
+    // CreateThread(0, 0, GuiThread, 0, 0, 0);
+
+    while (Defines::SecondsUntilTravel > 0)
+    {
+        Defines::SecondsUntilTravel -= 1;
+
+        Sleep(1000);
+    }
+
+    // Sleep(Defines::SecondsUntilTravel * 1000);
+
+    auto PC = Helper::GetLocalPlayerController();
+
+    std::cout << "PC: " << PC << '\n';
+
+    std::ofstream baiafgq("rpcs.log", std::ios_base::app);
+    
+    if (baiafgq.is_open())
+        baiafgq << "\n\nNEW\n\n";
+
+    static auto SwitchLevel = FindObject<UFunction>("/Script/Engine.PlayerController.SwitchLevel");
+
+    std::wstring LevelWStr = std::wstring(Defines::MapName.begin(), Defines::MapName.end());
+    const wchar_t* LevelWCSTR = LevelWStr.c_str();
+    FString Level = LevelWCSTR;
+
+    PC->ProcessEvent(SwitchLevel, &Level);
+
+    Defines::bTraveled = true;
+
+    if (false)
+    {
+        if (Fortnite_Version <= 11.30) // todo test this
+        {
+            static auto fna = FindObject<UFunction>("/Script/FortniteGame.FortPlayerControllerAthena.ServerClientIsReadyToRespawn");
+
+            if (fna)
+                AddHook("/Script/FortniteGame.FortPlayerControllerAthena.ServerClientIsReadyToRespawn", ServerClientIsReadyToRespawn);
+            else
+                AddHook("/Script/FortniteGame.FortPlayerControllerAthena.ServerClientIsReadyToRespawn", ServerClientIsReadyToRespawn);
+        }
+    }
+
+    AddHook("/Script/FortniteGame.FortPlayerPawn.ServerChoosePart", ServerChoosePart);
+    AddHook("/Script/Engine.PlayerController.ServerChangeName", UFuncRetTrue);
+    AddHook("/Script/Engine.GameModeBase.HandleStartingNewPlayer", HandleStartingNewPlayer);
+    AddHook("/Script/Engine.GameMode.ReadyToStartMatch", ReadyToStartMatch);
+    AddHook("/Script/Engine.PlayerController.ServerAcknowledgePossession", ServerAcknowledgePossession);
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerReadyToStartMatch", ServerReadyToStartMatch);
+
+#ifdef MILXNOR_H
+    InitializeMilxnorHooks();
+#endif
+
+    // AddHook("/Script/FortniteGame.FortPlayerPawn.ServerUpdateVehicleInputStateUnreliable", ServerUpdateVehicleInputStateUnreliable);
+
+    AddHook("/Script/FortniteGame.FortPlayerControllerAthena.ServerGiveCreativeItem", ServerGiveCreativeItem);
+
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerExecuteInventoryItem", Inventory::ServerExecuteInventoryItem);
+    AddHook(Engine_Version >= 420 ? "/Script/FortniteGame.FortPlayerController.ServerAttemptInventoryDrop"
+       : "/Script/FortniteGame.FortPlayerController.ServerSpawnInventoryDrop", Inventory::ServerAttemptInventoryDrop);
+    AddHook(Fortnite_Season < 13 ? "/Script/FortniteGame.FortPlayerPawn.ServerHandlePickup"
+        : "/Script/FortniteGame.FortPlayerPawn.ServerHandlePickupInfo", Inventory::ServerHandlePickup);
+
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerExecuteInventoryWeapon", Inventory::ServerExecuteInventoryWeapon);
+
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerCreateBuildingActor", Build::ServerCreateBuildingActor);
+    // AddHook("/Script/FortniteGame.FortDecoTool.ServerSpawnDeco", Build::ServerSpawnDeco);
+
+    AddHook(Engine_Version < 423 ? "/Script/FortniteGame.FortPlayerController.ServerAttemptInteract" :
+        "/Script/FortniteGame.FortControllerComponent_Interaction.ServerAttemptInteract", Interaction::ServerAttemptInteract);
+
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerLoadingScreenDropped", ServerLoadingScreenDropped);
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerCheat", ServerCheat);
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerCheatAll", UFuncRetTrue);
+
+    if (Fortnite_Season < 20)
+    {
+        AddHook("/Script/FortniteGame.FortPlayerController.ServerBeginEditingBuildingActor", Editing::ServerBeginEditingBuildingActorHook);
+        AddHook("/Script/FortniteGame.FortPlayerController.ServerEditBuildingActor", Editing::ServerEditBuildingActorHook);
+        AddHook("/Script/FortniteGame.FortPlayerController.ServerEndEditingBuildingActor", Editing::ServerEndEditingBuildingActorHook);
+    }
+
+    AddHook("/Script/FortniteGame.FortPlayerControllerZone.ClientOnPawnDied", ClientOnPawnDied);
+
+    if (InternalTryActivateAbilityAddress && GiveAbilityAddress)
+    {
+        AddHook("/Script/GameplayAbilities.AbilitySystemComponent.ServerTryActivateAbility", Abilities::ServerTryActivateAbility);
+        AddHook("/Script/GameplayAbilities.AbilitySystemComponent.ServerAbilityRPCBatch", Abilities::ServerAbilityRPCBatch);
+        AddHook("/Script/GameplayAbilities.AbilitySystemComponent.ServerTryActivateAbilityWithEventData", Abilities::ServerTryActivateAbilityWithEventData);
+    }
+
+    AddHook(Fortnite_Version < 9 ? "/Script/FortniteGame.FortPlayerControllerAthena.ServerAttemptAircraftJump"
+        : (Engine_Version < 424 ? "/Script/FortniteGame.FortPlayerController.ServerAttemptAircraftJump"
+            : "/Script/FortniteGame.FortControllerComponent_Aircraft.ServerAttemptAircraftJump"), ServerAttemptAircraftJump);
+
+    AddHook("/Script/FortniteGame.FortGameModeAthena.OnAircraftExitedDropZone", OnAircraftExitedDropZone);
+    AddHook(FindObject("/Script/FortniteGame.FortAthenaVehicle.ServerUpdateStateSync") ? "/Script/FortniteGame.FortAthenaVehicle.ServerUpdateStateSync" 
+        : "/Script/FortniteGame.FortPhysicsPawn.ServerUpdateStateSync", ServerUpdateStateSync);
+
+    AddHook("/Script/FortniteGame.FortPawn.NetMulticast_InvokeGameplayCueExecuted_WithParams", UFuncRetTrue);
+
+    // /Script/FortniteGame.FortPlayerController:ServerDropAllItems
+
+    // AddHook("/Script/FortniteGame.BuildingActor.OnDeathServer", OnDeathServer);
+
+    AddHook("/Script/FortniteGame.FortPlayerPawn.ServerSendZiplineState", ServerSendZiplineState);
+    AddHook("/Script/FortniteGame.FortPlayerController.ServerPlayEmoteItem", ServerPlayEmoteItem);
+    AddHook("/Game/Abilities/Emotes/GAB_Emote_Generic.GAB_Emote_Generic_C.K2_OnEndAbility", onendabilitydance);
+    // Spawn pawns OURSELVES rather than via the native path. The native path calls
+    // GetAthenaLoadoutWithOverrides(), which needs an AthenaProfile over MCP — that lookup fails on
+    // this setup ("unable to load AthenaProfile" → "failed to spawn a pawn"), so nobody ever spawns.
+    // This hook just places PlayerPawn_Athena_C at a PlayerStart, which is all the native function
+    // does anyway, and it needs no profile.
+    // NOT gated on bHostCanPlay: networked players hit the same failure, so this is what finally
+    // lets ANYONE spawn.
+    AddHook("/Script/Engine.GameModeBase.SpawnDefaultPawnFor", SpawnDefaultPawnFor);
+    // AddHook("/Script/FortniteGame.FortPlayerController.ServerRepairBuildingActor", Build::ServerRepairBuildingActor);
+
+    // AddHook("/Script/FortniteGame.FortHeldObjectComponent.HandleOwnerAsBuildingActorDestroyed", HandleOwnerAsBuildingActorDestroyed);
+
+    // auto sigfgw4y = Memory::FindPattern("4C 8B DC 49 89 5B 20 55 56 57 48 83 EC 60 8A 81 ? ? ? ? 49 8B F8 48 8B DA 48 8B F1 3C 01 75 4A");
+
+    // MH_CreateHook((PVOID)sigfgw4y, AI::GetRandomLocationSafeToReach, (PVOID*)&AI::GetRandomLocationSafeToReachO);
+    // MH_EnableHook((PVOID)sigfgw4y);
+
+    // auto aF1F = (uintptr_t)(__int64(GetModuleHandleW(0)) + 0x2B6CD0);
+    // auto aF1F = Memory::FindPattern("48 83 EC 28 80 B9 ? ? ? ? ? 72 09 48 8B 01 FF 90 ? ? ? ? 32 C0 48 83 C4 28 C3");
+
+    // MH_CreateHook((PVOID)aF1F, rettrue, nullptr);
+    // MH_EnableHook((PVOID)aF1F);
+
+    preoffsets::DeathCause = FindOffsetStruct("ScriptStruct /Script/FortniteGame.DeathInfo", "DeathCause");
+    preoffsets::bInitialized = FindOffsetStruct("ScriptStruct /Script/FortniteGame.DeathInfo", "bInitialized");
+    preoffsets::FinisherOrDowner = FindOffsetStruct("ScriptStruct /Script/FortniteGame.DeathInfo", "FinisherOrDowner");
+    preoffsets::bDBNO = FindOffsetStruct("ScriptStruct /Script/FortniteGame.DeathInfo", "bDBNO");
+    preoffsets::Distance = FindOffsetStruct("ScriptStruct /Script/FortniteGame.DeathInfo", "Distance");
+    preoffsets::KillScore = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerStateAthena", "KillScore");
+    preoffsets::bMarkedAlive = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerControllerAthena", "bMarkedAlive");
+    preoffsets::TeamScorePlacement = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerStateAthena", "TeamScorePlacement");
+    preoffsets::TeamScore = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerStateAthena", "TeamScore");
+    preoffsets::Place = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerStateAthena", "Place");
+    preoffsets::AlivePlayers = FindOffsetStruct("Class /Script/FortniteGame.FortGameModeAthena", "AlivePlayers");
+    preoffsets::GamePhase = FindOffsetStruct("Class /Script/FortniteGame.FortGameStateAthena", "GamePhase");
+    preoffsets::WinningPlayerState = FindOffsetStruct("Class /Script/FortniteGame.FortGameStateAthena", "WinningPlayerState");
+    preoffsets::DeathInfo = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerStateAthena", "DeathInfo");
+    preoffsets::LastFallDistance = FindOffsetStruct("Class /Script/FortniteGame.FortPlayerPawnAthena", "LastFallDistance");
+    preoffsets::Tags = FindOffsetStruct("ScriptStruct /Script/FortniteGame.FortPlayerDeathReport", "Tags");
+    preoffsets::KillerPawn = FindOffsetStruct("ScriptStruct /Script/FortniteGame.FortPlayerDeathReport", "KillerPawn");
+    preoffsets::KillerPlayerState = FindOffsetStruct("ScriptStruct /Script/FortniteGame.FortPlayerDeathReport", "KillerPlayerState");
+    preoffsets::TeamsLeft = FindOffsetStruct("Class /Script/FortniteGame.FortGameStateAthena", "TeamsLeft");
+    preoffsets::DamageCauser = FindOffsetStruct("ScriptStruct /Script/FortniteGame.FortPlayerDeathReport", "DamageCauser");
+
+    /* auto ahh = Memory::FindPattern("49 8B 04 24 48 8D 55 F8 49 8B CC FF 50 28 84 C0 0F 84 ? ? ? ? 48 89 7D A8 48 89 7D B0 48 89");
+
+    for (int i = 0; i < 22; i++)
+    {
+        auto byte = (uint8_t*)(ahh + i);
+        std::cout << std::format("[{}] 0x{:x}\n", i, (int)*byte);
+
+        if (*byte == 0x0F)
+        {
+            std::cout << "foudn!\n";
+            *(uint8_t*)(ahh + i + 1) = 0x87;
+        }
+
+        //*byte = 0x0;
+    } */
+
+    srand(time(0));
+
+    return 0;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)
+{
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        CreateThread(0, 0, Initialize, 0, 0, 0);
+        break;
+    case DLL_PROCESS_DETACH:
+        MH_DisableHook(MH_ALL_HOOKS);
+        // Log::Shutdown();
+        break;
+    }
+    return TRUE;
+}
