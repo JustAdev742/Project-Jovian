@@ -15,11 +15,12 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import {
   Gamepad2, Library, ScrollText, Settings as SettingsIcon,
-  UserRound, LogOut, Radio, Wifi, WifiOff, Download,
+  UserRound, LogOut, Radio, Wifi, WifiOff, Download, AlertTriangle,
 } from "lucide-react";
 import { Mark } from "./ui/Mark";
 import { springSnappy, tween } from "./motion";
-import type { MeshRole } from "./useLauncher";
+import type { MeshRole, MeshStatus } from "./useLauncher";
+import type { ServiceHealth } from "./novaApi";
 import type { Session } from "./auth";
 import { clearSession } from "./auth";
 
@@ -31,8 +32,67 @@ const NAV = [
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
+/**
+ * Say which side is broken, before the player decides it's the app.
+ *
+ * Everything downstream of an unreachable coordinator looks the same from the player's chair —
+ * "Login Failed / Profile Query Failed", a match that never loads, hosting that never starts — and
+ * the obvious conclusion is that the launcher is broken. It usually isn't. The coordinator is one
+ * machine on a home connection, so when its link drops every player is cut off simultaneously.
+ *
+ * Two rules here:
+ *   • Never accuse the servers without evidence. `checking` renders nothing, so a slow first probe
+ *     can't flash a scary banner at someone whose connection is fine.
+ *   • Say what it means and what to do. "Coordinator unreachable" is jargon; "you won't be able to
+ *     sign in or join — this is not a problem with your PC" is the actual information.
+ *
+ * role="status" (polite) rather than "alert": this is ambient condition, not something demanding
+ * that a screen-reader user abandon what they're doing.
+ */
+function ServiceBanner({ health, mesh }: { health?: ServiceHealth; mesh?: MeshStatus | null }) {
+  const serversDown = health?.coordinator === "down";
+  // Only worth mentioning once the mesh has actually reported back and said no.
+  const meshDown = !serversDown && mesh != null && !mesh.connected;
+  if (!serversDown && !meshDown) return null;
+
+  const tone = serversDown
+    ? "border-danger/25 bg-danger/10 text-danger"
+    : "border-warn/25 bg-warn/10 text-warn";
+
+  return (
+    <div role="status" aria-live="polite" className={`shrink-0 border-b px-5 py-2.5 ${tone}`}>
+      <div className="flex items-start gap-2.5">
+        <AlertTriangle aria-hidden size={15} className="mt-[2px] shrink-0" />
+        <div className="min-w-0 text-xs leading-relaxed">
+          {serversDown ? (
+            <>
+              <span className="font-semibold">Project Nova’s servers are unreachable</span>
+              {health?.detail ? <span className="opacity-90"> — {health.detail}.</span> : "."}{" "}
+              <span className="opacity-90">
+                You won’t be able to sign in, join or host until they’re back. This isn’t a problem
+                with your PC or with Nova itself — the servers run on a single machine, so everyone
+                is affected at the same time. Nova keeps checking and will clear this by itself.
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="font-semibold">You’re not on the player network</span>
+              {mesh?.detail ? <span className="opacity-90"> — {mesh.detail}.</span> : "."}{" "}
+              <span className="opacity-90">
+                {mesh?.needsRestart
+                  ? "Restart this PC to finish setting it up, then press Play again."
+                  : "You can still play on this PC, but you can’t host for others and may not be able to join their matches."}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AppShell({
-  user, role, status, meshIp, updateReady, onUpdateClick, children,
+  user, role, status, meshIp, updateReady, onUpdateClick, health, mesh, children,
 }: {
   user: Session | null;
   role: MeshRole;
@@ -40,6 +100,8 @@ export default function AppShell({
   meshIp?: string | null;
   updateReady?: string | null;
   onUpdateClick?: () => void;
+  health?: ServiceHealth;
+  mesh?: MeshStatus | null;
   children: React.ReactNode;
 }) {
   const navigate = useNavigate();
@@ -144,6 +206,7 @@ export default function AppShell({
         {/* tabIndex={-1} so the skip link and the route-change handler can move focus here. Without
             a focusable target, "Skip to content" moves the scroll position but leaves the keyboard
             exactly where it was, which is worse than not having it. */}
+        <ServiceBanner health={health} mesh={mesh} />
         <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto scroll-fade-b outline-none">
           {children}
         </main>

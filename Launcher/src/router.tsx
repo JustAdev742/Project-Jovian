@@ -120,6 +120,8 @@ function Shell() {
               role={api.role}
               status={api.status}
               meshIp={api.mesh?.ip}
+              health={api.health}
+              mesh={api.mesh}
               updateReady={update.phase === "available" || update.phase === "ready" ? update.version ?? null : null}
               onUpdateClick={() => navigate("/settings")}
             >

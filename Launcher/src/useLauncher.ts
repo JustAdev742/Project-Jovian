@@ -16,9 +16,11 @@ import {
   AGENT_PORT,
   COORDINATOR,
   agentReady,
+  coordinatorReachable,
   localBackendReady,
   proxyIsForwarding,
 } from "./novaApi";
+import type { ServiceHealth } from "./novaApi";
 import type { Session } from "./auth";
 
 export const PLAYLIST = "Playlist_DefaultSolo";
@@ -94,6 +96,12 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
   const [injecting, setInjecting] = useState(false);
   const [playitAddr, setPlayitAddr] = useState("");
   const [mesh, setMesh] = useState<MeshStatus | null>(null);
+  /* Is the shared backend reachable from this PC?
+     Polled continuously rather than only at launch, because the honest answer changes on its own —
+     the coordinator runs on one machine on a home connection, and when its link drops every player
+     is cut off at once. Without this the launcher has nothing to say and the player reasonably
+     concludes the app is broken. See the banner in AppShell. */
+  const [health, setHealth] = useState<ServiceHealth>({ coordinator: "checking", detail: "" });
 
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const announceRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -795,9 +803,28 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     localStorage.setItem("p2pMode", String(next));
   }, []);
 
+  /* Poll the coordinator so the banner reflects now, not whenever Play was last pressed.
+     30s is a compromise: fast enough that a player who alt-tabs back sees the truth, slow enough
+     that it is not a meaningful load on a home-hosted box. Only runs in P2P mode — a single-PC
+     player has no coordinator to be cut off from, and telling them the servers are down would be
+     both false and alarming. */
+  useEffect(() => {
+    if (!p2pMode) { setHealth({ coordinator: "ok", detail: "" }); return; }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      const h = await coordinatorReachable();
+      if (cancelled) return;
+      setHealth(h);
+      timer = setTimeout(tick, 30_000);
+    };
+    void tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [p2pMode]);
+
   return {
     // state
-    path, setPath, builds, isLaunching, EOR, p2pMode, status, role, injecting, playitAddr, mesh,
+    path, setPath, builds, isLaunching, EOR, p2pMode, status, role, injecting, playitAddr, mesh, health,
     // actions
     launch, injectServer, registerHost, launchClient, addBuild, removeBuild,
     setPlayitAddr, toggleEOR, toggleP2p,

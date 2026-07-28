@@ -126,6 +126,41 @@ export async function agentReady(): Promise<"ok" | "stale" | "down"> {
 }
 
 /**
+ * Can this machine reach the Nova coordinator at all?
+ *
+ * Exists so the launcher can tell the player WHICH side is broken. Every visible failure downstream
+ * of a dead coordinator — "Login Failed / Profile Query Failed", a match that never loads, hosting
+ * that never starts — looks identical to a broken launcher from the player's chair, and the natural
+ * conclusion is that the app is at fault. It usually isn't: the coordinator is a single machine on a
+ * home connection, and when its link drops every player sees it at once.
+ *
+ * Deliberately does NOT care which route answered. Any HTTP reply proves the round trip works, which
+ * is the only question being asked here.
+ */
+export type ServiceHealth = {
+  /** `checking` only until the first probe lands, so the UI never accuses the servers on no evidence. */
+  coordinator: "checking" | "ok" | "down";
+  detail: string;
+};
+
+export async function coordinatorReachable(): Promise<ServiceHealth> {
+  try {
+    await axios.get(`${COORDINATOR}/nova/api/info`, { timeout: 8000 });
+    return { coordinator: "ok", detail: "" };
+  } catch (e: any) {
+    // Name the failure in the player's terms. "ECONNABORTED" tells them nothing; "took too long to
+    // answer" tells them it is a connection problem and not a crash.
+    const detail =
+      e?.code === "ECONNABORTED" || /timeout/i.test(String(e?.message))
+        ? "the servers took too long to answer"
+        : e?.response
+          ? `the servers replied with an error (${e.response.status})`
+          : "this PC can’t reach the servers";
+    return { coordinator: "down", detail };
+  }
+}
+
+/**
  * Is ANYTHING listening on 3551 — the address Fortnite actually talks to?
  *
  * Cobalt redirects every Epic domain to 127.0.0.1:3551, so this is not a nicety. With nothing there
