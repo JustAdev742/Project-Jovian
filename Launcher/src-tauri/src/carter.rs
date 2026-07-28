@@ -124,18 +124,26 @@ fn patch_local_engine_ini() -> Result<(), String> {
     patch_engine_ini_at(&engine_ini_path)
 }
 
-/// The BUILD's own config, inside the Fortnite folder.
+/// The BUILD's own config, inside the Fortnite folder. Belt-and-braces only — see the warning.
 ///
-/// This is where `ws://127.0.0.1:80` actually comes from. Repacked 7.40 builds ship a
-/// DefaultEngine.ini already pointed at 127.0.0.1 but with NO port, so ws:// falls back to its
-/// default of 80, nothing is listening there, and the client force-logs-out ~400ms after signing in.
-/// The launcher has only ever written the `:3551` form, so a portless address in a player's log can
-/// only have come from the build itself.
+/// CORRECTION (2026-07-28, from log evidence). An earlier version of this comment claimed the
+/// `ws://127.0.0.1:80` address came from the build shipping a portless DefaultEngine.ini. That was
+/// wrong. It came from the BACKEND's cloudstorage hotfix
+/// (`Main backend/data/cloudstorage/DefaultEngine.ini`), which specified port 80 explicitly and is
+/// applied by the client OVER every local config layer. Proven by two runs ten minutes apart on one
+/// machine: a 395-byte hotfix produced `Port=[80]`, and a 456-byte one produced `Port=[3551]`, with
+/// the Saved ini identical and verified in both.
 ///
-/// Saved/Config outranks this file, so patching both means EITHER landing is enough — a machine
-/// where the Saved write doesn't stick still gets a correct address from here. Non-fatal on purpose:
-/// the Saved patch is already verified and fatal, so failing to also patch the build (read-only
-/// install, game folder on a locked drive) is not a reason to refuse a launch that would work.
+/// So neither this function nor patch_local_engine_ini decides the XMPP address. Worse, this one is
+/// probably a no-op: the real DefaultEngine.ini lives inside the encrypted paks, and UE4's
+/// FPakPlatformFile prefers a pak entry over a loose file of the same name, so the file written here
+/// is likely never read at all.
+///
+/// It is kept because it is harmless and costs nothing, and because a future build without that pak
+/// entry would then be covered. It stays NON-FATAL for the same reason — failing to write a file
+/// that does not decide anything is not grounds to refuse a launch.
+///
+/// If XMPP is wrong, fix the hotfix. Do not add a third client-side patch location.
 fn patch_build_engine_ini(base: &std::path::Path) -> Result<(), String> {
     let mut p = base.to_path_buf();
     p.push("FortniteGame");
@@ -254,17 +262,24 @@ n.VerifyPeer=false
         std::fs::write(&engine_ini_path, &final_content)
             .map_err(|e| format!("Nova could not write Fortnite's Engine.ini ({e}). Close Fortnite and the Epic Games Launcher, then try again."))?;
 
-        // VERIFY. A write that "succeeded" is not the same as a file the game will read: antivirus
-        // and controlled-folder-access can silently discard it, and a sync client can restore the
-        // previous copy a moment later. Read it back and confirm our port is actually on disk.
+        // VERIFY. A write that "succeeded" is not the same as a file on disk: antivirus and
+        // controlled-folder-access can silently discard it, and a sync client can restore the
+        // previous copy a moment later. Read it back and confirm our port really landed.
         //
-        // This matters more than any other check here, because the failure is invisible and fatal.
-        // Without the patch the client falls back to the SHIPPED xmpp-service-prod address, Cobalt
-        // rewrites the host to 127.0.0.1, and the port defaults to the ws:// default of 80 — where
-        // nothing listens. The game logs `New XMPP connection configured to Server=[ws://127.0.0.1:80]`,
-        // the socket dies, and ~400ms later it reports `AppES: closing code 0` and force-logs-out
-        // with "Fortnite was not started correctly". That dialog blames the launcher; the real cause
-        // is this file. Fail here, loudly, instead of launching into a guaranteed logout.
+        // BUT KNOW WHAT THIS DOES AND DOESN'T PROVE. It confirms the file is correct; it does NOT
+        // confirm the game will use that value. The backend's cloudstorage hotfix
+        // (`/fortnite/api/cloudstorage/system/DefaultEngine.ini`) is applied over this layer at
+        // login, and the client reads the XMPP address lazily at connection time — so the hotfix
+        // wins whenever one is served. This check passed on every run of a machine that was still
+        // getting `Port=[80]` from the hotfix, which is exactly how it misled a long investigation.
+        //
+        // Kept because a machine that cannot write its own config is genuinely broken and worth
+        // stopping for, and because when NO hotfix arrives this file is the next layer down. Just do
+        // not read a pass here as "XMPP is correctly configured" — check what the backend serves.
+        //
+        // Also: `bVerifyPeer = true` early in FortniteGame.log is NOT evidence this patch failed. It
+        // logs `true` in runs that are working correctly, because libcurl initialises before the CVar
+        // layer is applied. It cost real time being read as a signal. It is not one.
         match std::fs::read_to_string(&engine_ini_path) {
             Ok(readback) if readback.contains("ServerAddr=\"ws://127.0.0.1:3551\"") => {
                 println!("Local Engine.ini patched and verified (XMPP -> 127.0.0.1:3551).");
