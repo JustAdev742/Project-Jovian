@@ -126,6 +126,27 @@ export async function agentReady(): Promise<"ok" | "stale" | "down"> {
 }
 
 /**
+ * Is ANYTHING listening on 3551 — the address Fortnite actually talks to?
+ *
+ * Cobalt redirects every Epic domain to 127.0.0.1:3551, so this is not a nicety. With nothing there
+ * the game gets "connect to 127.0.0.1 port 3551 failed: Connection refused" on every call, the
+ * hotfix stage never completes (it sits on "Patching"), auth ends in "No valid user", and the client
+ * force-logs-out with "Fortnite was not started correctly" — which reads as a launcher bug.
+ *
+ * P2P mode already proves its proxy is forwarding before launching. Single-PC mode proved nothing,
+ * so this is the equivalent guarantee for that path. It deliberately asks only "is someone home":
+ * proxy or standalone backend are both fine here, because either one gives the game a working 3551.
+ */
+export async function localBackendReady(): Promise<boolean> {
+  try {
+    await axios.get(`${BACKEND}/nova/api/info`, { timeout: 1500 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Confirm that 3551 really is the proxy, and that it really is reaching the coordinator.
  *
  * "Did the proxy process start" is not the same question. If a standalone backend already holds

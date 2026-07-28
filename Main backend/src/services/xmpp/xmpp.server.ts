@@ -202,6 +202,15 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
 
   console.log(`[XMPP-WS] connection: ${url} negotiated="${negotiated}" rawSubprotocol="${rawHeader}" -> ${isXmpp ? 'XMPP' : 'matchmaker'}`);
 
+  // Anything that is not XMPP falls through to the matchmaker.
+  //
+  // NOTE for whoever reads the routing counters next: across 39 upgrades the coordinator recorded
+  // rawSubprotocol="ws" (15), "wss" (11), "" (11) and "xmpp" (2). "ws"/"wss" are URL SCHEMES, not
+  // subprotocols, so it is tempting to conclude XMPP is being misrouted here. Do not act on that
+  // without evidence: Config.MMS_URL is also `ws://...`, so the matchmaker's own sockets are the
+  // likeliest source of those values, and inverting this default would break matchmaking to fix a
+  // guess. The client-side XMPP failure that looked like it pointed here turned out to be
+  // patch_local_engine_ini() failing on the player's machine — see carter.rs.
   if (!isXmpp) {
     handleMatchmaker(ws);
     return;

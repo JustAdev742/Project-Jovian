@@ -40,6 +40,48 @@ const gameServers = new Map<string, GameServerEntry>();
 /** A live (dynamic) server is dropped if it hasn't heartbeat within this window. */
 const DYNAMIC_TTL_MS = 60 * 1000;
 
+/**
+ * Mint a single-use Tailscale auth key, one per machine that asks.
+ *
+ * Replaces handing out one static key forever. Keys are created:
+ *   • single-use   — each machine gets its own, so there is no shared secret to leak or exhaust
+ *   • pre-approved — the device joins without an admin clicking Approve, which is the whole point
+ *                    of the launcher doing this silently
+ *   • NOT ephemeral — an ephemeral node is removed when it goes offline, which would drop a host
+ *                    from the tailnet the moment it closed the launcher
+ *   • 90 minutes   — long enough to cover a slow install-and-reboot, short enough that a key
+ *                    captured in a log is worthless by the time anyone reads it
+ *
+ * Accepts either a `tskey-api-…` access token or an OAuth client secret; both are Bearer tokens
+ * against the same endpoint. Tailnet "-" means "whichever tailnet owns this token".
+ */
+async function mintTailnetKey(): Promise<string> {
+  const url = `https://api.tailscale.com/api/v2/tailnet/${encodeURIComponent(Config.TS_TAILNET)}/keys`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${Config.TS_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      capabilities: { devices: { create: { reusable: false, ephemeral: false, preauthorized: true, tags: [] } } },
+      expirySeconds: 5400,
+      description: 'Project Nova launcher (auto-minted)',
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    // Read the body: Tailscale explains refusals properly (bad scope, unknown tailnet, tag policy),
+    // and "HTTP 403" on its own sends you looking in the wrong place.
+    const detail = await res.text().catch(() => '');
+    throw new Error(`Tailscale API ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+  }
+  const body: any = await res.json();
+  const key = body?.key;
+  if (typeof key !== 'string' || !key) throw new Error('Tailscale API returned no key');
+  return key;
+}
+
 function serverKey(address: string, port: number, playlist: string): string {
   return `${address}:${port}:${playlist}`;
 }
@@ -906,10 +948,33 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
    * Requires NOVA_TS_AUTHKEY to be set on the coordinator; the value is never logged.
    */
   fastify.get('/nova/api/tailnet-authkey', { preHandler: requireAuth }, async (_request, reply) => {
-    if (!Config.TS_AUTHKEY) {
-      return reply.status(503).send({ error: 'tailnet auth key not configured (set NOVA_TS_AUTHKEY on the coordinator)' });
+    // MINT A FRESH KEY PER MACHINE when an API token is available.
+    //
+    // A static NOVA_TS_AUTHKEY is single-use unless it was created reusable, and the admin console
+    // only offers that toggle when the key is generated. So the first PC to join consumes it and
+    // every machine afterwards fails at `tailscale up` — with no error the player can act on. The
+    // symptom is a launcher that works perfectly on one machine and cannot reach the mesh on any
+    // other, which reads as the mesh being broken rather than a key that has been spent.
+    //
+    // Minting sidesteps the whole problem: each machine gets its own key, so there is nothing to
+    // run out of and nothing to rotate by hand.
+    if (Config.TS_API_KEY) {
+      try {
+        const key = await mintTailnetKey();
+        return reply.send({ authKey: key, minted: true });
+      } catch (e: any) {
+        // Fall through to the static key rather than failing outright — a spent static key still
+        // works for a machine already on the tailnet, and a broken API token should not take the
+        // mesh down for everyone.
+        console.warn(`[Tailnet] could not mint a key (${e?.message || e}) — falling back to NOVA_TS_AUTHKEY`);
+      }
     }
-    return reply.send({ authKey: Config.TS_AUTHKEY });
+    if (!Config.TS_AUTHKEY) {
+      return reply.status(503).send({
+        error: 'tailnet auth key not configured — set NOVA_TS_API_KEY (preferred: mints a fresh key per machine) or NOVA_TS_AUTHKEY on the coordinator',
+      });
+    }
+    return reply.send({ authKey: Config.TS_AUTHKEY, minted: false });
   });
 
   // Back-compat: a listen-server that reports readiness maps onto a dynamic registration.

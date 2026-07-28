@@ -196,6 +196,16 @@ fn start_backend(
         // XMPP listener on port 80 would only risk a clash with whatever else wants it.
         cmd.env("NOVA_DISABLE_STANDALONE_XMPP", "1");
     }
+    {
+        // Stamp the LAUNCHER's version into the agent's environment so it appears in the log the
+        // agent writes.
+        //
+        // Every log shared for diagnosis so far has been silent about which build produced it. That
+        // has repeatedly meant guessing whether a reported failure came from a version containing
+        // the relevant fix or not — and guessing wrong costs a whole round trip. A log that cannot
+        // identify its own build is much less useful than it looks.
+        cmd.env("NOVA_LAUNCHER_VERSION", env!("CARGO_PKG_VERSION"));
+    }
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let child = cmd
         .spawn()

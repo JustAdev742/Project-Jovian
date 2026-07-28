@@ -16,6 +16,7 @@ import {
   AGENT_PORT,
   COORDINATOR,
   agentReady,
+  localBackendReady,
   proxyIsForwarding,
 } from "./novaApi";
 import type { Session } from "./auth";
@@ -414,6 +415,38 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
     try {
       if (!p2p) {
+        // SINGLE-PC MODE STILL NEEDS 3551. This path used to launch Fortnite immediately — no
+        // proxy, no backend, and no check that anything was listening. But Cobalt redirects every
+        // Epic domain to 127.0.0.1:3551 in BOTH modes, so a game started with that port empty is
+        // guaranteed to die: "connection refused" on every call, stuck on "Patching" while the
+        // hotfix enumeration fails, then "No valid user" and a force-logout reading "Fortnite was
+        // not started correctly". Nothing appears in the Logs tab either, because in this mode
+        // nothing was ever started to produce any. It looks like the launcher is broken.
+        //
+        // A restored session is what makes this reachable: sign-in reads localStorage without
+        // touching the network, so a player can be signed in, flip P2P off, press Play, and get
+        // here with no backend anywhere.
+        setStatus("Starting the local Nova backend…");
+        let localUp = await localBackendReady();
+        if (!localUp) {
+          await startBackend();
+          for (let i = 0; i < 30 && !localUp; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            localUp = await localBackendReady();
+          }
+        }
+        if (!localUp) {
+          fail(
+            "Nova's local backend didn't start",
+            "Fortnite reaches Nova on 127.0.0.1:3551, and nothing is listening there — the game would " +
+              "hang on the loading screen and then close itself. Check nova-agent.log next to the " +
+              "launcher, or turn on “Play with everyone” in Settings to use the Nova servers instead.",
+          );
+          setStatus("Not connected — nothing is listening on 3551.");
+          setRole("offline");
+          setIsLaunching(false);
+          return;
+        }
         await invoke("firstlaunch", { path: launchPath, accountId, token, eor: EOR });
         return;
       }
@@ -537,29 +570,48 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       // there is one source of truth for Fortnite's arguments). The backend then starts a server the
       // moment the IN-GAME Play press creates real demand with nothing to join, and stops it again
       // when nobody is matchmaking.
-      try {
-        const spec: any = await invoke("server_launch_spec", {
-          path: launchPath, accountId, token: token ?? "", eor: EOR,
-        });
-        const res = await fetch(`${AGENT}/nova/api/host/config`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ...spec,
-            port: 7777,
-            playlist: PLAYLIST,
-            region: REGION,
-            // The address OTHER players will be sent to. Loopback only reaches this machine, so
-            // without a mesh IP the match is effectively single-PC — which is why the fallback is
-            // reported below rather than passing silently.
-            address: meshIp || "127.0.0.1",
-            accountId,
-            name: user.displayName || "Nova host",
-          }),
-        });
-        if (!res.ok) throw new Error(`agent replied ${res.status}`);
-      } catch (e) {
-        setStatus("Note: couldn't hand hosting to this machine (" + String(e) + ") — you won't be able to host.");
+      // NEVER ADVERTISE LOOPBACK AS A HOST ADDRESS.
+      //
+      // This used to send `address: meshIp || "127.0.0.1"`. Everything from here on is P2P mode —
+      // the single-PC path returned long ago, and there 127.0.0.1 is genuinely right — so the
+      // fallback could only ever publish loopback to the GLOBAL coordinator. Any other player then
+      // gets handed 127.0.0.1, which resolves to their OWN machine, where no server is running.
+      //
+      // It fails in the worst possible way: matchmaking succeeds, the session is assigned, the game
+      // sits on the loading screen for its full connect timeout, and drops back to the lobby with no
+      // error. Meanwhile this machine is registered as a live host, so the coordinator keeps telling
+      // other players to stand down because a server already exists — one nobody can reach.
+      //
+      // Without a mesh IP this PC simply cannot host for anyone else, so say so and don't register.
+      // Joining still works: that only needs the OTHER machine to be reachable.
+      if (!meshIp) {
+        setRole("connected");
+        setStatus(
+          "This PC can’t host for other players (not on the player network) — you can still join matches.",
+        );
+      } else {
+        try {
+          const spec: any = await invoke("server_launch_spec", {
+            path: launchPath, accountId, token: token ?? "", eor: EOR,
+          });
+          const res = await fetch(`${AGENT}/nova/api/host/config`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...spec,
+              port: 7777,
+              playlist: PLAYLIST,
+              region: REGION,
+              // The address OTHER players are sent to. Only ever a mesh IP — see above.
+              address: meshIp,
+              accountId,
+              name: user.displayName || "Nova host",
+            }),
+          });
+          if (!res.ok) throw new Error(`agent replied ${res.status}`);
+        } catch (e) {
+          setStatus("Note: couldn't hand hosting to this machine (" + String(e) + ") — you won't be able to host.");
+        }
       }
 
       // Nothing has been decided yet. `decision` is a SNAPSHOT of the world as it looked a moment
