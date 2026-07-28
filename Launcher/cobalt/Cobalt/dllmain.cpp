@@ -122,18 +122,30 @@ bool InitializeCurlHook()
     // when one file fails, so that single escaped request threw away the other three and left the
     // client on its built-in XMPP address, which ends in "Fortnite was not started correctly".
     //
-    // MinHook writes a permanent inline trampoline: atomic, process-wide, no window, no re-arming.
-    // Recursion is not a concern here — CurlEasySetOptDetour calls CurlSetOpt (the lower-level
-    // Curl_vsetopt), which is a different function and is not hooked, so the detour never re-enters
-    // the patched wrapper and needs no trampoline pointer.
-    if (MH_CreateHook(CurlEasySetOpt, CurlEasySetOptDetour, nullptr) != MH_OK
-        || MH_EnableHook(CurlEasySetOpt) != MH_OK)
-    {
-        // Say so loudly. A silently unhooked curl means every Epic request escapes to the real
-        // servers, and the resulting failures all look like backend bugs.
-        std::cout << "[Cobalt] FATAL: could not install the inline curl hook — requests will NOT be redirected.\n";
-        return false;
-    }
+    // ── AND YET IT MUST STAY A VEH HOOK. DO NOT "FIX" THIS WITH MinHook/Detours. ─────────────────
+    //
+    // Tried exactly that (1.4.3) and it hard-crashed the game while loading the Frontend map, right
+    // as the login request burst begins. Reverted. The reason is the signature above:
+    //
+    //     89 54 24 10        mov  [rsp+10], edx      <-- the scan matches HERE
+    //     4C 89 44 24 18     mov  [rsp+18], r8
+    //     4C 89 4C 24 20     mov  [rsp+20], r9
+    //     48 83 EC 28        sub  rsp, 28
+    //
+    // That is the variadic home-register spill, and it starts at the SECOND argument. The real entry
+    // to curl_easy_setopt is a few bytes earlier, at `48 89 4C 24 08` (mov [rsp+8], rcx) for the
+    // first argument. So CurlEasySetOptAddr is an address INSIDE the function, not its start.
+    //
+    // A page-guard hook does not care: it compares RIP and redirects when execution reaches that
+    // address, which it always does because the prologue is straight-line. An INLINE hook cares
+    // enormously — it writes a 5-byte jump over mid-prologue instructions and builds its trampoline
+    // from a function that has already partly executed with a stack frame that does not match. Hence
+    // the crash.
+    //
+    // Making this inline safely means first resolving the true function entry, which the signature
+    // does not give us. Until someone does that, the VEH race described above is the lesser evil: an
+    // occasional lost request is survivable, a crash on every launch is not.
+    Hook(CurlEasySetOpt, CurlEasySetOptDetour);
 
     return true;
 }
