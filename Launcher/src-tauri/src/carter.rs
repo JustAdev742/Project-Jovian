@@ -111,15 +111,42 @@ fn repair_client_display_settings() {
 /// Returns an error the player can act on. Every launch path propagates it rather than launching
 /// anyway — see the verification block below for why an unpatched ini is fatal rather than degraded.
 fn patch_local_engine_ini() -> Result<(), String> {
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let mut engine_ini_path = std::path::PathBuf::from(local_app_data);
-        engine_ini_path.push("FortniteGame");
-        engine_ini_path.push("Saved");
-        engine_ini_path.push("Config");
-        engine_ini_path.push("WindowsClient");
-        engine_ini_path.push("Engine.ini");
+    let local_app_data = std::env::var("LOCALAPPDATA").map_err(|_| {
+        "Windows did not report a LOCALAPPDATA folder, so Nova cannot find Fortnite's config."
+            .to_string()
+    })?;
+    let mut engine_ini_path = std::path::PathBuf::from(local_app_data);
+    engine_ini_path.push("FortniteGame");
+    engine_ini_path.push("Saved");
+    engine_ini_path.push("Config");
+    engine_ini_path.push("WindowsClient");
+    engine_ini_path.push("Engine.ini");
+    patch_engine_ini_at(&engine_ini_path)
+}
 
-        println!("Patching local Engine.ini at: {:?}", engine_ini_path);
+/// The BUILD's own config, inside the Fortnite folder.
+///
+/// This is where `ws://127.0.0.1:80` actually comes from. Repacked 7.40 builds ship a
+/// DefaultEngine.ini already pointed at 127.0.0.1 but with NO port, so ws:// falls back to its
+/// default of 80, nothing is listening there, and the client force-logs-out ~400ms after signing in.
+/// The launcher has only ever written the `:3551` form, so a portless address in a player's log can
+/// only have come from the build itself.
+///
+/// Saved/Config outranks this file, so patching both means EITHER landing is enough — a machine
+/// where the Saved write doesn't stick still gets a correct address from here. Non-fatal on purpose:
+/// the Saved patch is already verified and fatal, so failing to also patch the build (read-only
+/// install, game folder on a locked drive) is not a reason to refuse a launch that would work.
+fn patch_build_engine_ini(base: &std::path::Path) -> Result<(), String> {
+    let mut p = base.to_path_buf();
+    p.push("FortniteGame");
+    p.push("Config");
+    p.push("DefaultEngine.ini");
+    patch_engine_ini_at(&p)
+}
+
+fn patch_engine_ini_at(engine_ini_path: &std::path::Path) -> Result<(), String> {
+    {
+        println!("Patching Engine.ini at: {:?}", engine_ini_path);
 
         let xmpp_sections = "
 [OnlineSubsystemMcp.Xmpp]
@@ -253,9 +280,6 @@ n.VerifyPeer=false
                 "Nova patched Fortnite's Engine.ini but could not read it back to confirm ({e})."
             )),
         }
-    } else {
-        Err("Windows did not report a LOCALAPPDATA folder, so Nova cannot find Fortnite's config."
-            .to_string())
     }
 }
 
@@ -881,6 +905,11 @@ pub async fn launch_fn(
     headless: bool,
 ) -> Result<bool, String> {
     patch_local_engine_ini()?;
+    // Also patch the build's own DefaultEngine.ini. Non-fatal: the Saved patch above is the
+    // verified one, and this is the belt-and-braces copy that survives a Saved write not sticking.
+    if let Err(e) = patch_build_engine_ini(std::path::Path::new(path)) {
+        eprintln!("[Engine.ini] build config not patched (harmless if Saved patch landed): {}", e);
+    }
     // Only for the window the PLAYER sees. The headless server has no display to get wrong, and it is
     // the thing that breaks these settings in the first place.
     if !headless {
@@ -1012,6 +1041,11 @@ pub async fn launch_server_only(
     // written by launch_fn, so a host whose flow reached the server launch first ran against
     // whatever Engine.ini happened to be on disk.
     patch_local_engine_ini()?;
+    // Also patch the build's own DefaultEngine.ini. Non-fatal: the Saved patch above is the
+    // verified one, and this is the belt-and-braces copy that survives a Saved write not sticking.
+    if let Err(e) = patch_build_engine_ini(std::path::Path::new(path)) {
+        eprintln!("[Engine.ini] build config not patched (harmless if Saved patch landed): {}", e);
+    }
 
     let fort_args = build_fortnite_args(&account_id, &token, eor, true);
 
@@ -1056,6 +1090,11 @@ pub async fn launch_client_only(
 
     // Same reason as launch_server_only: this path can be the first one to start a game process.
     patch_local_engine_ini()?;
+    // Also patch the build's own DefaultEngine.ini. Non-fatal: the Saved patch above is the
+    // verified one, and this is the belt-and-braces copy that survives a Saved write not sticking.
+    if let Err(e) = patch_build_engine_ini(std::path::Path::new(path)) {
+        eprintln!("[Engine.ini] build config not patched (harmless if Saved patch landed): {}", e);
+    }
     repair_client_display_settings();
 
     let fort_args = build_fortnite_args(&account_id, &token, eor, false);
