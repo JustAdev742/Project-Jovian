@@ -570,29 +570,48 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       // there is one source of truth for Fortnite's arguments). The backend then starts a server the
       // moment the IN-GAME Play press creates real demand with nothing to join, and stops it again
       // when nobody is matchmaking.
-      try {
-        const spec: any = await invoke("server_launch_spec", {
-          path: launchPath, accountId, token: token ?? "", eor: EOR,
-        });
-        const res = await fetch(`${AGENT}/nova/api/host/config`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ...spec,
-            port: 7777,
-            playlist: PLAYLIST,
-            region: REGION,
-            // The address OTHER players will be sent to. Loopback only reaches this machine, so
-            // without a mesh IP the match is effectively single-PC — which is why the fallback is
-            // reported below rather than passing silently.
-            address: meshIp || "127.0.0.1",
-            accountId,
-            name: user.displayName || "Nova host",
-          }),
-        });
-        if (!res.ok) throw new Error(`agent replied ${res.status}`);
-      } catch (e) {
-        setStatus("Note: couldn't hand hosting to this machine (" + String(e) + ") — you won't be able to host.");
+      // NEVER ADVERTISE LOOPBACK AS A HOST ADDRESS.
+      //
+      // This used to send `address: meshIp || "127.0.0.1"`. Everything from here on is P2P mode —
+      // the single-PC path returned long ago, and there 127.0.0.1 is genuinely right — so the
+      // fallback could only ever publish loopback to the GLOBAL coordinator. Any other player then
+      // gets handed 127.0.0.1, which resolves to their OWN machine, where no server is running.
+      //
+      // It fails in the worst possible way: matchmaking succeeds, the session is assigned, the game
+      // sits on the loading screen for its full connect timeout, and drops back to the lobby with no
+      // error. Meanwhile this machine is registered as a live host, so the coordinator keeps telling
+      // other players to stand down because a server already exists — one nobody can reach.
+      //
+      // Without a mesh IP this PC simply cannot host for anyone else, so say so and don't register.
+      // Joining still works: that only needs the OTHER machine to be reachable.
+      if (!meshIp) {
+        setRole("connected");
+        setStatus(
+          "This PC can’t host for other players (not on the player network) — you can still join matches.",
+        );
+      } else {
+        try {
+          const spec: any = await invoke("server_launch_spec", {
+            path: launchPath, accountId, token: token ?? "", eor: EOR,
+          });
+          const res = await fetch(`${AGENT}/nova/api/host/config`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...spec,
+              port: 7777,
+              playlist: PLAYLIST,
+              region: REGION,
+              // The address OTHER players are sent to. Only ever a mesh IP — see above.
+              address: meshIp,
+              accountId,
+              name: user.displayName || "Nova host",
+            }),
+          });
+          if (!res.ok) throw new Error(`agent replied ${res.status}`);
+        } catch (e) {
+          setStatus("Note: couldn't hand hosting to this machine (" + String(e) + ") — you won't be able to host.");
+        }
       }
 
       // Nothing has been decided yet. `decision` is a SNAPSHOT of the world as it looked a moment

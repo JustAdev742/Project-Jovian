@@ -114,6 +114,17 @@ export const Config = {
    *  Generate a REUSABLE + EPHEMERAL + PRE-APPROVED key in the Tailscale admin console and set it
    *  as NOVA_TS_AUTHKEY. Empty = the mesh stays off and the launcher falls back to the old flow. */
   TS_AUTHKEY: process.env.NOVA_TS_AUTHKEY || '',
+  /** Tailscale API access token (`tskey-api-…`) or OAuth client secret.
+   *
+   *  PREFERRED over TS_AUTHKEY. A plain auth key is SINGLE-USE unless it was explicitly created
+   *  reusable, so the first machine that joins consumes it and every machine after that silently
+   *  fails to reach the mesh — which looks like the mesh being broken rather than a spent key.
+   *  With this set, the coordinator mints a FRESH key per request instead, so every machine gets
+   *  its own and there is nothing to run out of. */
+  TS_API_KEY: process.env.NOVA_TS_API_KEY || '',
+  /** Tailnet to mint keys for. "-" means "the tailnet that owns the token", which is what you want
+   *  unless the token belongs to more than one. */
+  TS_TAILNET: process.env.NOVA_TS_TAILNET || '-',
   /** How long (ms) an announced machine stays "available to host" without re-announcing. */
   MESH_CANDIDATE_TTL_MS: parseInt(process.env.NOVA_MESH_TTL_MS || '90000', 10),
   /** How long (ms) to defer electing a weaker machine while a materially better one might step up.
