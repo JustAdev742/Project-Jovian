@@ -95,15 +95,44 @@ bool InitializeCurlHook()
     CurlEasySetOpt = decltype(CurlEasySetOpt)(CurlEasySetOptAddr);
     CurlSetOpt = decltype(CurlSetOpt)(CurlSetOptAddr);
 
-    if (FindPushWidget())
+    // ── THE CURL HOOK MUST BE INLINE, NOT VEH ────────────────────────────────────────────────────
+    //
+    // This used to pick a hooking method based on FindPushWidget(). On 7.40 that signature never
+    // matches — every startup logs "Failed to find PushWidget (This may be fine)!" — so it always
+    // took the VEH path. And a VEH hook here is not merely slower, it is WRONG:
+    //
+    //   • VEHHook arms a PAGE_GUARD on the target. PAGE_GUARD is a ONE-SHOT alarm: the kernel clears
+    //     the guard bit the moment it raises the exception, so from that instant the function is
+    //     unhooked.
+    //   • The guard bit lives in the PAGE TABLE, not the thread. Clearing it unhooks the function
+    //     for EVERY thread in the process at once.
+    //   • Re-arming is deferred to a second exception (STATUS_SINGLE_STEP) on the faulting thread.
+    //     If that thread is descheduled in between, the hole stays open for a scheduler quantum.
+    //   • The guard covers the whole 4KB page, so every call to any neighbouring libcurl function
+    //     also knocks it down.
+    //
+    // UE4 issues ~25-30 curl_easy_setopt calls per request from more than one thread, and Fortnite
+    // fetches its four hotfix .ini files back-to-back in the same millisecond. Any call landing in
+    // one of those holes runs the REAL curl_easy_setopt, so its URL is never rewritten and it leaves
+    // the machine for Epic's live servers.
+    //
+    // Observed exactly once in a four-file batch: three files were redirected and logged, the fourth
+    // (DefaultRuntimeOptions.ini) was not logged at all and came back 401 "Token is missing key ID
+    // value" — Epic's own error text, from Epic's own servers. UE4 discards the ENTIRE hotfix batch
+    // when one file fails, so that single escaped request threw away the other three and left the
+    // client on its built-in XMPP address, which ends in "Fortnite was not started correctly".
+    //
+    // MinHook writes a permanent inline trampoline: atomic, process-wide, no window, no re-arming.
+    // Recursion is not a concern here — CurlEasySetOptDetour calls CurlSetOpt (the lower-level
+    // Curl_vsetopt), which is a different function and is not hooked, so the detour never re-enters
+    // the patched wrapper and needs no trampoline pointer.
+    if (MH_CreateHook(CurlEasySetOpt, CurlEasySetOptDetour, nullptr) != MH_OK
+        || MH_EnableHook(CurlEasySetOpt) != MH_OK)
     {
-        DetoursEasy(CurlEasySetOpt, CurlEasySetOptDetour);
-    }
-    else
-    {
-        // TODO find a better way to "bypass" UAC (aka switch off VEH hooks)
-
-        Hook(CurlEasySetOpt, CurlEasySetOptDetour);
+        // Say so loudly. A silently unhooked curl means every Epic request escapes to the real
+        // servers, and the resulting failures all look like backend bugs.
+        std::cout << "[Cobalt] FATAL: could not install the inline curl hook — requests will NOT be redirected.\n";
+        return false;
     }
 
     return true;
@@ -200,11 +229,21 @@ DWORD WINAPI Main(LPVOID)
     std::cout << "Memcury - https://github.com/kem0x/Memcury\n";
     std::cout << "Neonite++ for most of the signatures and curl hook - https://github.com/PeQuLeaks/NeonitePP-Fixed/tree/1.4\n\n";
 
-#ifdef USE_MINHOOK
+    // BOTH engines come up, deliberately — this block used to pick one via USE_MINHOOK.
+    //
+    // MinHook is now required unconditionally: the curl hook has to be an INLINE hook, and nothing
+    // else will do (see InitializeCurlHook for the full reasoning).
+    //
+    // VEH still has to be initialised too, because Hook() falls through to VEHHook::AddHook and
+    // FixMemoryLeak() still goes through Hook(). That one is an 8.51 signature which does not match
+    // on 7.40, so in practice it installs nothing here — but it is live code, and leaving VEH
+    // uninitialised would arm a hook against a handler that was never registered the moment anyone
+    // runs this on a build where the signature DOES match.
+    //
+    // The exit hooks are not affected either way: they use DetoursEasy. The VEHHook::AddHook calls
+    // alongside them are inside a /* */ block and have not been live.
     MH_Initialize();
-#else
     Memcury::VEHHook::Init();
-#endif
 
     bool curlResult = InitializeCurlHook();
     InitializeEOSCurlHook();
