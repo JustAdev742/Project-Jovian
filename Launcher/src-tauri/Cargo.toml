@@ -1,6 +1,6 @@
 [package]
 name = "sololauncher"
-version = "1.4.0"
+version = "1.4.1"
 description = "solo Launcher"
 authors = ["secret_Project"]
 edition = "2021"

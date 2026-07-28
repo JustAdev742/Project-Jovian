@@ -26,6 +26,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const http = require('http');
 const httpProxy = require('http-proxy');
+const { Readable, PassThrough } = require('stream');
 
 const PORT = parseInt(process.env.NOVA_PROXY_PORT || '3551', 10);
 const HOST = process.env.NOVA_PROXY_HOST || '127.0.0.1';
@@ -60,30 +61,109 @@ const toAgent = httpProxy.createProxyServer({
   proxyTimeout: 15000,
 });
 
-function onError(label) {
-  return (err, req, res) => {
-    const where = req && req.url ? req.url : '(ws)';
-    console.error(`[nova-proxy] ${label} error for ${where}: ${err.message}`);
-    try {
-      if (res && res.writeHead && !res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `nova-proxy ${label} error`, detail: err.message }));
-      } else if (res && res.destroy) {
-        res.destroy();
-      }
-    } catch { /* ignore */ }
-  };
+function fail(label, err, req, res) {
+  const where = req && req.url ? req.url : '(ws)';
+  console.error(`[nova-proxy] ${label} error for ${where}: ${err.message}`);
+  try {
+    if (res && res.writeHead && !res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `nova-proxy ${label} error`, detail: err.message }));
+    } else if (res && res.destroy) {
+      res.destroy();
+    }
+  } catch { /* ignore */ }
 }
 
-toCoordinator.on('error', onError('upstream'));
-toAgent.on('error', onError('local agent'));
+toCoordinator.on('error', (err, req, res) => fail('upstream', err, req, res));
+toAgent.on('error', (err, req, res) => fail('local agent', err, req, res));
+
+/* ── Retrying a connection that never landed ─────────────────────────────────────────────────────
+   A single transient hiccup on the way to the coordinator used to end the player's session. The
+   game saw:
+
+     HTTP 502 {"error":"nova-proxy upstream error",
+               "detail":"Client network socket disconnected before secure TLS connection was established"}
+
+   and turned it into "Login Failed — Profile Query Failed", because QueryProfile is not optional:
+   fail it once during sign-in and the client gives up entirely.
+
+   That specific error is worth reading carefully. The socket died BEFORE the TLS handshake finished,
+   which means the request was never delivered — the coordinator never saw it, never parsed it, never
+   ran it. So replaying it cannot double-apply anything, even though these are POSTs. That is what
+   makes retrying safe here, and it is the only reason a blanket POST retry is defensible: we retry
+   exclusively on connection-level failures raised before any response byte arrived.
+
+   Not retried: anything the coordinator actually answered (it made a decision — respect it), and
+   anything that failed after we had already begun writing a response to the game. */
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [120, 400];
+/** Bodies above this are streamed straight through without buffering, so they cannot be replayed. */
+const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
+
+const RETRYABLE_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE',
+  'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'ENOTFOUND', 'ERR_STREAM_PREMATURE_CLOSE',
+]);
+
+function isRetryable(err) {
+  if (!err) return false;
+  if (RETRYABLE_CODES.has(err.code)) return true;
+  // Node raises the mid-handshake reset with no useful code — only this message.
+  return /socket disconnected before secure TLS connection/i.test(err.message || '');
+}
+
+function sendUpstream(req, res, body, attempt) {
+  // `buffer` makes http-proxy pipe THIS instead of `req` — which is what allows a replay at all,
+  // since `req` itself has already been consumed by the time the first attempt fails.
+  const opts = body === null ? {} : { buffer: Readable.from(body.length ? [body] : []) };
+  toCoordinator.web(req, res, opts, (err) => {
+    if (!err) return;
+    const canRetry = attempt < MAX_ATTEMPTS && body !== null && isRetryable(err) && !res.headersSent;
+    if (canRetry) {
+      const delay = RETRY_DELAYS_MS[attempt - 1] || 400;
+      console.warn(`[nova-proxy] upstream ${err.code || 'reset'} for ${req.url} — retry ${attempt}/${MAX_ATTEMPTS - 1} in ${delay}ms`);
+      setTimeout(() => sendUpstream(req, res, body, attempt + 1), delay);
+      return;
+    }
+    fail('upstream', err, req, res);
+  });
+}
 
 const server = http.createServer((req, res) => {
   if (isLocal(req.url)) {
     toAgent.web(req, res);
-  } else {
-    toCoordinator.web(req, res);
+    return;
   }
+  // Buffer the body so a failed attempt can be replayed. These are small JSON payloads.
+  //
+  // Anything large is forwarded as a plain stream and simply isn't retried — but it MUST still be
+  // forwarded intact. Discarding buffered chunks and falling back to piping `req` would silently
+  // truncate the body, because by then `req` has already been read.
+  const declared = parseInt(req.headers['content-length'] || '0', 10);
+  if (declared > MAX_REPLAY_BYTES) {
+    sendUpstream(req, res, null, MAX_ATTEMPTS); // stream through, no replay
+    return;
+  }
+
+  const chunks = [];
+  let size = 0;
+  let overflow = null; // a PassThrough carrying everything, once we know we can't replay
+  req.on('data', (c) => {
+    if (overflow) return; // already piping straight through
+    size += c.length;
+    chunks.push(c);
+    if (size > MAX_REPLAY_BYTES) {
+      // Chunked body with no content-length that turned out to be huge. Replay what we've read into
+      // a passthrough and let the rest flow into it, so the upstream still receives every byte.
+      overflow = new PassThrough();
+      for (const b of chunks) overflow.write(b);
+      chunks.length = 0;
+      req.pipe(overflow);
+      toCoordinator.web(req, res, { buffer: overflow }, (err) => { if (err) fail('upstream', err, req, res); });
+    }
+  });
+  req.on('end', () => { if (!overflow) sendUpstream(req, res, Buffer.concat(chunks), 1); });
+  req.on('error', (err) => fail('upstream', err, req, res));
 });
 
 // WebSocket upgrades (the XMPP socket + the MMS matchmaker socket both arrive here). These are the
