@@ -16,6 +16,7 @@ import {
   AGENT_PORT,
   COORDINATOR,
   agentReady,
+  localBackendReady,
   proxyIsForwarding,
 } from "./novaApi";
 import type { Session } from "./auth";
@@ -414,6 +415,38 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
     try {
       if (!p2p) {
+        // SINGLE-PC MODE STILL NEEDS 3551. This path used to launch Fortnite immediately — no
+        // proxy, no backend, and no check that anything was listening. But Cobalt redirects every
+        // Epic domain to 127.0.0.1:3551 in BOTH modes, so a game started with that port empty is
+        // guaranteed to die: "connection refused" on every call, stuck on "Patching" while the
+        // hotfix enumeration fails, then "No valid user" and a force-logout reading "Fortnite was
+        // not started correctly". Nothing appears in the Logs tab either, because in this mode
+        // nothing was ever started to produce any. It looks like the launcher is broken.
+        //
+        // A restored session is what makes this reachable: sign-in reads localStorage without
+        // touching the network, so a player can be signed in, flip P2P off, press Play, and get
+        // here with no backend anywhere.
+        setStatus("Starting the local Nova backend…");
+        let localUp = await localBackendReady();
+        if (!localUp) {
+          await startBackend();
+          for (let i = 0; i < 30 && !localUp; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            localUp = await localBackendReady();
+          }
+        }
+        if (!localUp) {
+          fail(
+            "Nova's local backend didn't start",
+            "Fortnite reaches Nova on 127.0.0.1:3551, and nothing is listening there — the game would " +
+              "hang on the loading screen and then close itself. Check nova-agent.log next to the " +
+              "launcher, or turn on “Play with everyone” in Settings to use the Nova servers instead.",
+          );
+          setStatus("Not connected — nothing is listening on 3551.");
+          setRole("offline");
+          setIsLaunching(false);
+          return;
+        }
         await invoke("firstlaunch", { path: launchPath, accountId, token, eor: EOR });
         return;
       }
