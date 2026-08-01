@@ -298,9 +298,29 @@ bool InitializeCurlHook()
 
 void InitializeExitHook()
 {
+    // ── DO NOT GATE THE ANTI-TAMPER HOOKS ON FindPushWidget() ────────────────────────────────────
+    //
+    // This function used to be `if (!FindPushWidget()) { log; /*dead code*/ return; }` followed by the
+    // hooks. FindPushWidget() NEVER matches on 7.40 — every single startup logs "Failed to find
+    // PushWidget (This may be fine)!", 58 sessions and counting — so the early return fired every
+    // time and NOTHING BELOW EVER RAN. The anti-tamper hooks have never been installed on this build.
+    //
+    // That is not cosmetic. UnsafeEnvironmentPopupHook is what suppresses the popup behind
+    //     "Fortnite was not started correctly and needs to be closed."
+    // Unhooked, the anti-tamper verdict goes through untouched and force-logs the player out to the
+    // login screen mid-session. That is a failure we chased for two sessions while the suppression it
+    // needed sat behind a dead branch.
+    //
+    // It also made the diagnosis actively misleading: "Failed to find UnsafeEnvironmentPopupAddr"
+    // never appeared in any log, which reads like the scan SUCCEEDED. It never ran.
+    //
+    // The scans below are safe to run unconditionally: each has fallback signatures and, since the
+    // null guards were added, hooks only what it actually resolves. Worst case on a build where
+    // nothing matches is exactly today's behaviour, plus an honest log line.
     if (!FindPushWidget())
     {
-        std::cout << "Failed to find PushWidget (This may be fine)!\n";
+        std::cout << "PushWidget signature not present on this build (expected on 7.40) - installing "
+                     "the anti-tamper hooks anyway.\n";
 
         /*
         auto RequestExitWithStatusAddr = sigscan("40 53 48 83 EC 40 80 3D ? ? ? ? ? 0F B6 D9 72 3A 48 8B 05"); // S9
@@ -328,8 +348,7 @@ void InitializeExitHook()
         }
         */
 
-
-        return;
+        // NO `return;` here any more — fall through to the hooks below. See the comment above.
     }
 
     auto UnsafeEnvironmentPopupAddr = sigscan("4C 8B DC 55 49 8D AB ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 89 73 F0 49 89 7B E8 48 8B F9 4D 89 63 E0 4D 8B E0 4D 89 6B D8");
@@ -374,10 +393,16 @@ void InitializeExitHook()
     // NULL target — which quietly does nothing (or worse) while the log above says "this may be fine".
     // Only hook what we actually found.
     if (UnsafeEnvironmentPopupAddr)
+    {
         DetoursEasy(UnsafeEnvironmentPopupAddr, UnsafeEnvironmentPopupHook);
+        std::cout << "Anti-tamper: UnsafeEnvironmentPopup suppressed.\n";
+    }
 
     if (RequestExitWithStatusAddr)
+    {
         DetoursEasy(RequestExitWithStatusAddr, RequestExitWithStatusHook);
+        std::cout << "Anti-tamper: RequestExitWithStatus suppressed.\n";
+    }
 }
 
 DWORD WINAPI Main(LPVOID)
