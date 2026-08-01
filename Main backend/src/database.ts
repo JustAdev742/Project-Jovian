@@ -1,23 +1,102 @@
-// @ts-ignore
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
+import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 // Node's crypto, explicitly — the bare global `crypto` is Web Crypto, which has no scrypt.
 import * as crypto from 'crypto';
 import { Config } from './config';
 import { generateUUID } from './utils/uuid';
 
-let db: SqlJsDatabase;
+/* ── Storage engine ──────────────────────────────────────────────────────────────────────────────
+   better-sqlite3, replacing sql.js. Same nova.db file, same SQL, completely different write path.
 
-export async function initDatabase(): Promise<SqlJsDatabase> {
-  const SQL = await initSqlJs();
+   sql.js held the ENTIRE database in memory and, on every persist, serialised all of it with
+   db.export() and rewrote the whole file. That work ran on Node's single event loop thread, so its
+   cost scaled with total database size rather than with the size of the change — one account
+   updating one field rewrote everyone's data. It capped the coordinator at a few hundred players no
+   matter what hardware it ran on, which is why a bigger VPS would not have helped.
 
-  // Load existing DB file if present
-  if (fs.existsSync(Config.DB_PATH)) {
-    const buffer = fs.readFileSync(Config.DB_PATH);
-    db = new SQL.Database(buffer);
-  } else {
-    db = new SQL.Database();
-  }
+   better-sqlite3 writes only the pages that changed, so a save costs what the change costs. It also
+   reads the existing file as-is: no migration, no export/import, existing installs just open.
+
+   THE SHIM BELOW IS DELIBERATE. sql.js's `run`/`exec` signatures and its `[{columns, values}]`
+   result shape are used at ~78 call sites across this file, and `values` is an array of POSITIONAL
+   arrays that 41 of them index directly. Reproducing that shape means those call sites — and every
+   one of the 54 exported functions, and the 17 files importing them — stay exactly as they are.
+   Rewriting them by hand would have been 78 independent chances to introduce a silent bug for no
+   behavioural gain. */
+
+type ExecResult = { columns: string[]; values: any[][] };
+
+interface SqlShim {
+  /** Multi-statement DDL when called without params; a single parameterised statement with them. */
+  run(sql: string, params?: any[]): void;
+  /** SELECT → sql.js's shape. Empty array when nothing matched, exactly as sql.js returned. */
+  exec(sql: string, params?: any[]): ExecResult[];
+  close(): void;
+}
+
+let raw: Database.Database;
+let db: SqlShim;
+
+/**
+ * better-sqlite3 throws on `undefined` bindings where sql.js quietly treated them as NULL.
+ * Existing callers rely on the lenient behaviour, so normalise rather than make 78 sites defensive.
+ * Booleans get the same treatment: SQLite has no boolean type and better-sqlite3 refuses them,
+ * while sql.js coerced silently.
+ */
+function bindable(params: any[]): any[] {
+  return params.map((p) => {
+    if (p === undefined) return null;
+    if (typeof p === 'boolean') return p ? 1 : 0;
+    return p;
+  });
+}
+
+export async function initDatabase(): Promise<SqlShim> {
+  fs.mkdirSync(path.dirname(Config.DB_PATH), { recursive: true });
+  raw = new Database(Config.DB_PATH);
+
+  // WAL: readers stop blocking the writer, and a crash can't leave a torn page in the main file.
+  // The old code hand-rolled crash safety with a temp-file-and-rename around a full export; the
+  // engine does it properly, per transaction, without rewriting anything untouched.
+  raw.pragma('journal_mode = WAL');
+  // NORMAL, not FULL: still crash-safe under WAL, without an fsync per commit. FULL only adds
+  // protection against sudden power loss, which is not worth the cost on a player's gaming PC.
+  raw.pragma('synchronous = NORMAL');
+  raw.pragma('foreign_keys = ON');
+
+  // Prepared statements are cached by SQL text. Re-preparing identical SQL on every call is pure
+  // parse overhead, and this file runs the same handful of queries constantly.
+  const cache = new Map<string, Database.Statement>();
+  const prepare = (sql: string): Database.Statement => {
+    let s = cache.get(sql);
+    if (!s) { s = raw.prepare(sql); cache.set(sql, s); }
+    return s;
+  };
+
+  db = {
+    run(sql: string, params?: any[]): void {
+      // No params means schema work — and the schema here arrives as multi-statement blocks, which
+      // prepare() cannot take. exec() handles both cases.
+      if (params === undefined) { raw.exec(sql); return; }
+      prepare(sql).run(...bindable(params));
+    },
+
+    exec(sql: string, params: any[] = []): ExecResult[] {
+      const stmt = prepare(sql);
+      // A non-reader statement returns no columns; asking for them throws. sql.js returned [] for
+      // these, so match it.
+      if (!stmt.reader) { stmt.run(...bindable(params)); return []; }
+      const values = stmt.raw().all(...bindable(params)) as any[][];
+      // IMPORTANT: raw mode is sticky on the cached statement. Clear it, or a later caller reusing
+      // this SQL gets arrays where it expects objects.
+      stmt.raw(false);
+      if (values.length === 0) return []; // sql.js gave [] rather than a result with no rows
+      return [{ columns: stmt.columns().map((c: { name: string }) => c.name), values }];
+    },
+
+    close(): void { raw.close(); },
+  };
 
   // ═══════════════════════════════════════════════
   //  CORE TABLES (existing)
@@ -227,43 +306,42 @@ export async function initDatabase(): Promise<SqlJsDatabase> {
   }
 
   saveDb();
-  console.log('[Database] SQLite (sql.js) initialized with', 13, 'tables at', Config.DB_PATH);
+  console.log('[Database] SQLite (better-sqlite3, WAL) initialized with', 13, 'tables at', Config.DB_PATH);
   return db;
 }
 
 // Persistence is DEBOUNCED — a burst of mutations coalesces into one write instead of blocking
 // the event loop on every mutation with a full-image export — and ATOMIC — written to a temp file
 // then renamed, so a crash mid-write can't corrupt nova.db. Errors are logged, not swallowed.
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let savePending = false;
 let exitHookInstalled = false;
 
-function writeDbToDisk(): void {
-  if (!savePending || !db) return;
-  savePending = false;
-  try {
-    const buffer = Buffer.from(db.export());
-    const tmp = Config.DB_PATH + '.tmp';
-    fs.writeFileSync(tmp, buffer);
-    fs.renameSync(tmp, Config.DB_PATH); // atomic replace on the same filesystem
-  } catch (e: any) {
-    console.error('[Database] Failed to persist DB:', e?.message || e);
-    savePending = true; // keep it dirty so the next flush retries
-  }
-}
-
+/**
+ * Nothing to do — and that is the entire point of this change.
+ *
+ * Under sql.js this scheduled a debounced, atomic, whole-database export: serialise every table to
+ * a buffer, write it to a temp file, rename it over nova.db. That was the correct design for an
+ * engine that only knew how to hand you the whole image, and it was also the ceiling on how many
+ * players the coordinator could carry, because the cost scaled with total database size rather than
+ * with the size of the change.
+ *
+ * better-sqlite3 has already written the change by the time the calling statement returns, to the
+ * write-ahead log, touching only the pages involved. There is no pending state to flush and no
+ * window in which a crash loses committed data — WAL is the durability guarantee.
+ *
+ * The ~60 saveDb() calls through this file are left in place on purpose. They are accurate markers
+ * of "a mutation happened here", they cost nothing, and deleting them would be a large diff that
+ * changes no behaviour while making this commit harder to review.
+ */
 function saveDb(): void {
-  savePending = true;
-  if (!exitHookInstalled) {
-    exitHookInstalled = true;
-    // Best-effort synchronous flush of any pending write when the process exits.
-    process.once('exit', () => { if (saveTimer) clearTimeout(saveTimer); writeDbToDisk(); });
-  }
-  if (saveTimer) return; // a flush is already scheduled
-  saveTimer = setTimeout(() => { saveTimer = null; writeDbToDisk(); }, 200);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // Close cleanly on exit so the WAL is checkpointed back into nova.db. Without this the data is
+  // still safe — SQLite recovers from the WAL on next open — but the file looks stale to anything
+  // inspecting it outside the process, which makes backups and manual poking confusing.
+  process.once('exit', () => { try { raw?.close(); } catch { /* already closed */ } });
 }
 
-export function getDatabase(): SqlJsDatabase {
+export function getDatabase(): SqlShim {
   if (!db) throw new Error('Database not initialized. Call initDatabase() first.');
   return db;
 }
@@ -900,10 +978,22 @@ export function setAccountBanned(accountId: string, banned: boolean): void {
   saveDb();
 }
 
-/** Force an immediate atomic persist (used for periodic telemetry batching + shutdown), bypassing
- *  the debounce. */
+/**
+ * Checkpoint the write-ahead log back into nova.db.
+ *
+ * Was "force an immediate atomic persist, bypassing the debounce" — under sql.js this had real work
+ * to do, because committed changes lived only in memory until something exported them. They no
+ * longer do: every statement is already durable in the WAL by the time it returns.
+ *
+ * What remains is worth keeping. TRUNCATE folds the WAL back into the main file and starts it
+ * fresh, so callers that run at shutdown or on a telemetry batch leave nova.db complete and
+ * self-contained on disk — which is what makes a file copy a valid backup. PASSIVE would skip the
+ * work if a reader were mid-query; TRUNCATE is the one that guarantees the fold actually happened.
+ */
 export function flushDb(): void {
-  savePending = true;
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  writeDbToDisk();
+  try {
+    raw?.pragma('wal_checkpoint(TRUNCATE)');
+  } catch (e: any) {
+    console.error('[Database] WAL checkpoint failed:', e?.message || e);
+  }
 }
