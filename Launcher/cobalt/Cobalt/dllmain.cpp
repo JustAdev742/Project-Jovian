@@ -51,6 +51,47 @@ static bool IsRcxSpill(const unsigned char* p)
     }
 }
 
+/** Copy `n` bytes safely; returns false if the range is not readable. */
+static bool SafeRead(const unsigned char* src, unsigned char* dst, int n)
+{
+    __try {
+        for (int i = 0; i < n; ++i) dst[i] = src[i];
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+/**
+ * Find the start of the function containing `inner`, by walking back to MSVC's inter-function padding.
+ *
+ * The scan signature matches partway into curl_easy_setopt, and a fixed -5 offset was a guess that
+ * turned out wrong on the real build ("could not confirm the function entry" in a player's log). This
+ * asks the binary instead of assuming: MSVC pads between functions with int3 (0xCC), so the first
+ * byte after the last run of padding IS the entry. That works regardless of how the prologue happens
+ * to be encoded, which is exactly the assumption that failed last time.
+ *
+ * Bounded to 64 bytes because a prologue is short; anything further back means the layout is not what
+ * is expected and guessing would be worse than falling back. Returns nullptr when unsure — every
+ * caller treats that as "do not patch".
+ */
+static const unsigned char* FindFunctionEntry(const unsigned char* inner)
+{
+    unsigned char buf[64];
+    if (!SafeRead(inner - 64, buf, 64)) return nullptr;
+    // buf[63] is the byte immediately before `inner`. Walk backwards for padding.
+    for (int i = 63; i >= 0; --i) {
+        if (buf[i] == 0xCC) {
+            const unsigned char* entry = inner - 64 + i + 1;
+            // Padding directly against the scan point would mean the scan IS the entry, which
+            // contradicts the signature. Treat that as unsure rather than hooking a boundary.
+            return (entry < inner) ? entry : nullptr;
+        }
+    }
+    return nullptr;
+}
+
 void Hook(void* Target, void* Detour)
 {
 #ifdef USE_MINHOOK
@@ -176,10 +217,36 @@ bool InitializeCurlHook()
     // So: verify the entry before trusting it. If the five bytes are not the exact rcx spill, do NOT
     // patch — fall back to VEH, which is unreliable but never corrupts anything. A wrong guess here
     // crashes on a player's machine, so it has to be checked rather than assumed.
-    const unsigned char* entry = reinterpret_cast<const unsigned char*>(CurlEasySetOptAddr) - 5;
-    const bool entryConfirmed = IsRcxSpill(entry);
+    const unsigned char* scan = reinterpret_cast<const unsigned char*>(CurlEasySetOptAddr);
 
-    if (entryConfirmed) {
+    // Log what is actually there. The -5 guess was wrong on the real build and the log only said
+    // "could not confirm", which left nothing to work from. Print the bytes so a single player log
+    // is enough to settle the encoding, instead of another round of inference.
+    {
+        unsigned char pre[24];
+        if (SafeRead(scan - 24, pre, 24)) {
+            std::cout << "Curl hook: 24 bytes before scan point:";
+            for (int i = 0; i < 24; ++i) {
+                char b[8];
+                sprintf_s(b, " %02X", pre[i]);
+                std::cout << b;
+            }
+            std::cout << '\n';
+        }
+    }
+
+    // Two ways to locate the entry, most reliable first.
+    const unsigned char* entry = FindFunctionEntry(scan);
+    if (entry) {
+        std::cout << "Curl hook: entry via int3 padding, " << (int)(scan - entry) << " bytes back.\n";
+    }
+    else if (IsRcxSpill(scan - 5)) {
+        // The textbook variadic prologue. Kept as a second chance in case padding is absent.
+        entry = scan - 5;
+        std::cout << "Curl hook: entry via rcx-spill prologue, 5 bytes back.\n";
+    }
+
+    if (entry) {
         void* target = const_cast<unsigned char*>(entry);
         if (MH_CreateHook(target, CurlEasySetOptDetour, nullptr) == MH_OK
             && MH_EnableHook(target) == MH_OK)
