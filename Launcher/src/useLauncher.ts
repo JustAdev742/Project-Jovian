@@ -24,7 +24,49 @@ import type { ServiceHealth } from "./novaApi";
 import type { Session } from "./auth";
 
 export const PLAYLIST = "Playlist_DefaultSolo";
-export const REGION = "NAE";
+/**
+ * Where this machine is, worked out from the OS timezone.
+ *
+ * Was hard-coded to "NAE" — North America East — on every install, including machines in Australia.
+ * That was harmless while everyone matched everyone, because the coordinator only used region as a
+ * filter and every launcher sent the same value. It stops being harmless the moment host election
+ * takes distance into account: a wrong region would send a lobby to a host on the other side of the
+ * planet while believing it was doing the right thing.
+ *
+ * Timezone rather than IP geolocation, deliberately. It needs no network call (so it works before
+ * sign-in and can't fail), it's instant, it sends no data anywhere, and it can't be thrown off by a
+ * VPN the way an IP lookup can. It's coarse — but region IS coarse; the whole world is seven buckets
+ * here, and a timezone identifies the right bucket essentially always.
+ */
+function detectRegion(): string {
+  let tz = "";
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { /* fall through */ }
+  const z = tz.toLowerCase();
+
+  if (z.startsWith("australia/") || z.startsWith("pacific/auckland") || z.startsWith("antarctica/")) return "OCE";
+  if (z.startsWith("europe/") || z.startsWith("atlantic/") || z.startsWith("africa/")) return "EU";
+  if (z.startsWith("asia/")) {
+    // The Gulf sits closer to Europe than to Tokyo, and Fortnite treats it as its own region.
+    if (/dubai|riyadh|qatar|kuwait|bahrain|muscat|baghdad|tehran|jerusalem|beirut|amman|damascus|nicosia/.test(z)) return "ME";
+    return "ASIA";
+  }
+  if (z.startsWith("america/")) {
+    // Everything below Panama routes to the South American region.
+    if (/sao_paulo|argentina|santiago|lima|bogota|caracas|montevideo|la_paz|asuncion|guayaquil|manaus|fortaleza|recife|belem|cuiaba|campo_grande|noronha|rio_branco|porto_velho|boa_vista/.test(z)) return "BR";
+    // Western North America — everything else on the continent is treated as east.
+    if (/los_angeles|vancouver|tijuana|denver|phoenix|edmonton|boise|whitehorse|dawson|hermosillo|mazatlan|chihuahua|anchorage|juneau|sitka|nome|yakutat|adak/.test(z)) return "NAW";
+    return "NAE";
+  }
+  if (z.startsWith("pacific/")) return "NAW"; // Honolulu and friends are nearest the US west coast
+  if (z.startsWith("indian/")) return "ME";
+
+  // Unknown timezone. The coordinator scores an unknown region neutrally rather than excluding it,
+  // so an odd machine can still host — it just doesn't get proximity working in its favour.
+  return "";
+}
+
+/** This machine's region, resolved once at load. Sent with every mesh announce and Play press. */
+export const REGION = detectRegion();
 
 export type BuildItem = { id: string; path: string; name: string; coverDataUrl?: string };
 
@@ -227,7 +269,7 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       // Stay "available to host" while the launcher is open (entries expire server-side).
       if (announceRef.current) clearInterval(announceRef.current);
       announceRef.current = setInterval(() => {
-        invoke("mesh_announce", { coordinator: COORDINATOR, accountId }).catch(() => {});
+        invoke("mesh_announce", { coordinator: COORDINATOR, accountId, region: REGION }).catch(() => {});
       }, 30000);
     })();
 

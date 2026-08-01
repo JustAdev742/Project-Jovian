@@ -4,6 +4,7 @@ import { requireAuth } from '../../middleware/auth.middleware';
 import { generateUUID } from '../../utils/uuid';
 import { Config } from '../../config';
 import { setHostSpec, hostStatus, stopServer, markServerInjected } from './hostRunner';
+import { lobbyProximityScore, regionLabel } from './regions';
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  NOVA MATCHMAKING  —  gameserver routing table + P2P host registry
@@ -395,7 +396,10 @@ interface MeshCandidate {
   cpuCores: number;
   ramGB: number;
   netScore: number;  // 0-100, measured launcher-side
-  score: number;
+  /** Where this machine is. Drives proximity in the election — see electionScore. Older launchers
+   *  don't send it; those candidates score neutrally rather than being excluded. */
+  region: string;
+  score: number;     // hardware only; the election combines this with proximity
   lastSeen: number;
 }
 
@@ -410,6 +414,56 @@ function scoreCandidate(cpuCores: number, ramGB: number, netScore: number): numb
   const ram = Math.min(Math.max(ramGB, 0), 32) / 32;
   const net = Math.min(Math.max(netScore, 0), 100) / 100;
   return Math.round((cpu * 45 + ram * 35 + net * 20) * 100) / 100;
+}
+
+/** The regions of everyone currently waiting for this playlist — the people a host has to serve. */
+function waitingRegions(playlist: string, region: string): string[] {
+  const pl = (playlist || '').toLowerCase();
+  const rg = (region || '').toUpperCase();
+  return [...waitingPlayers.values()]
+    .filter((w) => (!pl || !w.playlist || w.playlist === pl) && (!rg || !w.region || w.region === rg))
+    .map((w) => w.region)
+    .filter(Boolean);
+}
+
+/**
+ * What the election actually ranks on: can this machine run a server, AND will it feel good to play on.
+ *
+ * PROXIMITY DOMINATES, AND THAT IS THE POINT. Hardware decides whether a Reboot server can hold a
+ * lobby at all, which is a threshold rather than a gradient — past "enough", more RAM buys nothing a
+ * player can feel. Distance is the opposite: it is felt continuously and cannot be compensated for.
+ * A mid-range PC two hops away beats a monster on another continent every time, so the weights say
+ * so — 65% proximity, 35% hardware.
+ *
+ * Worked example. A 4-core/8GB machine in-region scores ~0.35×30 + 0.65×100 = 75. A 16-core/32GB
+ * machine 250ms away scores ~0.35×95 + 0.65×0 = 33. The local mid-range machine wins decisively,
+ * which is the correct answer and the opposite of what the old hardware-only score returned.
+ *
+ * WHEN EVERYONE IS IN ONE REGION — the normal case today — every candidate gets proximity 100 and
+ * this collapses to the old hardware ranking, scaled. Existing single-country setups are unaffected.
+ */
+function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
+  const prox = lobbyProximityScore(c.region, waiterRegions);
+  return Math.round((usefulHardware(c.score) * 0.35 + prox * 0.65) * 100) / 100;
+}
+
+/**
+ * Hardware SATURATES. Weighting the raw score linearly was wrong, and testing caught it.
+ *
+ * With a linear weight, a lobby of three Europeans and one Australian elected the AUSTRALIAN host,
+ * because its 16-core/32GB machine outscored a European 4-core/8GB box by ~3× on hardware and that
+ * swamped the proximity gap. Three players were being given 206ms so one could have a beefier host.
+ * That is exactly the failure this whole change exists to prevent.
+ *
+ * The mistake was treating hardware as a gradient when it is really a threshold: a machine either
+ * can carry a 100-player Reboot server or it cannot, and above that line more RAM buys nothing any
+ * player can perceive. h/(h+15) encodes that — a modest 4c/8GB machine already reaches ~70, a
+ * top-end one ~87. Better hardware still wins between equally-placed candidates, but it can no
+ * longer purchase its way past a continent.
+ */
+function usefulHardware(hwScore: number): number {
+  const h = Math.max(0, hwScore);
+  return Math.round((100 * h) / (h + 15) * 100) / 100;
 }
 
 /** Announced machines that are still within their TTL (expired ones are reaped here). */
@@ -464,24 +518,35 @@ function decideHost(
     return { host: false, reason: 'another-host-pending' };
   }
 
-  // Capability-based selection among announced mesh machines.
+  // Selection among announced mesh machines — capability AND proximity, see electionScore.
   const candidates = liveCandidates();
+  const waiters = waitingRegions(playlist, region);
   const me = candidates.find(c => c.accountId === accountId);
-  const best = candidates.reduce<MeshCandidate | null>((b, c) => (!b || c.score > b.score ? c : b), null);
+  const scored = candidates.map(c => ({ c, s: electionScore(c, waiters) }));
+  const bestEntry = scored.reduce<{ c: MeshCandidate; s: number } | null>(
+    (b, e) => (!b || e.s > b.s ? e : b), null);
+  const best = bestEntry?.c ?? null;
+  const myScore = me ? electionScore(me, waiters) : undefined;
 
-  if (best && me && best.accountId !== accountId && best.score > me.score * 1.15) {
+  if (best && me && myScore !== undefined && bestEntry && best.accountId !== accountId && bestEntry.s > myScore * 1.15) {
     const since = electionDeferredSince.get(key) ?? Date.now();
     electionDeferredSince.set(key, since);
     if (Date.now() - since < Config.MESH_ELECTION_GRACE_MS) {
-      // A clearly better machine is online — give it a moment to take the host role.
-      return { host: false, reason: 'better-host-available', betterHost: best.accountId, retryMs: 5000, score: me.score };
+      // A clearly better machine is online — give it a moment to take the host role. "Better" now
+      // means better FOR THE PEOPLE WAITING, so this can defer to a slower machine that is closer,
+      // which is the intended behaviour rather than a regression.
+      console.log(
+        `[Mesh] Deferring to ${best.accountId} (${regionLabel(best.region)}) — ` +
+        `score ${bestEntry.s} vs ${myScore} for ${waiters.length} waiter(s)`,
+      );
+      return { host: false, reason: 'better-host-available', betterHost: best.accountId, retryMs: 5000, score: myScore };
     }
     // Grace elapsed and the better machine never stepped up — host here rather than stall.
   }
 
   electionDeferredSince.delete(key);
   pendingHosts.set(key, { accountId, since: Date.now() });
-  return { host: true, reason: 'elected', score: me?.score };
+  return { host: true, reason: 'elected', score: myScore };
 }
 
 /** Clear pending-host reservations satisfied by a newly-registered server. */
@@ -925,11 +990,14 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
     const cpuCores = Number(b.cpuCores) || 1;
     const ramGB = Number(b.ramGB) || 1;
     const netScore = Number(b.netScore) || 50;
+    // Older launchers don't send a region. They score neutrally rather than being excluded — an
+    // out-of-date client should still be able to host, just without proximity working in its favour.
+    const region = String(b.region || '').trim().toUpperCase();
     const score = scoreCandidate(cpuCores, ramGB, netScore);
     const existed = meshCandidates.has(accountId);
-    meshCandidates.set(accountId, { accountId, tsIp, cpuCores, ramGB, netScore, score, lastSeen: Date.now() });
+    meshCandidates.set(accountId, { accountId, tsIp, cpuCores, ramGB, netScore, region, score, lastSeen: Date.now() });
     if (!existed) {
-      console.log(`[Mesh] Candidate online: ${accountId} @ ${tsIp || 'no-ts-ip'} (${cpuCores}c/${ramGB}GB, score ${score})`);
+      console.log(`[Mesh] Candidate online: ${accountId} @ ${tsIp || 'no-ts-ip'} (${cpuCores}c/${ramGB}GB, ${regionLabel(region)}, hw score ${score})`);
     }
     return reply.send({ success: true, score, ttlMs: Config.MESH_CANDIDATE_TTL_MS });
   });
