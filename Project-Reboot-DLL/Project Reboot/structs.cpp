@@ -20,6 +20,32 @@ std::string FName::ToString()
 	return Str;
 }
 
+// The assignment lives in its own function so TryNameToString's frame owns no C++ object that needs
+// unwinding; MSVC refuses __try in such a frame (C2712). Do not inline this back in.
+static bool NameToStringInner(FName* Name, std::string* Out)
+{
+	*Out = Name->ToString();
+	return true;
+}
+
+bool TryNameToString(FName* Name, std::string* Out)
+{
+	if (!Name || !Out)
+		return false;
+
+	__try
+	{
+		return NameToStringInner(Name, Out);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		// The crash handler in dllmain.cpp is a VECTORED handler, so it already ran and wrote
+		// crash.log/crash.dmp before we got here. That is deliberate: we still want the evidence, we
+		// just refuse to die for a cosmetic lookup.
+		return false;
+	}
+}
+
 std::string UObject::GetName()
 {
 	/* if (!StaticFindObjectO)

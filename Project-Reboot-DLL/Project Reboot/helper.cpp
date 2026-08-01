@@ -290,29 +290,77 @@ bool Helper::ApplyCID(UObject* Pawn, UObject* CID)
 	{
 		static auto SpecializationClass = FindObject("/Script/FortniteGame.FortHeroSpecialization");
 
-		auto SpecializationName = HeroSpecializations->At(j).ObjectID.AssetPathName.ToString();
+		// Same defensive shape as ApplyBackpack below, for the same reason: an FName read out of a
+		// struct we cast by hand is one bad offset away from taking the whole match down inside
+		// FName::ToString. This path currently works, so these guards only ever SKIP bad data — they
+		// change nothing about a run that was already fine.
+		FName SpecPathName = HeroSpecializations->At(j).ObjectID.AssetPathName;
+		std::string SpecializationName;
+
+		if (!IsPlausibleName(SpecPathName) || !TryNameToString(&SpecPathName, &SpecializationName))
+		{
+			std::cout << "[Locker] hero specialization " << j << " has an unreadable name (index "
+			          << SpecPathName.ComparisonIndex << ") - skipping" << std::endl;
+			continue;
+		}
 
 		auto Specialization = StaticLoadObject(SpecializationClass, nullptr, SpecializationName);
 
 		if (!Specialization)
 			continue;
 
+		// NOT `if (!CharacterParts)` — that was dead code. CharacterParts is a base pointer plus an
+		// offset, so it is never null; the thing that can actually be wrong is the OFFSET. GetOffset
+		// returns 0 when the property is missing, and offset 0 points at the object's vtable pointer,
+		// which then gets read as {Data, Num, Max}.
 		static auto CharacterPartsOffset = Specialization->GetOffset("CharacterParts");
-		auto CharacterParts = (TArray<TSoftObjectPtr>*)(__int64(Specialization) + CharacterPartsOffset);
 
-		if (!CharacterParts)
+		if (!CharacterPartsOffset)
 		{
-			std::cout << "No CharacterParts!\n";
-			return false;
+			std::cout << "[Locker] hero specialization '" << SpecializationName
+			          << "' has no CharacterParts property - skipping" << std::endl;
+			continue;
 		}
+
+		auto CharacterParts = (TArray<TSoftObjectPtr>*)(__int64(Specialization) + CharacterPartsOffset);
 
 		for (int i = 0; i < CharacterParts->Num(); i++)
 		{
-			auto CharacterPart = StaticLoadObject(CCPClass, nullptr, CharacterParts->At(i).ObjectID.AssetPathName.ToString());
+			auto* Element = &CharacterParts->At(i);
+
+			if (IsBadReadPtr(Element, sizeof(TSoftObjectPtr)))
+			{
+				std::cout << "[Locker] character part " << i << " unreadable at " << (void*)Element
+				          << " - skipping the rest" << std::endl;
+				break;
+			}
+
+			FName PartPathName = Element->ObjectID.AssetPathName;
+			std::string PartPath;
+
+			if (!IsPlausibleName(PartPathName) || !TryNameToString(&PartPathName, &PartPath))
+			{
+				std::cout << "[Locker] character part " << i << " is not a name (ComparisonIndex "
+				          << PartPathName.ComparisonIndex << ", CharacterParts offset "
+				          << CharacterPartsOffset << ") - skipping the rest" << std::endl;
+				break;
+			}
+
+			auto CharacterPart = StaticLoadObject(CCPClass, nullptr, PartPath);
 
 			if (CharacterPart)
 			{
-				static auto CharacterPartTypeOffset = CharacterPart->GetOffset("CharacterPartType");
+				// Offset 0 here would read the vtable pointer's low byte as the part type and hand a
+				// nonsense slot to ChoosePart, so fall back to the declared type instead.
+				static auto CharacterPartTypeOffset = CharacterPart->GetOffset("CharacterPartType", false, false, false);
+
+				if (!CharacterPartTypeOffset)
+				{
+					std::cout << "[Locker] character part '" << PartPath
+					          << "' has no CharacterPartType - skipping" << std::endl;
+					continue;
+				}
+
 				auto PartType = *(TEnumAsByte<EFortCustomPartType>*)(__int64(CharacterPart) + CharacterPartTypeOffset);
 				Helper::ChoosePart(Pawn, PartType, CharacterPart);
 				bSuceeded = true;
@@ -567,9 +615,52 @@ bool Helper::ApplyBackpack(UObject* Pawn, UObject* BackpackDef)
 
 	bool bApplied = false;
 
+	// ── WHY THIS LOOP IS PARANOID ────────────────────────────────────────────────────────────────
+	// This line used to be a bare `CharacterParts->At(i).ObjectID.AssetPathName.ToString()`, and it
+	// killed the gameserver the instant a player finished joining — twice, reproducibly, with an
+	// 0xC0000005 six frames inside FortniteClient. Symbolised against the build's own PDB the chain was
+	// ProcessEventDetour -> ServerReadyToStartMatch -> SpawnPawn -> ApplyBackpack -> FName::ToString.
+	//
+	// The offset check above is NOT enough. On every recorded run the offset resolved and Num() came
+	// back sane, yet the FName at +0x10 is provably not an asset path on this build: the runs that
+	// happened to survive stringified it to "Building.Type" and "Building.Type.Container", which are
+	// GameplayTag names. So AthenaBackpackItemDefinition::CharacterParts is NOT the
+	// TArray<TSoftObjectPtr> this cast assumes — either the element stride is wrong or the lookup lands
+	// on a different array entirely. When the misread index happens to be in range we get a bogus name;
+	// when it does not, the engine indexes GNames out of bounds and the match dies.
+	//
+	// Until the real layout is known, read defensively and give up the back bling. A player missing
+	// their back bling is a cosmetic defect; a dead gameserver ends the match for everyone.
 	for (int i = 0; i < PartCount; i++)
 	{
-		auto Path = CharacterParts->At(i).ObjectID.AssetPathName.ToString();
+		auto* Element = &CharacterParts->At(i);
+
+		if (IsBadReadPtr(Element, sizeof(TSoftObjectPtr)))
+		{
+			std::cout << "[Locker] backpack part " << i << " unreadable at " << (void*)Element
+			          << " - skipping back bling" << std::endl;
+			break;
+		}
+
+		FName PathName = Element->ObjectID.AssetPathName;
+
+		if (!IsPlausibleName(PathName))
+		{
+			std::cout << "[Locker] backpack part " << i << " is not a name (ComparisonIndex "
+			          << PathName.ComparisonIndex << ", Number " << PathName.Number
+			          << ", CharacterParts offset " << CharacterPartsOffset
+			          << ") - skipping back bling" << std::endl;
+			break;
+		}
+
+		std::string Path;
+		if (!TryNameToString(&PathName, &Path))
+		{
+			std::cout << "[Locker] backpack part " << i << " faulted while resolving its name (index "
+			          << PathName.ComparisonIndex << ") - skipping back bling" << std::endl;
+			break;
+		}
+
 		if (Path.empty() || Path == "None")
 			continue;
 
