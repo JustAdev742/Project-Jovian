@@ -1270,11 +1270,46 @@ namespace Memcury
             {
                 auto Itr = std::find_if(Hooks.begin(), Hooks.end(), [Rip = Exception->ContextRecord->Rip](const HOOK_INFO& Hook)
                     { return Hook.Original == (void*)Rip; });
+
                 if (Itr != Hooks.end())
                 {
+                    // OUR HOOK FIRED — RE-ARM NOW, DO NOT DEFER.
+                    //
+                    // PAGE_GUARD is a one-shot: the kernel clears the guard bit to deliver this
+                    // exception, and the bit lives in the PAGE TABLE, so from this instant the
+                    // function is unhooked for EVERY thread. The original code deferred re-arming to
+                    // a second (STATUS_SINGLE_STEP) exception on this thread, which leaves the hook
+                    // off across two full user/kernel round-trips — and a whole scheduler quantum if
+                    // this thread is descheduled in between.
+                    //
+                    // UE4 issues ~25-30 curl_easy_setopt calls per request across several threads.
+                    // Any call landing in that window ran the REAL function, so its URL was never
+                    // rewritten and the request left for Epic's live servers. That is what produced
+                    // hotfix files 401ing and taking their whole batch down, ReadFriendsList failing,
+                    // and tryPlayOnPlatform failing with "Network failure when attempting to check
+                    // platform restrictions" — all of them "Token is missing key ID value", Epic's
+                    // own error text, from Epic's own servers.
+                    //
+                    // Deferring is unnecessary HERE specifically: we are redirecting Rip to the
+                    // detour, so the faulting instruction is never retried. Re-arming immediately
+                    // cannot loop, and it shrinks the window from "until this thread is next
+                    // scheduled" to the few microseconds of this handler.
                     Exception->ContextRecord->Rip = (uintptr_t)Itr->Detour;
+
+                    for (auto& Hook : Hooks)
+                    {
+                        DWORD dwOldProtect;
+                        VirtualProtect(Hook.Original, 1, PAGE_EXECUTE_READ | PAGE_GUARD, &dwOldProtect);
+                    }
+
+                    return EXCEPTION_CONTINUE_EXECUTION;
                 }
 
+                // NOT one of ours — some neighbouring function on the same 4KB page. That
+                // instruction DOES have to re-execute, so the guard must stay off until it has.
+                // Re-arming here would fault on the same instruction forever. This is the one case
+                // that genuinely needs the single-step deferral, and it is why the window cannot be
+                // closed completely: a guarded page covers every function sharing it.
                 Exception->ContextRecord->EFlags |= 0x100; // SINGLE_STEP_FLAG
 
                 return EXCEPTION_CONTINUE_EXECUTION;
