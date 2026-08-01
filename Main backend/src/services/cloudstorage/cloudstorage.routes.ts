@@ -32,6 +32,9 @@ function clientSettingsFile(accountId: string, season: number): string | null {
 }
 
 export async function cloudstorageRoutes(fastify: FastifyInstance): Promise<void> {
+  // Before serving anything: make sure the hotfix set exists at all. See seedCloudstorageDefaults.
+  seedCloudstorageDefaults();
+
   /** GET /fortnite/api/cloudstorage/system — list hotfix files */
   fastify.get('/fortnite/api/cloudstorage/system', async (request, reply) => {
     const files = getCloudstorageFiles();
@@ -130,6 +133,85 @@ export async function cloudstorageRoutes(fastify: FastifyInstance): Promise<void
     }
     return reply.status(204).send();
   });
+}
+
+/**
+ * The hotfix that decides whether the game can start, written from the port we actually listen on.
+ *
+ * This is not a convenience default. Fortnite fetches `DefaultEngine.ini` from cloudstorage at login
+ * and applies it OVER every local config layer, and it reads the XMPP address lazily at connection
+ * time — so whatever is here is what the client uses, and no amount of patching Engine.ini on the
+ * player's disk can beat it. Two ways that has already broken a player's game:
+ *
+ *   • The file said `ws://127.0.0.1:80` (the ws:// default port) for two months. Nothing listens
+ *     there, so the XMPP socket died and the client force-logged-out ~400ms after a SUCCESSFUL
+ *     login, reporting "Fortnite was not started correctly" — which reads as a launcher fault.
+ *   • `data/` is gitignored, and the backend bundled into the installer ships no `data/` at all. An
+ *     installed machine therefore served an EMPTY hotfix set, the client kept Fortnite's compiled-in
+ *     `wss://xmpp-service-prod.ol.epicgames.com:443`, and failed the same way for a different reason.
+ *
+ * Seeding removes both failure modes: the file cannot be missing, and it cannot drift from the port
+ * because it is generated from it. Existing files are never overwritten — an operator who has edited
+ * a hotfix keeps their version.
+ */
+function seedCloudstorageDefaults(): void {
+  const port = Config.HTTP_PORT;
+  const defaults: Record<string, string> = {
+    'DefaultEngine.ini': `[OnlineSubsystemMcp.Xmpp]
+bUseSSL=false
+ServerAddr="ws://127.0.0.1:${port}"
+ServerPort=${port}
+
+[OnlineSubsystemMcp.Xmpp Prod]
+bUseSSL=false
+ServerAddr="ws://127.0.0.1:${port}"
+ServerPort=${port}
+
+[OnlineSubsystemMcp]
+bUsePartySystemV2=false
+
+[OnlineSubsystemMcp.OnlinePartySystemMcpAdapter]
+bUsePartySystemV2=false
+
+[XMPP]
+bEnableWebsockets=true
+
+[/Script/Engine.NetworkSettings]
+n.VerifyPeer=false
+
+[/Script/Qos.QosRegionManager]
+NumTestsPerRegion=1
+PingTimeout=3.0
+`,
+    'DefaultGame.ini': `[/Script/FortniteGame.FortGameInstance]
+bAllowJoinInProgress=true
+`,
+    'DefaultInput.ini': `[/Script/Engine.InputSettings]
++ConsoleKeys=Tilde
++ConsoleKeys=F8
+`,
+    'DefaultRuntimeOptions.ini': `[/Script/FortniteGame.FortRuntimeOptions]
+bEnableGlobalChat=true
+bDisableGifting=false
+bDisableGiftingPC=false
+bDisableGiftingPS4=false
+bDisableGiftingXB=false
+`,
+  };
+
+  try {
+    fs.mkdirSync(Config.CLOUDSTORAGE_DIR, { recursive: true });
+    for (const [name, body] of Object.entries(defaults)) {
+      const file = path.join(Config.CLOUDSTORAGE_DIR, name);
+      if (fs.existsSync(file)) continue;
+      fs.writeFileSync(file, body);
+      console.log(`[CloudStorage] seeded missing hotfix ${name}`);
+    }
+  } catch (e: any) {
+    // Not fatal, but say so — an empty hotfix set means every client falls back to Epic's live
+    // addresses and cannot start, and that is not obvious from the client's error.
+    console.warn(`[CloudStorage] could not seed hotfix defaults (${e?.message || e}) — clients may fail to start`);
+  }
 }
 
 function getCloudstorageFiles(): { name: string; hash: string; hash256: string; length: number; uploaded: string }[] {

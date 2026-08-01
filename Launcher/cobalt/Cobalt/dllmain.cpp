@@ -95,16 +95,57 @@ bool InitializeCurlHook()
     CurlEasySetOpt = decltype(CurlEasySetOpt)(CurlEasySetOptAddr);
     CurlSetOpt = decltype(CurlSetOpt)(CurlSetOptAddr);
 
-    if (FindPushWidget())
-    {
-        DetoursEasy(CurlEasySetOpt, CurlEasySetOptDetour);
-    }
-    else
-    {
-        // TODO find a better way to "bypass" UAC (aka switch off VEH hooks)
-
-        Hook(CurlEasySetOpt, CurlEasySetOptDetour);
-    }
+    // ── THE CURL HOOK MUST BE INLINE, NOT VEH ────────────────────────────────────────────────────
+    //
+    // This used to pick a hooking method based on FindPushWidget(). On 7.40 that signature never
+    // matches — every startup logs "Failed to find PushWidget (This may be fine)!" — so it always
+    // took the VEH path. And a VEH hook here is not merely slower, it is WRONG:
+    //
+    //   • VEHHook arms a PAGE_GUARD on the target. PAGE_GUARD is a ONE-SHOT alarm: the kernel clears
+    //     the guard bit the moment it raises the exception, so from that instant the function is
+    //     unhooked.
+    //   • The guard bit lives in the PAGE TABLE, not the thread. Clearing it unhooks the function
+    //     for EVERY thread in the process at once.
+    //   • Re-arming is deferred to a second exception (STATUS_SINGLE_STEP) on the faulting thread.
+    //     If that thread is descheduled in between, the hole stays open for a scheduler quantum.
+    //   • The guard covers the whole 4KB page, so every call to any neighbouring libcurl function
+    //     also knocks it down.
+    //
+    // UE4 issues ~25-30 curl_easy_setopt calls per request from more than one thread, and Fortnite
+    // fetches its four hotfix .ini files back-to-back in the same millisecond. Any call landing in
+    // one of those holes runs the REAL curl_easy_setopt, so its URL is never rewritten and it leaves
+    // the machine for Epic's live servers.
+    //
+    // Observed exactly once in a four-file batch: three files were redirected and logged, the fourth
+    // (DefaultRuntimeOptions.ini) was not logged at all and came back 401 "Token is missing key ID
+    // value" — Epic's own error text, from Epic's own servers. UE4 discards the ENTIRE hotfix batch
+    // when one file fails, so that single escaped request threw away the other three and left the
+    // client on its built-in XMPP address, which ends in "Fortnite was not started correctly".
+    //
+    // ── AND YET IT MUST STAY A VEH HOOK. DO NOT "FIX" THIS WITH MinHook/Detours. ─────────────────
+    //
+    // Tried exactly that (1.4.3) and it hard-crashed the game while loading the Frontend map, right
+    // as the login request burst begins. Reverted. The reason is the signature above:
+    //
+    //     89 54 24 10        mov  [rsp+10], edx      <-- the scan matches HERE
+    //     4C 89 44 24 18     mov  [rsp+18], r8
+    //     4C 89 4C 24 20     mov  [rsp+20], r9
+    //     48 83 EC 28        sub  rsp, 28
+    //
+    // That is the variadic home-register spill, and it starts at the SECOND argument. The real entry
+    // to curl_easy_setopt is a few bytes earlier, at `48 89 4C 24 08` (mov [rsp+8], rcx) for the
+    // first argument. So CurlEasySetOptAddr is an address INSIDE the function, not its start.
+    //
+    // A page-guard hook does not care: it compares RIP and redirects when execution reaches that
+    // address, which it always does because the prologue is straight-line. An INLINE hook cares
+    // enormously — it writes a 5-byte jump over mid-prologue instructions and builds its trampoline
+    // from a function that has already partly executed with a stack frame that does not match. Hence
+    // the crash.
+    //
+    // Making this inline safely means first resolving the true function entry, which the signature
+    // does not give us. Until someone does that, the VEH race described above is the lesser evil: an
+    // occasional lost request is survivable, a crash on every launch is not.
+    Hook(CurlEasySetOpt, CurlEasySetOptDetour);
 
     return true;
 }
@@ -200,11 +241,21 @@ DWORD WINAPI Main(LPVOID)
     std::cout << "Memcury - https://github.com/kem0x/Memcury\n";
     std::cout << "Neonite++ for most of the signatures and curl hook - https://github.com/PeQuLeaks/NeonitePP-Fixed/tree/1.4\n\n";
 
-#ifdef USE_MINHOOK
+    // BOTH engines come up, deliberately — this block used to pick one via USE_MINHOOK.
+    //
+    // MinHook is now required unconditionally: the curl hook has to be an INLINE hook, and nothing
+    // else will do (see InitializeCurlHook for the full reasoning).
+    //
+    // VEH still has to be initialised too, because Hook() falls through to VEHHook::AddHook and
+    // FixMemoryLeak() still goes through Hook(). That one is an 8.51 signature which does not match
+    // on 7.40, so in practice it installs nothing here — but it is live code, and leaving VEH
+    // uninitialised would arm a hook against a handler that was never registered the moment anyone
+    // runs this on a build where the signature DOES match.
+    //
+    // The exit hooks are not affected either way: they use DetoursEasy. The VEHHook::AddHook calls
+    // alongside them are inside a /* */ block and have not been live.
     MH_Initialize();
-#else
     Memcury::VEHHook::Init();
-#endif
 
     bool curlResult = InitializeCurlHook();
     InitializeEOSCurlHook();
