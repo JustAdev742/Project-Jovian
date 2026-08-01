@@ -795,6 +795,35 @@ fn build_fortnite_args(account_id: &str, token: &str, eor: bool, headless: bool)
         // disable). An earlier read of this called it incoherent with -fromfl=eac; that was right
         // about retail pairing but wrong about which AC 7.40 used.
         "-noeac".into(),
+        // ── EPIC'S OWN IN-PROCESS ANTI-CHEAT ─────────────────────────────────────────────────────
+        // -nobe and -noeac disable BattlEye and EAC. They do NOT touch UAC, which is Epic's own
+        // anti-cheat compiled into the client — and it has been running in every session we have ever
+        // logged: "LogPluginManager: Mounting plugin UAC" then "LogUAC: UACClient initialized",
+        // 6 for 6 across both machines. It has never once logged "UAC is disabled via commandline or
+        // ini file", because until now nothing asked it to be.
+        //
+        // Both tokens below are real in THIS build. Verified as UTF-16LE literals inside
+        // FortniteClient-Win64-Shipping.exe, in the same string cluster as nobe/noeac/frombe:
+        //   nouac x1, NoCodeGuards x2, LogCodeGuard x1, bUACEnabled x1, bEnablePBCE x1
+        //
+        // WHY THIS MATTERS BEYOND TIDINESS: UAC carries a code-integrity subsystem (LogCodeGuard,
+        // NoCodeGuards, and per-tick workers whose stat names spell out read/decrypt/hash). Cobalt
+        // installs its hook at ~T+1.5s; UACClient initializes at ~T+3.3s — i.e. AFTER our patch is
+        // already in memory. That is the best explanation we have for the 1.4.3 inline-hook failure:
+        // a 5-byte inline patch CHANGES BYTES in .text, so a later integrity hash mismatches and the
+        // process is terminated outright — which matches what was observed exactly (hard death while
+        // loading Frontend, no Fatal error, no UE4 crash context written). The VEH page-guard hook
+        // survives precisely because it changes page PROTECTION and not a single byte.
+        //
+        // Adding these is safe on its own and changes nothing else: the anti-cheat is inert on a
+        // private server, and if a token were unrecognised UE4 would simply ignore it. Cobalt still
+        // uses the VEH hook, so this release cannot regress into 1.4.3's crash.
+        //
+        // PROOF IT TOOK: the game log should now say "UAC is disabled via commandline or ini file"
+        // and should NOT say "UACClient initialized". Only once that is confirmed is it worth
+        // retrying the inline curl hook, which is what actually closes the request-escape race.
+        "-nouac".into(),
+        "-NoCodeGuards".into(),
         "-nosplash".into(),
         // REMOVED — `-caldera=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9`: that string is only a base64
         // JWT *header*, not a JWT, and Caldera is the modern EAC-EOS handshake that does not exist
