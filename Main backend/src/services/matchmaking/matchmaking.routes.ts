@@ -275,7 +275,13 @@ setInterval(reapDeadServers, 30 * 1000);
 //  boot window; it clears when a server registers or after HOST_ELECTION_WAIT_MS.
 // ───────────────────────────────────────────────────────────────────────────
 
-interface PendingHost { accountId: string; since: number; }
+/** `since` = when the slot was claimed (absolute cap). `lastSeen` = when the holder last asked,
+ *  which is what detects a holder that has crashed or been closed. See decideHost. */
+interface PendingHost { accountId: string; since: number; lastSeen: number; }
+/** How long a reservation survives without its holder polling. The host agent polls every
+ *  HOST_AGENT_POLL_MS (3s), so 15s is five missed polls — long enough to ride out a hiccup, short
+ *  enough that a crashed host does not strand everyone else in matchmaking. */
+const RESERVATION_IDLE_MS = 15_000;
 const pendingHosts = new Map<string, PendingHost>(); // key: `${playlist}:${region}`
 
 function playlistKey(playlist: string, region: string): string {
@@ -493,11 +499,46 @@ function decideHost(
 
   const key = playlistKey(playlist, region);
   const pending = pendingHosts.get(key);
-  const expired = !!pending && (Date.now() - pending.since) > Config.HOST_ELECTION_WAIT_MS;
 
-  // Someone else is already bringing a server up for this playlist.
+  /* A RESERVATION MUST DIE WHEN ITS HOLDER STOPS ASKING.
+   *
+   * This used to expire only on a fixed 150s timer from the moment it was made. A machine that won
+   * the election and then never delivered — crashed on load, was closed, failed to launch — kept the
+   * slot locked for the full 150 seconds, and every other player was told "another-host-pending" and
+   * sat in matchmaking watching nothing happen. Seen exactly that: one PC pressed Play at 05:47:51
+   * and was blocked until 05:50:21 by a laptop that had been crashing all afternoon.
+   *
+   * The holder polls should-i-serve every 3s while it is genuinely working on it (HOST_AGENT_POLL_MS),
+   * so silence is a reliable signal that it is gone. Two conditions now, and either frees the slot:
+   *
+   *   • IDLE  — no poll from the holder for RESERVATION_IDLE_MS. Catches the crash case in seconds
+   *             instead of minutes, which is the whole point.
+   *   • TOTAL — the original absolute cap, kept so a machine that keeps polling forever while stuck
+   *             "booting" cannot hold the slot indefinitely.
+   */
+  const now = Date.now();
+  const idleFor = pending ? now - (pending.lastSeen ?? pending.since) : 0;
+  const expired = !!pending && (
+    idleFor > RESERVATION_IDLE_MS ||
+    (now - pending.since) > Config.HOST_ELECTION_WAIT_MS
+  );
+
+  if (pending && expired && pending.accountId !== accountId) {
+    console.log(
+      `[Mesh] Releasing stale host reservation for ${key} held by ${pending.accountId} ` +
+      `(idle ${Math.round(idleFor / 1000)}s) — it never delivered a server.`,
+    );
+    pendingHosts.delete(key);
+  }
+
+  // Someone else is genuinely bringing a server up for this playlist.
   if (pending && !expired && pending.accountId !== accountId) {
     return { host: false, reason: 'another-host-pending' };
+  }
+
+  // The holder is still asking — keep its claim alive.
+  if (pending && pending.accountId === accountId) {
+    pending.lastSeen = now;
   }
 
   // Belt and braces: a server that has REGISTERED but is still booting is also "someone bringing a
@@ -545,7 +586,15 @@ function decideHost(
   }
 
   electionDeferredSince.delete(key);
-  pendingHosts.set(key, { accountId, since: Date.now() });
+  // Preserve `since` when the SAME machine re-reserves. The holder polls every 3s, so overwriting it
+  // each time would push the absolute cap forward forever and it would never fire — the very thing it
+  // exists to prevent. Only `lastSeen` moves on a re-poll.
+  const prev = pendingHosts.get(key);
+  pendingHosts.set(key, {
+    accountId,
+    since: prev && prev.accountId === accountId ? prev.since : Date.now(),
+    lastSeen: Date.now(),
+  });
   return { host: true, reason: 'elected', score: myScore };
 }
 
