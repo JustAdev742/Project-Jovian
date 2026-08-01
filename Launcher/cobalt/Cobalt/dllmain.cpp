@@ -252,15 +252,34 @@ bool InitializeCurlHook()
     // on the theory "the address must have been wrong" would be repeating a known failure on an
     // untested hypothesis, and the person who finds out is the player.
     //
-    // So the hook stays VEH, and the race is attacked where it can be attacked safely: the guard is
-    // now re-armed immediately when our hook fires, instead of being deferred to a second exception
-    // (see the STATUS_GUARD_PAGE_VIOLATION handler in memcury.h). That shrinks the unhooked window
-    // from "until this thread is next scheduled" to the few microseconds of the handler, without
-    // modifying a single byte of the game's code.
+    // So the hook stays VEH, with the DEFERRED re-arm: the guard goes back on via a second exception
+    // (STATUS_SINGLE_STEP) after one instruction of the detour has run. See memcury.h — the deferral
+    // is load-bearing, and 1.4.9's "re-arm immediately" broke hosting outright because a detour that
+    // calls through to the function it hooked faults again instantly and recurses until the stack dies.
     //
-    // It does NOT close the window completely: a guarded page covers every function sharing it, and
-    // a fault from a neighbouring function still has to defer. Making this airtight needs a working
-    // inline hook, which needs the 1.4.3 crash understood first.
+    // THE WINDOW IS REAL AND IT IS COSTING US MATCHES — proven 2026-08-01, not theorised. While the
+    // page is unprotected for that single step, a call on ANOTHER thread runs unhooked and goes to the
+    // real Epic servers. Evidence, from FortniteGame.log:
+    //
+    //     04:56:48:489  Hotfix file (DefaultEngine.ini) downloaded. Size was (456)   <- ours
+    //     04:56:48:775  Invalid response. CorrId=FN-BEri2wOD30KyQrJ84p8PsQ code=401
+    //                   Message=Token is missing key ID value                        <- ESCAPED
+    //     04:56:48:775  Hotfix file (DefaultGame.ini) failed to download
+    //     04:56:48:775  OnHotfixCheckComplete 0                                      <- BATCH DISCARDED
+    //
+    // Both responses are provably Epic's, not ours: our backend never emits a CorrId, and our 401 body
+    // reads "The token is invalid or has expired." (see Main backend/src/utils/error-handler.ts). Ten
+    // distinct FN- correlation IDs appear across the captured logs.
+    //
+    // The damage is out of all proportion to the miss rate. UE4's hotfix batch is ALL-OR-NOTHING, so
+    // one escaped file discards every file in it — including DefaultEngine.ini, which is what points
+    // the client at our server. That is the "Fortnite was not started correctly" / stuck-in-matchmaking
+    // class of failure, and it is why it looks random.
+    //
+    // Making this airtight needs a working inline hook, which has no unprotect window at all. That is
+    // now more attractive than it was: the 1.4.8 byte dump established this signature IS the function
+    // entry, so 1.4.3's crash is no longer explained by a mid-prologue patch — it is simply unexplained.
+    // Do not ship one without understanding that crash first.
     const unsigned char* entry = FindFunctionEntry(scan);
     if (entry == scan) {
         std::cout << "Curl hook: signature is the function entry (int3 padding runs up to it).\n";
@@ -268,7 +287,10 @@ bool InitializeCurlHook()
     else if (entry) {
         std::cout << "Curl hook: entry located " << (int)(scan - entry) << " bytes back.\n";
     }
-    std::cout << "Curl hook: VEH with immediate re-arm.\n";
+    // Say what the code ACTUALLY does. This line used to read "immediate re-arm", left behind when
+    // 1.5.0 reverted that change in memcury.h but not here. A log that lies about which build you are
+    // running costs hours during a diagnosis — it nearly sent this one down the wrong path twice.
+    std::cout << "Curl hook: VEH with deferred re-arm (single-step).\n";
     Hook(CurlEasySetOpt, CurlEasySetOptDetour);
 
     return true;
@@ -322,7 +344,13 @@ void InitializeExitHook()
 
     if (!UnsafeEnvironmentPopupAddr)
     {
-        std::cout << "Failed to find UnsafeEnvironmentPopupAddr (This may be fine)!\n";
+        // NOT "fine". This is the popup behind "Fortnite was not started correctly and needs to be
+        // closed" — the anti-tamper missing-launcher verdict. Unhooked, the player gets kicked to the
+        // login screen for no visible reason. Say so honestly; the old wording invited it to be
+        // scrolled past. (It has never actually failed on 7.40 — 0 occurrences across 58 sessions —
+        // so this firing means a build changed under us.)
+        std::cout << "Curl hook: FAILED to find UnsafeEnvironmentPopup - the anti-tamper popup is NOT "
+                     "suppressed on this build. Expect 'Fortnite was not started correctly' kicks.\n";
     }
 
     // probably unnneeeded
@@ -338,11 +366,18 @@ void InitializeExitHook()
 
     if (!RequestExitWithStatusAddr)
     {
-        std::cout << "Failed to find RequestExitWithStatusAddr (This may be fine)!\n";
+        std::cout << "Curl hook: FAILED to find RequestExitWithStatus - the anti-tamper forced exit is "
+                     "NOT suppressed on this build.\n";
     }
 
-    DetoursEasy(UnsafeEnvironmentPopupAddr, UnsafeEnvironmentPopupHook);
-    DetoursEasy(RequestExitWithStatusAddr, RequestExitWithStatusHook);
+    // Both of these used to be called unconditionally, so a missed signature scan handed DetourAttach a
+    // NULL target — which quietly does nothing (or worse) while the log above says "this may be fine".
+    // Only hook what we actually found.
+    if (UnsafeEnvironmentPopupAddr)
+        DetoursEasy(UnsafeEnvironmentPopupAddr, UnsafeEnvironmentPopupHook);
+
+    if (RequestExitWithStatusAddr)
+        DetoursEasy(RequestExitWithStatusAddr, RequestExitWithStatusHook);
 }
 
 DWORD WINAPI Main(LPVOID)
