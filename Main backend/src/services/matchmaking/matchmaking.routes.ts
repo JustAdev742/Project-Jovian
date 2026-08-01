@@ -990,8 +990,18 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
       return reply.send({ ...base, serve: false, reason: 'host-election-disabled' });
     }
 
-    // Already serving. Keep going while anyone is waiting OR anyone is in the match — the agent
-    // applies its own grace period on top, because players briefly count as neither while they load.
+    // Already serving. Keep going while anyone is waiting OR anyone is in the match.
+    //
+    // This DOES go false for a few seconds while a player loads in: their matchmaking ticket is gone
+    // (waiting 0) but their session isn't counted yet (occupancy 0). That is a known blind spot and it
+    // is deliberately harmless — the host agent NEVER stops a server on this verdict. Once hosting, it
+    // only re-registers and checks MAX_SERVER_AGE_MS; see the comment in hostRunner.tickAgent(). The
+    // verdict here feeds the launcher's status text and nothing else.
+    //
+    // An earlier note claimed the agent "applies its own grace period on top". It does not, and there
+    // is nothing to grace. Do NOT add a stop-on-stand-down here or in the agent to "make this matter":
+    // it would kill a live server out from under a player who is mid-join, which is exactly the bug we
+    // spent a session chasing before the crash log proved the shutdown was never ours.
     if (mine) {
       const stillNeeded = demand.waiting > 0 || occupancy > 0;
       return reply.send({

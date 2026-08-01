@@ -167,6 +167,30 @@ struct FName
 	std::string ToString();
 };
 
+// ── FName sanity ─────────────────────────────────────────────────────────────────────────────────
+// FName::ToString hands ComparisonIndex to the engine, which uses it to index GNames. An index that
+// did not actually come from a real name field walks that table out of bounds and takes the WHOLE
+// PROCESS down with 0xC0000005 — and the fault lands six frames deep inside FortniteClient with no
+// Reboot frame at the faulting address, which is why this cost two sessions to place. The only Reboot
+// frame is the return address of the ProcessEvent inside FName::ToString itself.
+//
+// 7.40 registers a few hundred thousand names, so an index past a few million is not a name at all:
+// it is a pointer, a float, or unrelated struct bytes that we misread. Reject those before the engine
+// ever sees them. Zero is NAME_None and is equally not worth a round trip.
+inline constexpr uint32_t MaxPlausibleNameIndex = 0x400000; // 4,194,304
+
+inline bool IsPlausibleName(const FName& Name)
+{
+	return Name.ComparisonIndex != 0 && Name.ComparisonIndex < MaxPlausibleNameIndex;
+}
+
+/// FName::ToString behind SEH, so a name that slips past IsPlausibleName still cannot kill a live
+/// match. Returns false (leaving Out untouched) if the engine faulted while resolving it.
+///
+/// Defined in structs.cpp rather than here because the __try frame may not itself own C++ objects that
+/// require unwinding — MSVC rejects that with C2712 — so the actual call has to sit in a helper.
+bool TryNameToString(FName* Name, std::string* Out);
+
 struct UObject
 {
 	void** VFTable;
