@@ -84,9 +84,12 @@ static const unsigned char* FindFunctionEntry(const unsigned char* inner)
     for (int i = 63; i >= 0; --i) {
         if (buf[i] == 0xCC) {
             const unsigned char* entry = inner - 64 + i + 1;
-            // Padding directly against the scan point would mean the scan IS the entry, which
-            // contradicts the signature. Treat that as unsure rather than hooking a boundary.
-            return (entry < inner) ? entry : nullptr;
+            // NOTE: entry == inner is the CORRECT answer here, not an error. A player's byte dump
+            // showed 14 bytes of int3 immediately before the scan point, meaning the signature
+            // matches the function's FIRST instruction — the prologue I assumed sat in front of it
+            // does not exist. An earlier version rejected that case as "impossible", which is why
+            // 1.4.8 fell back despite having found the entry correctly.
+            return entry;
         }
     }
     return nullptr;
@@ -235,36 +238,38 @@ bool InitializeCurlHook()
         }
     }
 
-    // Two ways to locate the entry, most reliable first.
+    // WHERE THE ENTRY IS — now known, from a player's byte dump:
+    //
+    //     ... 48 83 C4 28 C3   CC CC CC CC CC CC CC CC CC CC CC CC CC CC | 89 54 24 10 ...
+    //         end of previous fn   14 bytes of int3 padding              ^ scan point
+    //
+    // The padding runs right up to the scan point, so the signature matches curl_easy_setopt's
+    // FIRST instruction. The prologue I assumed sat in front of it does not exist.
+    //
+    // AND YET WE STILL DO NOT INLINE-HOOK IT. 1.4.3 hooked exactly this address with MinHook and
+    // hard-crashed the game while loading the Frontend map. Learning that the address was correct
+    // does not explain that crash — it removes my explanation for it. Shipping the same hook again
+    // on the theory "the address must have been wrong" would be repeating a known failure on an
+    // untested hypothesis, and the person who finds out is the player.
+    //
+    // So the hook stays VEH, and the race is attacked where it can be attacked safely: the guard is
+    // now re-armed immediately when our hook fires, instead of being deferred to a second exception
+    // (see the STATUS_GUARD_PAGE_VIOLATION handler in memcury.h). That shrinks the unhooked window
+    // from "until this thread is next scheduled" to the few microseconds of the handler, without
+    // modifying a single byte of the game's code.
+    //
+    // It does NOT close the window completely: a guarded page covers every function sharing it, and
+    // a fault from a neighbouring function still has to defer. Making this airtight needs a working
+    // inline hook, which needs the 1.4.3 crash understood first.
     const unsigned char* entry = FindFunctionEntry(scan);
-    if (entry) {
-        std::cout << "Curl hook: entry via int3 padding, " << (int)(scan - entry) << " bytes back.\n";
+    if (entry == scan) {
+        std::cout << "Curl hook: signature is the function entry (int3 padding runs up to it).\n";
     }
-    else if (IsRcxSpill(scan - 5)) {
-        // The textbook variadic prologue. Kept as a second chance in case padding is absent.
-        entry = scan - 5;
-        std::cout << "Curl hook: entry via rcx-spill prologue, 5 bytes back.\n";
+    else if (entry) {
+        std::cout << "Curl hook: entry located " << (int)(scan - entry) << " bytes back.\n";
     }
-
-    if (entry) {
-        void* target = const_cast<unsigned char*>(entry);
-        if (MH_CreateHook(target, CurlEasySetOptDetour, nullptr) == MH_OK
-            && MH_EnableHook(target) == MH_OK)
-        {
-            std::cout << "Curl hook: inline at function entry (no race).\n";
-        }
-        else
-        {
-            std::cout << "Curl hook: MinHook refused the entry — falling back to VEH.\n";
-            Hook(CurlEasySetOpt, CurlEasySetOptDetour);
-        }
-    }
-    else {
-        // Different compiler output than expected. Do not guess at an offset — take the unreliable
-        // hook over a corrupted function.
-        std::cout << "Curl hook: could not confirm the function entry — falling back to VEH.\n";
-        Hook(CurlEasySetOpt, CurlEasySetOptDetour);
-    }
+    std::cout << "Curl hook: VEH with immediate re-arm.\n";
+    Hook(CurlEasySetOpt, CurlEasySetOptDetour);
 
     return true;
 }
