@@ -1273,43 +1273,32 @@ namespace Memcury
 
                 if (Itr != Hooks.end())
                 {
-                    // OUR HOOK FIRED — RE-ARM NOW, DO NOT DEFER.
-                    //
-                    // PAGE_GUARD is a one-shot: the kernel clears the guard bit to deliver this
-                    // exception, and the bit lives in the PAGE TABLE, so from this instant the
-                    // function is unhooked for EVERY thread. The original code deferred re-arming to
-                    // a second (STATUS_SINGLE_STEP) exception on this thread, which leaves the hook
-                    // off across two full user/kernel round-trips — and a whole scheduler quantum if
-                    // this thread is descheduled in between.
-                    //
-                    // UE4 issues ~25-30 curl_easy_setopt calls per request across several threads.
-                    // Any call landing in that window ran the REAL function, so its URL was never
-                    // rewritten and the request left for Epic's live servers. That is what produced
-                    // hotfix files 401ing and taking their whole batch down, ReadFriendsList failing,
-                    // and tryPlayOnPlatform failing with "Network failure when attempting to check
-                    // platform restrictions" — all of them "Token is missing key ID value", Epic's
-                    // own error text, from Epic's own servers.
-                    //
-                    // Deferring is unnecessary HERE specifically: we are redirecting Rip to the
-                    // detour, so the faulting instruction is never retried. Re-arming immediately
-                    // cannot loop, and it shrinks the window from "until this thread is next
-                    // scheduled" to the few microseconds of this handler.
                     Exception->ContextRecord->Rip = (uintptr_t)Itr->Detour;
-
-                    for (auto& Hook : Hooks)
-                    {
-                        DWORD dwOldProtect;
-                        VirtualProtect(Hook.Original, 1, PAGE_EXECUTE_READ | PAGE_GUARD, &dwOldProtect);
-                    }
-
-                    return EXCEPTION_CONTINUE_EXECUTION;
                 }
 
-                // NOT one of ours — some neighbouring function on the same 4KB page. That
-                // instruction DOES have to re-execute, so the guard must stay off until it has.
-                // Re-arming here would fault on the same instruction forever. This is the one case
-                // that genuinely needs the single-step deferral, and it is why the window cannot be
-                // closed completely: a guarded page covers every function sharing it.
+                /* DO NOT RE-ARM HERE. The deferral to STATUS_SINGLE_STEP is load-bearing.
+                 *
+                 * 1.4.9 re-armed every hook immediately in this branch, reasoning that redirecting
+                 * Rip means the faulting instruction is never retried, so the guard could go straight
+                 * back on and close the window that lets requests escape to Epic. The window is real
+                 * and that reasoning is sound in isolation. It is also wrong, and it broke hosting.
+                 *
+                 * Re-arming before returning leaves the guard ACTIVE while the detour runs. A detour
+                 * that calls through to the function it hooked — which the exit hooks do, and which
+                 * the Reboot gameserver DLL's ProcessEvent hook does — immediately faults again, is
+                 * redirected to itself, and recurses until the stack dies. The observed result was a
+                 * gameserver crashing at ProcessEvent+0x30 with 0xC0000005 and a null
+                 * PlayerController, its replacement starting without the DLL, sitting on the Frontend
+                 * map, and never listening — while still registering as a live server, so both
+                 * players waited on a match that could never start.
+                 *
+                 * Servers worked in 1.4.8 and stopped in 1.4.9, and this was the only behavioural
+                 * change between them.
+                 *
+                 * The single-step defers re-arming until ONE instruction of the detour has run, which
+                 * is precisely what gives a detour room to call the original. Closing the escape
+                 * window has to be done some other way — a working inline hook, most likely — not by
+                 * removing this. */
                 Exception->ContextRecord->EFlags |= 0x100; // SINGLE_STEP_FLAG
 
                 return EXCEPTION_CONTINUE_EXECUTION;
