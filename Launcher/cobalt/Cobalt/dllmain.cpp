@@ -29,6 +29,28 @@ auto FindPushWidget()
     return pattern;
 }
 
+/**
+ * Are these five bytes `mov [rsp+8], rcx` — the first-argument spill that opens curl_easy_setopt?
+ *
+ * Lives in its own function because __try cannot be used where C++ objects need unwinding, and the
+ * caller builds strings. The SEH is not decoration: this reads memory computed by subtracting from a
+ * scan result, and if that lands outside a mapped page the alternative to catching it is faulting
+ * inside the game. An unreadable address means "unconfirmed", which makes the caller fall back
+ * rather than patch.
+ */
+static bool IsRcxSpill(const unsigned char* p)
+{
+    static const unsigned char kRcxSpill[5] = { 0x48, 0x89, 0x4C, 0x24, 0x08 };
+    __try {
+        for (int i = 0; i < 5; ++i)
+            if (p[i] != kRcxSpill[i]) return false;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void Hook(void* Target, void* Detour)
 {
 #ifdef USE_MINHOOK
@@ -122,30 +144,60 @@ bool InitializeCurlHook()
     // when one file fails, so that single escaped request threw away the other three and left the
     // client on its built-in XMPP address, which ends in "Fortnite was not started correctly".
     //
-    // ── AND YET IT MUST STAY A VEH HOOK. DO NOT "FIX" THIS WITH MinHook/Detours. ─────────────────
+    // ── RESOLVE THE TRUE FUNCTION ENTRY, THEN HOOK IT INLINE ─────────────────────────────────────
     //
-    // Tried exactly that (1.4.3) and it hard-crashed the game while loading the Frontend map, right
-    // as the login request burst begins. Reverted. The reason is the signature above:
+    // The signature above deliberately does not match the start of curl_easy_setopt. It matches the
+    // variadic home-register spill, which begins at the SECOND argument:
     //
-    //     89 54 24 10        mov  [rsp+10], edx      <-- the scan matches HERE
-    //     4C 89 44 24 18     mov  [rsp+18], r8
-    //     4C 89 4C 24 20     mov  [rsp+20], r9
+    //     48 89 4C 24 08     mov  [rsp+8],  rcx      <-- the REAL entry (arg 1, the CURL*)
+    //     89 54 24 10        mov  [rsp+10], edx      <-- the scan matches HERE (arg 2, an int)
+    //     4C 89 44 24 18     mov  [rsp+18], r8       <-- arg 3
+    //     4C 89 4C 24 20     mov  [rsp+20], r9       <-- arg 4
     //     48 83 EC 28        sub  rsp, 28
     //
-    // That is the variadic home-register spill, and it starts at the SECOND argument. The real entry
-    // to curl_easy_setopt is a few bytes earlier, at `48 89 4C 24 08` (mov [rsp+8], rcx) for the
-    // first argument. So CurlEasySetOptAddr is an address INSIDE the function, not its start.
+    // In the x64 calling convention rcx/rdx/r8/r9 carry the first four arguments, and a variadic
+    // function spills them to their home slots so va_start can walk them. `mov [rsp+8], rcx` is
+    // exactly five bytes, so the entry is scanned_address - 5. CURLoption is an int, which is why
+    // its spill uses edx and is one byte shorter than the others.
     //
-    // A page-guard hook does not care: it compares RIP and redirects when execution reaches that
-    // address, which it always does because the prologue is straight-line. An INLINE hook cares
-    // enormously — it writes a 5-byte jump over mid-prologue instructions and builds its trampoline
-    // from a function that has already partly executed with a stack frame that does not match. Hence
-    // the crash.
+    // 1.4.3 hooked the scanned address inline and hard-crashed the game while loading the Frontend
+    // map: an inline hook writes a five-byte jump and builds a trampoline from wherever it is
+    // pointed, so pointing it mid-prologue corrupts the function. A VEH page-guard hook tolerated
+    // that only because it compares RIP rather than patching code.
     //
-    // Making this inline safely means first resolving the true function entry, which the signature
-    // does not give us. Until someone does that, the VEH race described above is the lesser evil: an
-    // occasional lost request is survivable, a crash on every launch is not.
-    Hook(CurlEasySetOpt, CurlEasySetOptDetour);
+    // But VEH is not a safe resting place either. PAGE_GUARD is a ONE-SHOT alarm: the kernel clears
+    // the guard bit when it fires, which unhooks the function for EVERY thread until a second
+    // exception re-arms it. UE4 issues ~25-30 curl_easy_setopt calls per request across threads, and
+    // any call landing in that window runs the real function, so its URL is never rewritten and the
+    // request leaves for Epic's live servers. Observed repeatedly: a hotfix file 401ing and taking
+    // the whole batch down, and later ReadFriendsList/QueryBlockedPlayers 401ing with Epic's own
+    // "Token is missing key ID value" — each ending in "Fortnite was not started correctly".
+    //
+    // So: verify the entry before trusting it. If the five bytes are not the exact rcx spill, do NOT
+    // patch — fall back to VEH, which is unreliable but never corrupts anything. A wrong guess here
+    // crashes on a player's machine, so it has to be checked rather than assumed.
+    const unsigned char* entry = reinterpret_cast<const unsigned char*>(CurlEasySetOptAddr) - 5;
+    const bool entryConfirmed = IsRcxSpill(entry);
+
+    if (entryConfirmed) {
+        void* target = const_cast<unsigned char*>(entry);
+        if (MH_CreateHook(target, CurlEasySetOptDetour, nullptr) == MH_OK
+            && MH_EnableHook(target) == MH_OK)
+        {
+            std::cout << "Curl hook: inline at function entry (no race).\n";
+        }
+        else
+        {
+            std::cout << "Curl hook: MinHook refused the entry — falling back to VEH.\n";
+            Hook(CurlEasySetOpt, CurlEasySetOptDetour);
+        }
+    }
+    else {
+        // Different compiler output than expected. Do not guess at an offset — take the unreliable
+        // hook over a corrupted function.
+        std::cout << "Curl hook: could not confirm the function entry — falling back to VEH.\n";
+        Hook(CurlEasySetOpt, CurlEasySetOptDetour);
+    }
 
     return true;
 }
