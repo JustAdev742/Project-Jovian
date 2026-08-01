@@ -185,12 +185,8 @@ PingTimeout=3.0
 `,
     'DefaultGame.ini': `[/Script/FortniteGame.FortGameInstance]
 bAllowJoinInProgress=true
-`,
-    'DefaultInput.ini': `[/Script/Engine.InputSettings]
-+ConsoleKeys=Tilde
-+ConsoleKeys=F8
-`,
-    'DefaultRuntimeOptions.ini': `[/Script/FortniteGame.FortRuntimeOptions]
+
+[/Script/FortniteGame.FortRuntimeOptions]
 bEnableGlobalChat=true
 bDisableGifting=false
 bDisableGiftingPC=false
@@ -198,6 +194,23 @@ bDisableGiftingPS4=false
 bDisableGiftingXB=false
 `,
   };
+  // KEEP THIS SET AS SMALL AS POSSIBLE — it is not tidiness, it is reliability.
+  //
+  // UE4 discards the ENTIRE hotfix batch if any single file fails to download, and Cobalt's curl
+  // hook has a race that intermittently lets one request escape to Epic's real servers, where it
+  // 401s. Observed twice: three of four files downloaded fine — including the corrected
+  // DefaultEngine.ini — and the one lost request threw all of them away, leaving the client on its
+  // built-in XMPP address and producing "Fortnite was not started correctly".
+  //
+  // Every file served is another chance for that race to fire, so the set is now the two that
+  // actually matter. DefaultEngine.ini carries the XMPP address; DefaultGame.ini disables
+  // anti-cheat and EOS, skips account linking, and enables Athena gameplay. The old
+  // DefaultInput.ini was console keybinds (developer convenience) and DefaultRuntimeOptions.ini
+  // was chat/gifting flags, whose section is Game-scoped and now lives in DefaultGame.ini.
+  //
+  // Going from four files to two halves the odds of losing a batch. It does NOT eliminate them —
+  // the real fix is the hook, which needs the true curl_easy_setopt entry address resolved first.
+  // Do not add files here casually.
 
   try {
     fs.mkdirSync(Config.CLOUDSTORAGE_DIR, { recursive: true });
