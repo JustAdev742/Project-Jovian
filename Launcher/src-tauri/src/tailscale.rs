@@ -331,7 +331,13 @@ pub async fn mesh_specs(coordinator: String) -> Result<MachineSpecs, String> {
 
 /// Announce this machine to the coordinator as available to host (call every ~30s to stay live).
 #[tauri::command]
-pub async fn mesh_announce(coordinator: String, account_id: String) -> Result<bool, String> {
+pub async fn mesh_announce(
+    coordinator: String,
+    account_id: String,
+    // Optional so an older frontend, or the internal call from mesh_bring_up, still compiles and
+    // works. The coordinator scores a missing region neutrally rather than excluding the machine.
+    region: Option<String>,
+) -> Result<bool, String> {
     let ip = ts_ip().unwrap_or_default();
     // A machine with no mesh address cannot be reached by other players, so it must not present
     // itself as a host candidate. Staying silent also lets the coordinator fall back to its
@@ -348,6 +354,9 @@ pub async fn mesh_announce(coordinator: String, account_id: String) -> Result<bo
         "cpuCores": specs.cpu_cores,
         "ramGB": specs.ram_gb,
         "netScore": specs.net_score,
+        // Drives proximity in host election — a lobby should be handed to a host near the players
+        // waiting for it, not merely to the machine with the most RAM.
+        "region": region.unwrap_or_default(),
     });
     let client = reqwest::Client::new();
     let res = client
@@ -396,7 +405,7 @@ pub async fn mesh_bring_up(
     let status = ts_status();
     if status.connected {
         let _ = ts_ensure_firewall();
-        let _ = mesh_announce(coordinator.clone(), account_id.clone()).await;
+        let _ = mesh_announce(coordinator.clone(), account_id.clone(), None).await;
         return Ok(status);
     }
     // Nothing else can succeed until the machine restarts, so say so instead of retrying.
@@ -429,7 +438,7 @@ pub async fn mesh_bring_up(
     };
 
     let _ = ts_ensure_firewall(); // best-effort; report via status rather than failing the whole flow
-    let _ = mesh_announce(coordinator.clone(), account_id).await;
+    let _ = mesh_announce(coordinator.clone(), account_id, None).await;
 
     Ok(MeshStatus {
         installed: true,
