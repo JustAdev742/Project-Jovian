@@ -1013,6 +1013,17 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
 
     // Real demand and nothing to join: run the election.
     const decision = decideHost(accountId, playlist, region);
+    // Log the verdict, not just the request. Two machines sat in matchmaking for over a minute each
+    // while every agent poll came back "stand down", and the coordinator's log recorded only that the
+    // question was asked — never the answer or the state behind it. Without this the only way to tell
+    // "nobody was elected" from "someone was elected and never delivered" is to guess.
+    const holder = pendingHosts.get(playlistKey(playlist, region));
+    console.log(
+      `[Serve] ${accountId.slice(0, 8)} -> ${decision.host ? 'SERVE' : 'stand down'} (${decision.reason})` +
+      ` | waiting=${demand.waiting} hasServer=${demand.hasServer}` +
+      ` | reservation=${holder ? holder.accountId.slice(0, 8) + ' idle ' + Math.round((Date.now() - holder.lastSeen) / 1000) + 's' : 'none'}` +
+      ` | servers=${[...gameServers.values()].filter(isLive).map(e => `${e.address}:${e.port}/${e.status}`).join(',') || 'none'}`,
+    );
     return reply.send({
       ...base,
       serve: decision.host,
