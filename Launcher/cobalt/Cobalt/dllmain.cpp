@@ -298,29 +298,32 @@ bool InitializeCurlHook()
 
 void InitializeExitHook()
 {
-    // ── DO NOT GATE THE ANTI-TAMPER HOOKS ON FindPushWidget() ────────────────────────────────────
+    // ── THE ANTI-TAMPER HOOKS ARE GATED OFF ON 7.40, DELIBERATELY ────────────────────────────────
     //
-    // This function used to be `if (!FindPushWidget()) { log; /*dead code*/ return; }` followed by the
-    // hooks. FindPushWidget() NEVER matches on 7.40 — every single startup logs "Failed to find
-    // PushWidget (This may be fine)!", 58 sessions and counting — so the early return fired every
-    // time and NOTHING BELOW EVER RAN. The anti-tamper hooks have never been installed on this build.
-    //
-    // That is not cosmetic. UnsafeEnvironmentPopupHook is what suppresses the popup behind
+    // The situation, which is genuinely awkward: FindPushWidget() NEVER matches on 7.40 — every
+    // startup logs it, 58 sessions and counting — so the early return below fires every time and the
+    // DetoursEasy hooks after it have NEVER run on this build. UnsafeEnvironmentPopupHook is what
+    // would suppress the popup behind
     //     "Fortnite was not started correctly and needs to be closed."
-    // Unhooked, the anti-tamper verdict goes through untouched and force-logs the player out to the
-    // login screen mid-session. That is a failure we chased for two sessions while the suppression it
-    // needed sat behind a dead branch.
+    // so that kick goes unsuppressed today. That is a real, unfixed bug.
     //
-    // It also made the diagnosis actively misleading: "Failed to find UnsafeEnvironmentPopupAddr"
-    // never appeared in any log, which reads like the scan SUCCEEDED. It never ran.
+    // 1.5.2 removed the return to fix it. It crashed BOTH machines on load — strictly worse than the
+    // intermittent, one-machine bug it targeted — and was reverted. Full reasoning at the return
+    // itself. Short version: a signature can match the WRONG function, and DetoursEasy then writes an
+    // inline patch into unrelated code, which is precisely how 1.4.3 died.
     //
-    // The scans below are safe to run unconditionally: each has fallback signatures and, since the
-    // null guards were added, hooks only what it actually resolves. Worst case on a build where
-    // nothing matches is exactly today's behaviour, plus an honest log line.
+    // A note on reading the logs here, because it misled a whole investigation: the absence of
+    // "Failed to find UnsafeEnvironmentPopupAddr" does NOT mean the scan succeeded. That message sits
+    // AFTER the return, so it has never been reachable either. Do not infer "hook installed" from a
+    // missing failure message anywhere in this file.
+    //
+    // To fix this properly: resolve each signature against THIS binary and disassemble the target to
+    // confirm it is the function we think it is, BEFORE patching anything — and ship it alone, on top
+    // of a known-good build, so the result is attributable.
     if (!FindPushWidget())
     {
-        std::cout << "PushWidget signature not present on this build (expected on 7.40) - installing "
-                     "the anti-tamper hooks anyway.\n";
+        std::cout << "PushWidget signature not present on this build (expected on 7.40) - anti-tamper "
+                     "hooks NOT installed. See the comment below before changing this.\n";
 
         /*
         auto RequestExitWithStatusAddr = sigscan("40 53 48 83 EC 40 80 3D ? ? ? ? ? 0F B6 D9 72 3A 48 8B 05"); // S9
@@ -348,7 +351,28 @@ void InitializeExitHook()
         }
         */
 
-        // NO `return;` here any more — fall through to the hooks below. See the comment above.
+        // ── THE RETURN IS BACK, AND IT STAYS ─────────────────────────────────────────────────────
+        // 1.5.2 removed it so the DetoursEasy hooks below would finally run on 7.40. That shipped and
+        // crashed BOTH machines while loading — worse than the bug it was meant to fix, which had only
+        // ever hit one machine intermittently.
+        //
+        // The reasoning was wrong in a specific, avoidable way. I argued the worst case was "today's
+        // behaviour plus a log line", because a failed signature scan now hooks nothing. That is only
+        // true if a scan either matches the RIGHT function or matches nothing. A byte pattern can also
+        // match the WRONG function, and DetoursEasy then writes an inline patch into unrelated code.
+        // These signatures were written for other seasons (the disabled block above is marked "S9")
+        // and had never once executed against 7.40, so there was no evidence for either outcome.
+        //
+        // And inline-patching is exactly the thing we had just established gets the process killed
+        // here: Detours writes bytes into .text, and UAC hashes .text. Enabling two more inline
+        // patches on the theory that -nouac would be honoured was betting the release on an untested
+        // assumption.
+        //
+        // The popup this would have suppressed is real and worth suppressing — see the notes in the
+        // git history — but it needs a signature VERIFIED against this build first, ideally by
+        // resolving the address and disassembling it before patching. Not by turning it on and
+        // shipping.
+        return;
     }
 
     auto UnsafeEnvironmentPopupAddr = sigscan("4C 8B DC 55 49 8D AB ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 89 73 F0 49 89 7B E8 48 8B F9 4D 89 63 E0 4D 8B E0 4D 89 6B D8");
