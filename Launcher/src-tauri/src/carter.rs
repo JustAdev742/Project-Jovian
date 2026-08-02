@@ -795,19 +795,34 @@ fn build_fortnite_args(account_id: &str, token: &str, eor: bool, headless: bool)
         // disable). An earlier read of this called it incoherent with -fromfl=eac; that was right
         // about retail pairing but wrong about which AC 7.40 used.
         "-noeac".into(),
-        // ── DO NOT ADD -nouac / -NoCodeGuards HERE ───────────────────────────────────────────────
-        // 1.5.2 added both, to disable UAC (Epic's own in-client anti-cheat, which -nobe and -noeac do
-        // NOT touch and which initialises in every session). That release crashed BOTH machines while
-        // loading, so it was reverted together with the Cobalt change that shipped alongside it.
+        // ── EPIC'S OWN ANTI-CHEAT ────────────────────────────────────────────────────────────────
+        // -nobe and -noeac switch off BattlEye and EAC. Neither touches UAC, which is Epic's own
+        // anti-cheat compiled into the client, and which has been running in EVERY session ever
+        // logged on both machines:
         //
-        // Which of the two did the damage is NOT yet established — they shipped in the same build, so
-        // this is guilt by association, not evidence. The observation that mattered: 1.5.1 worked on
-        // the PC and 1.5.2 did not, on both machines.
+        //     LogPluginManager: Mounting plugin UAC
+        //     LogUAC: UACClient initialized
         //
-        // If this is retried, ship it ALONE, on top of a known-good build, so the result means
-        // something. The tokens are real in this binary (verified as UTF-16LE literals beside
-        // nobe/noeac/frombe), and the game log will say "UAC is disabled via commandline or ini file"
-        // if they take.
+        // It is what closes the game on the weaker machine. From the game's own log, 2026-08-02:
+        //
+        //     03:23:22  LogUAC: UACClient initialized
+        //     03:24:06  AppES: closing code 0                       <- 44s later
+        //     03:24:06  ForceLogout "Fortnite was not started correctly and needs to be closed..."
+        //
+        // The token is real in THIS binary — verified as a UTF-16LE literal in
+        // FortniteClient-Win64-Shipping.exe, in the same string cluster as nobe/noeac/frombe.
+        //
+        // HISTORY, because this is the second attempt. 1.5.2 added this AND -NoCodeGuards AND enabled
+        // two previously-dead Detours hooks, all at once, and crashed both machines on load. Which of
+        // them did the damage was never established — that is the whole problem with shipping three
+        // untested things together. This time it goes out ALONE, on top of a build known to work.
+        //
+        // -NoCodeGuards is deliberately NOT included. It is a UAC subsystem, so if -nouac takes it
+        // should go with it; adding both would make a failure ambiguous again for no gain.
+        //
+        // PROOF IT TOOK, in the game log: "UAC is disabled via commandline or ini file" should appear,
+        // and "UACClient initialized" should NOT. The launcher's self-check reports this as NOVA-301.
+        "-nouac".into(),
         "-nosplash".into(),
         // REMOVED — `-caldera=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9`: that string is only a base64
         // JWT *header*, not a JWT, and Caldera is the modern EAC-EOS handshake that does not exist

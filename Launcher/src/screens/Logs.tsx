@@ -10,6 +10,7 @@ import { Button, Card, Badge, EmptyState } from "../ui/primitives";
 import { getLogs, type LogEntry, type ComponentStatus } from "../novaApi";
 import { useToast } from "../ui/toast";
 import { formatClock } from "../format";
+import SelfCheck from "./SelfCheck";
 
 const LEVELS = ["all", "info", "warn", "error"] as const;
 type Level = (typeof LEVELS)[number];
@@ -86,7 +87,9 @@ export default function Logs() {
       <header className="flex items-end justify-between gap-4 mb-5 shrink-0">
         <div>
           <h1 className="font-display text-2xl font-bold text-text">Logs</h1>
-          <p className="text-sm text-text-2 mt-1">Live output from the host service and in-game components.</p>
+          <p className="text-sm text-text-2 mt-1">
+            Start with the self-check below — it names the problem. The raw log underneath is the evidence.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -107,6 +110,8 @@ export default function Logs() {
           </Button>
         </div>
       </header>
+
+      <SelfCheck />
 
       {/* Component health, above the stream — the summary usually answers the question. */}
       {statuses.length > 0 && (
