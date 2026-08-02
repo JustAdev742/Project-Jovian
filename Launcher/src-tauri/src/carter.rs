@@ -820,9 +820,23 @@ fn build_fortnite_args(account_id: &str, token: &str, eor: bool, headless: bool)
         // -NoCodeGuards is deliberately NOT included. It is a UAC subsystem, so if -nouac takes it
         // should go with it; adding both would make a failure ambiguous again for no gain.
         //
-        // PROOF IT TOOK, in the game log: "UAC is disabled via commandline or ini file" should appear,
-        // and "UACClient initialized" should NOT. The launcher's self-check reports this as NOVA-301.
-        "-nouac".into(),
+        // DO NOT RE-ADD -nouac. It was tried in 1.5.6, alone, and made things WORSE: the game stopped
+        // getting past "Patching".
+        //
+        // The mechanism, which I should have checked BEFORE shipping it: the login path calls into
+        // UAC. Both of these are present in FortniteClient-Win64-Shipping.exe as UTF-16LE literals:
+        //
+        //     UFortOnlineAccount::UAC_ClientLogin      x2
+        //     UUACNetworkComponent                     x3
+        //
+        // So UAC is not only a checker that can kick you — sign-in waits on it. Disable it and the
+        // login never completes, which presents as the client sitting on "Patching" forever. I
+        // verified the token was REAL and never verified that nothing DEPENDED on it, which is the
+        // same error as 1.5.2 wearing a different hat.
+        //
+        // The kick this was meant to fix is real (AppES closes the client ~44s after UACClient
+        // initialized, with "Fortnite was not started correctly"). It needs a fix that does not
+        // involve switching UAC off. See the self-check's NOVA-301.
         "-nosplash".into(),
         // REMOVED — `-caldera=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9`: that string is only a base64
         // JWT *header*, not a JWT, and Caldera is the modern EAC-EOS handshake that does not exist
