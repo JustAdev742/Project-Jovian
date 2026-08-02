@@ -594,9 +594,44 @@ DWORD WINAPI Initialize(LPVOID)
 
     // Sleep(Defines::SecondsUntilTravel * 1000);
 
+    // ── WAIT FOR THE LOCAL PLAYER CONTROLLER ─────────────────────────────────────────────────────
+    // SecondsUntilTravel is a fixed countdown, not a readiness check. On a slower machine the client
+    // has not finished bringing up its local player by the time it expires, GetLocalPlayerController
+    // returns null (correctly — it is fully guarded and documents that "callers already handle a null
+    // return"), and the PC->ProcessEvent below dereferenced it. This caller was the one that did not
+    // handle it.
+    //
+    // Observed 2026-08-02 on the laptop, while the same build was fine on the faster PC:
+    //     02:00:55.357  PC: 0000000000000000
+    //     02:00:56.344  Gameserver exited (code=3221225477)      <- 0xC0000005
+    //     (PC, same build:  PC: 00007FEC419C4000, travelled fine)
+    // The gameserver died before it ever listened, so the coordinator elected the other machine and
+    // the laptop's own client was left pointed at a session that no longer existed.
+    //
+    // So: wait for it instead of assuming. Costs nothing when it is already there — which is why the
+    // fast machine's behaviour is completely unchanged — and gives a slow one time to catch up.
     auto PC = Helper::GetLocalPlayerController();
 
-    std::cout << "PC: " << PC << '\n';
+    for (int WaitedSeconds = 0; !PC && WaitedSeconds < 120; WaitedSeconds++)
+    {
+        if (WaitedSeconds == 0)
+            std::cout << "No local player controller yet - waiting up to 120s before travelling." << std::endl;
+
+        Sleep(1000);
+        PC = Helper::GetLocalPlayerController();
+    }
+
+    std::cout << "PC: " << PC << std::endl;
+
+    // Still nothing. Give up cleanly rather than taking the process down with a null deref: a server
+    // that never travels is recoverable (the launcher restarts it, the coordinator elects someone
+    // else), whereas a hard crash here loses the match for everyone waiting on it.
+    if (!PC)
+    {
+        std::cout << "Never got a local player controller - NOT travelling to " << Defines::MapName
+                  << ". The gameserver will not open a lobby; restart hosting." << std::endl;
+        return 0; // this is the Initialize thread proc (DWORD), not a void helper
+    }
 
     std::ofstream baiafgq("rpcs.log", std::ios_base::app);
     
