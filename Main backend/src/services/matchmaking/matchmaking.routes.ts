@@ -450,7 +450,85 @@ function waitingRegions(playlist: string, region: string): string[] {
  */
 function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
   const prox = lobbyProximityScore(c.region, waiterRegions);
-  return Math.round((usefulHardware(c.score) * 0.35 + prox * 0.65) * 100) / 100;
+  const base = usefulHardware(c.score) * 0.35 + prox * 0.65;
+  return Math.round(base * failurePenalty(c.accountId) * 100) / 100;
+}
+
+/* ── A MACHINE THAT KEEPS FAILING TO HOST MUST STOP BEING PICKED ──────────────────────────────────
+ *
+ * Hardware and proximity describe what a machine SHOULD be able to do. They say nothing about what it
+ * has actually managed, and the difference is not academic — it is the failure we kept hitting:
+ *
+ *   01:59:54  laptop elected (waiting 1)          <- first to queue, nothing else running
+ *   02:00:56  laptop's gameserver died on startup
+ *   02:02:00  the PC, which was perfectly capable, joins a session with nothing behind it
+ *
+ * The election is effectively first-come while no server exists: scores only break ties between
+ * candidates that are all announcing, so the machine that queues first gets the job even if it has
+ * failed the last five times. Then everyone waits on it.
+ *
+ * So: remember. A machine that wins an election and never delivers a listening server gets its score
+ * multiplied down for a while, and the next election prefers someone else.
+ *
+ * Three properties this deliberately has:
+ *
+ *   • It NEVER excludes. The penalty is a multiplier, never zero, so a solo player on a flaky machine
+ *     still hosts for themselves — they just lose to a healthy peer when there is one. Excluding
+ *     outright would turn "slow to host" into "cannot play", which is a worse bug than the one being
+ *     fixed.
+ *   • It FORGETS. Failures decay after FAILURE_DECAY_MS, so a transient problem — a bad launch, a
+ *     reboot mid-election — does not follow a machine around for the rest of the session.
+ *   • It is EARNED BACK IMMEDIATELY. One successful hand-off clears the record outright (see
+ *     clearPendingForServer). A machine that gets fixed is trusted again on its next success, not
+ *     after a timeout.
+ */
+interface HostFailure { count: number; lastAt: number; }
+const hostFailures = new Map<string, HostFailure>();
+
+/** How long a failure counts against a machine. Long enough to matter across a few retries, short
+ *  enough that fixing the machine does not mean waiting out a penalty box. */
+const FAILURE_DECAY_MS = 10 * 60 * 1000;
+
+/** Cap the count so an all-night failure streak cannot drive the score to effectively zero. */
+const MAX_TRACKED_FAILURES = 3;
+
+/** 0.45^n — one failure roughly halves a machine's score, three all but rule it out while a healthy
+ *  peer exists. Chosen so a single failure is enough to lose to an otherwise-comparable machine, but
+ *  not enough to lose to one that is markedly worse or further away. */
+const FAILURE_PENALTY_BASE = 0.45;
+
+function recentFailures(accountId: string): number {
+  const f = hostFailures.get(accountId);
+  if (!f) return 0;
+  if (Date.now() - f.lastAt > FAILURE_DECAY_MS) {
+    hostFailures.delete(accountId);
+    return 0;
+  }
+  return Math.min(f.count, MAX_TRACKED_FAILURES);
+}
+
+function failurePenalty(accountId: string): number {
+  return Math.pow(FAILURE_PENALTY_BASE, recentFailures(accountId));
+}
+
+/** Elected, then never produced a listening server. */
+function noteHostFailure(accountId: string, why: string): void {
+  const prev = hostFailures.get(accountId);
+  const fresh = prev && Date.now() - prev.lastAt <= FAILURE_DECAY_MS;
+  const count = (fresh ? prev!.count : 0) + 1;
+  hostFailures.set(accountId, { count, lastAt: Date.now() });
+  console.log(
+    `[Mesh] ${accountId} failed to host (${why}) — strike ${count}. ` +
+    `Election score x${Math.pow(FAILURE_PENALTY_BASE, Math.min(count, MAX_TRACKED_FAILURES)).toFixed(2)} ` +
+    `for the next ${Math.round(FAILURE_DECAY_MS / 60000)} min unless it hosts successfully.`,
+  );
+}
+
+/** Delivered a live server. Wipe the slate — see the "earned back immediately" note above. */
+function noteHostSuccess(accountId: string): void {
+  if (hostFailures.delete(accountId)) {
+    console.log(`[Mesh] ${accountId} hosted successfully — cleared its failure record.`);
+  }
 }
 
 /**
@@ -470,6 +548,44 @@ function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
 function usefulHardware(hwScore: number): number {
   const h = Math.max(0, hwScore);
   return Math.round((100 * h) / (h + 15) * 100) / 100;
+}
+
+/* ── COMPARING THE ACTUAL SPECS ───────────────────────────────────────────────────────────────────
+ *
+ * usefulHardware saturates on purpose, so within one region it barely separates anything: 12c/15.9GB
+ * scores 93.86 against 8c/7.6GB's 90.59. Three and a half percent, for a machine with 50% more cores
+ * and twice the RAM. That is the right answer when the question is "is this worth 200ms of extra
+ * ping" and the wrong answer when both machines are in the same city.
+ *
+ * So when distance is not the deciding factor, compare what a person would: cores and gigabytes.
+ *
+ * BOTH must be clearly ahead. Requiring both is what stops a machine with many weak cores and little
+ * RAM — or lots of RAM and few cores — from claiming to be "better". A Reboot server needs both, and
+ * a split decision means they are close enough that the existing score should decide instead.
+ */
+const SPEC_MARGIN = 1.2; // 20% clear on cores AND RAM, so near-identical machines don't ping-pong
+
+function clearlyBetterSpecs(a: MeshCandidate, b: MeshCandidate): boolean {
+  if (!a.cpuCores || !a.ramGB || !b.cpuCores || !b.ramGB) return false; // older launcher, no specs
+  return a.cpuCores >= b.cpuCores * SPEC_MARGIN && a.ramGB >= b.ramGB * SPEC_MARGIN;
+}
+
+/** How long to wait for a better-specced machine in the SAME region to claim the host role.
+ *
+ *  Both machines' agents poll should-i-serve every HOST_AGENT_POLL_MS (3s) whenever their launcher is
+ *  open, so two polls is all a same-region hand-off can legitimately need. This is deliberately much
+ *  shorter than MESH_ELECTION_GRACE_MS: that one covers a cross-region machine that may still be
+ *  starting up, whereas this is pure dead time in matchmaking if the other machine is not there. */
+const SPEC_DEFER_GRACE_MS = 6_000;
+
+/** Announced recently enough to believe it is still sitting there ready to host.
+ *
+ *  Deliberately derived from the TTL rather than a fixed number: a candidate is only reaped at
+ *  MESH_CANDIDATE_TTL_MS, so anything inside half of that has certainly re-announced at least once.
+ *  A hardcoded threshold risks being tighter than the announce interval, in which case this would
+ *  silently never fire and the whole spec comparison would be dead code. */
+function isFreshCandidate(c: MeshCandidate): boolean {
+  return Date.now() - c.lastSeen < Config.MESH_CANDIDATE_TTL_MS / 2;
 }
 
 /** Announced machines that are still within their TTL (expired ones are reaped here). */
@@ -528,6 +644,10 @@ function decideHost(
       `[Mesh] Releasing stale host reservation for ${key} held by ${pending.accountId} ` +
       `(idle ${Math.round(idleFor / 1000)}s) — it never delivered a server.`,
     );
+    // This is the signal. The machine won the election and did not produce a listening server, which
+    // is exactly what "should not have been picked" looks like from here — regardless of WHY it
+    // failed (crashed, closed, too slow, never travelled). Count it against the next election.
+    noteHostFailure(pending.accountId, `no server after ${Math.round(idleFor / 1000)}s idle`);
     pendingHosts.delete(key);
   }
 
@@ -569,20 +689,59 @@ function decideHost(
   const best = bestEntry?.c ?? null;
   const myScore = me ? electionScore(me, waiters) : undefined;
 
-  if (best && me && myScore !== undefined && bestEntry && best.accountId !== accountId && bestEntry.s > myScore * 1.15) {
+  /* ── RAW SPECS DECIDE WHEN DISTANCE DOES NOT ────────────────────────────────────────────────────
+   *
+   * The composite score deliberately saturates hardware (see usefulHardware) so a beefy machine
+   * cannot buy its way past a continent. Correct across regions — and useless within one, which is
+   * the only case we actually have. Real announced numbers:
+   *
+   *     pc      12 cores / 15.9GB -> hw 70.54 -> score 93.86
+   *     laptop   8 cores /  7.6GB -> hw 40.81 -> score 90.59
+   *
+   * The PC has 50% more cores and more than double the RAM, and comes out 3.6% ahead — under the
+   * 1.15 margin below. So the laptop, which could not host at all, won every election simply by
+   * asking first.
+   *
+   * When proximity does not separate two machines, compare the numbers a person would compare:
+   * cores and RAM. If one is clearly ahead on BOTH, it hosts.
+   */
+  const specBetter = (best && me && best.accountId !== accountId
+    && clearlyBetterSpecs(best, me)
+    && lobbyProximityScore(best.region, waiters) >= lobbyProximityScore(me.region, waiters)
+    && recentFailures(best.accountId) === 0
+    && isFreshCandidate(best)) ? best : null;
+
+  const scoreBetter = !!(best && me && myScore !== undefined && bestEntry
+    && best.accountId !== accountId && bestEntry.s > myScore * 1.15);
+
+  if (best && me && myScore !== undefined && bestEntry && (specBetter || scoreBetter)) {
     const since = electionDeferredSince.get(key) ?? Date.now();
     electionDeferredSince.set(key, since);
-    if (Date.now() - since < Config.MESH_ELECTION_GRACE_MS) {
-      // A clearly better machine is online — give it a moment to take the host role. "Better" now
-      // means better FOR THE PEOPLE WAITING, so this can defer to a slower machine that is closer,
-      // which is the intended behaviour rather than a regression.
+
+    /* AND KEEP IT FAST. The grace is how long we stall hoping the better machine steps up, so it is
+     * pure added wait whenever it does not. A spec-based hand-off is between two machines that are
+     * both sitting in the launcher polling every HOST_AGENT_POLL_MS (3s), so one or two polls is all
+     * it should ever need — not the 20s the cross-region case allows for. If the better machine has
+     * not claimed it by then it is not coming, and waiting longer just makes matchmaking slower for
+     * no gain. */
+    const graceMs = specBetter ? SPEC_DEFER_GRACE_MS : Config.MESH_ELECTION_GRACE_MS;
+
+    if (Date.now() - since < graceMs) {
       console.log(
-        `[Mesh] Deferring to ${best.accountId} (${regionLabel(best.region)}) — ` +
-        `score ${bestEntry.s} vs ${myScore} for ${waiters.length} waiter(s)`,
+        specBetter
+          ? `[Mesh] Deferring to ${best.accountId} on specs — ` +
+            `${best.cpuCores}c/${best.ramGB}GB vs mine ${me.cpuCores}c/${me.ramGB}GB ` +
+            `(same region, up to ${Math.round(graceMs / 1000)}s)`
+          : `[Mesh] Deferring to ${best.accountId} (${regionLabel(best.region)}) — ` +
+            `score ${bestEntry.s} vs ${myScore} for ${waiters.length} waiter(s)`,
       );
-      return { host: false, reason: 'better-host-available', betterHost: best.accountId, retryMs: 5000, score: myScore };
+      return { host: false, reason: 'better-host-available', betterHost: best.accountId, retryMs: 2000, score: myScore };
     }
     // Grace elapsed and the better machine never stepped up — host here rather than stall.
+    console.log(
+      `[Mesh] ${best.accountId} did not claim the host role in ${Math.round(graceMs / 1000)}s — ` +
+      `hosting on ${accountId} instead.`,
+    );
   }
 
   electionDeferredSince.delete(key);
@@ -598,11 +757,24 @@ function decideHost(
   return { host: true, reason: 'elected', score: myScore };
 }
 
-/** Clear pending-host reservations satisfied by a newly-registered server. */
+/** Clear pending-host reservations satisfied by a newly-registered server.
+ *
+ * Only called with a READY server (both callers gate on status === 'ready'), so reaching here means
+ * the reservation holder actually delivered — the one unambiguous success signal available. Credit it
+ * before dropping the reservation, or a machine could never work off a strike. */
 function clearPendingForServer(playlist: string): void {
-  if (playlist === '*') { pendingHosts.clear(); return; }
+  if (playlist === '*') {
+    for (const p of pendingHosts.values()) noteHostSuccess(p.accountId);
+    pendingHosts.clear();
+    return;
+  }
   const pl = playlist.toLowerCase();
-  for (const [k] of pendingHosts) { if (k.startsWith(pl + ':')) pendingHosts.delete(k); }
+  for (const [k, p] of pendingHosts) {
+    if (k.startsWith(pl + ':')) {
+      noteHostSuccess(p.accountId);
+      pendingHosts.delete(k);
+    }
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
