@@ -450,7 +450,85 @@ function waitingRegions(playlist: string, region: string): string[] {
  */
 function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
   const prox = lobbyProximityScore(c.region, waiterRegions);
-  return Math.round((usefulHardware(c.score) * 0.35 + prox * 0.65) * 100) / 100;
+  const base = usefulHardware(c.score) * 0.35 + prox * 0.65;
+  return Math.round(base * failurePenalty(c.accountId) * 100) / 100;
+}
+
+/* ── A MACHINE THAT KEEPS FAILING TO HOST MUST STOP BEING PICKED ──────────────────────────────────
+ *
+ * Hardware and proximity describe what a machine SHOULD be able to do. They say nothing about what it
+ * has actually managed, and the difference is not academic — it is the failure we kept hitting:
+ *
+ *   01:59:54  laptop elected (waiting 1)          <- first to queue, nothing else running
+ *   02:00:56  laptop's gameserver died on startup
+ *   02:02:00  the PC, which was perfectly capable, joins a session with nothing behind it
+ *
+ * The election is effectively first-come while no server exists: scores only break ties between
+ * candidates that are all announcing, so the machine that queues first gets the job even if it has
+ * failed the last five times. Then everyone waits on it.
+ *
+ * So: remember. A machine that wins an election and never delivers a listening server gets its score
+ * multiplied down for a while, and the next election prefers someone else.
+ *
+ * Three properties this deliberately has:
+ *
+ *   • It NEVER excludes. The penalty is a multiplier, never zero, so a solo player on a flaky machine
+ *     still hosts for themselves — they just lose to a healthy peer when there is one. Excluding
+ *     outright would turn "slow to host" into "cannot play", which is a worse bug than the one being
+ *     fixed.
+ *   • It FORGETS. Failures decay after FAILURE_DECAY_MS, so a transient problem — a bad launch, a
+ *     reboot mid-election — does not follow a machine around for the rest of the session.
+ *   • It is EARNED BACK IMMEDIATELY. One successful hand-off clears the record outright (see
+ *     clearPendingForServer). A machine that gets fixed is trusted again on its next success, not
+ *     after a timeout.
+ */
+interface HostFailure { count: number; lastAt: number; }
+const hostFailures = new Map<string, HostFailure>();
+
+/** How long a failure counts against a machine. Long enough to matter across a few retries, short
+ *  enough that fixing the machine does not mean waiting out a penalty box. */
+const FAILURE_DECAY_MS = 10 * 60 * 1000;
+
+/** Cap the count so an all-night failure streak cannot drive the score to effectively zero. */
+const MAX_TRACKED_FAILURES = 3;
+
+/** 0.45^n — one failure roughly halves a machine's score, three all but rule it out while a healthy
+ *  peer exists. Chosen so a single failure is enough to lose to an otherwise-comparable machine, but
+ *  not enough to lose to one that is markedly worse or further away. */
+const FAILURE_PENALTY_BASE = 0.45;
+
+function recentFailures(accountId: string): number {
+  const f = hostFailures.get(accountId);
+  if (!f) return 0;
+  if (Date.now() - f.lastAt > FAILURE_DECAY_MS) {
+    hostFailures.delete(accountId);
+    return 0;
+  }
+  return Math.min(f.count, MAX_TRACKED_FAILURES);
+}
+
+function failurePenalty(accountId: string): number {
+  return Math.pow(FAILURE_PENALTY_BASE, recentFailures(accountId));
+}
+
+/** Elected, then never produced a listening server. */
+function noteHostFailure(accountId: string, why: string): void {
+  const prev = hostFailures.get(accountId);
+  const fresh = prev && Date.now() - prev.lastAt <= FAILURE_DECAY_MS;
+  const count = (fresh ? prev!.count : 0) + 1;
+  hostFailures.set(accountId, { count, lastAt: Date.now() });
+  console.log(
+    `[Mesh] ${accountId} failed to host (${why}) — strike ${count}. ` +
+    `Election score x${Math.pow(FAILURE_PENALTY_BASE, Math.min(count, MAX_TRACKED_FAILURES)).toFixed(2)} ` +
+    `for the next ${Math.round(FAILURE_DECAY_MS / 60000)} min unless it hosts successfully.`,
+  );
+}
+
+/** Delivered a live server. Wipe the slate — see the "earned back immediately" note above. */
+function noteHostSuccess(accountId: string): void {
+  if (hostFailures.delete(accountId)) {
+    console.log(`[Mesh] ${accountId} hosted successfully — cleared its failure record.`);
+  }
 }
 
 /**
@@ -528,6 +606,10 @@ function decideHost(
       `[Mesh] Releasing stale host reservation for ${key} held by ${pending.accountId} ` +
       `(idle ${Math.round(idleFor / 1000)}s) — it never delivered a server.`,
     );
+    // This is the signal. The machine won the election and did not produce a listening server, which
+    // is exactly what "should not have been picked" looks like from here — regardless of WHY it
+    // failed (crashed, closed, too slow, never travelled). Count it against the next election.
+    noteHostFailure(pending.accountId, `no server after ${Math.round(idleFor / 1000)}s idle`);
     pendingHosts.delete(key);
   }
 
@@ -598,11 +680,24 @@ function decideHost(
   return { host: true, reason: 'elected', score: myScore };
 }
 
-/** Clear pending-host reservations satisfied by a newly-registered server. */
+/** Clear pending-host reservations satisfied by a newly-registered server.
+ *
+ * Only called with a READY server (both callers gate on status === 'ready'), so reaching here means
+ * the reservation holder actually delivered — the one unambiguous success signal available. Credit it
+ * before dropping the reservation, or a machine could never work off a strike. */
 function clearPendingForServer(playlist: string): void {
-  if (playlist === '*') { pendingHosts.clear(); return; }
+  if (playlist === '*') {
+    for (const p of pendingHosts.values()) noteHostSuccess(p.accountId);
+    pendingHosts.clear();
+    return;
+  }
   const pl = playlist.toLowerCase();
-  for (const [k] of pendingHosts) { if (k.startsWith(pl + ':')) pendingHosts.delete(k); }
+  for (const [k, p] of pendingHosts) {
+    if (k.startsWith(pl + ':')) {
+      noteHostSuccess(p.accountId);
+      pendingHosts.delete(k);
+    }
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
