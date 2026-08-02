@@ -319,8 +319,8 @@ void InitializeExitHook()
     // nothing matches is exactly today's behaviour, plus an honest log line.
     if (!FindPushWidget())
     {
-        std::cout << "PushWidget signature not present on this build (expected on 7.40) - installing "
-                     "the anti-tamper hooks anyway.\n";
+        std::cout << "PushWidget signature not present on this build (expected on 7.40) - anti-tamper "
+                     "hooks NOT installed. See the comment below before changing this.\n";
 
         /*
         auto RequestExitWithStatusAddr = sigscan("40 53 48 83 EC 40 80 3D ? ? ? ? ? 0F B6 D9 72 3A 48 8B 05"); // S9
@@ -348,7 +348,28 @@ void InitializeExitHook()
         }
         */
 
-        // NO `return;` here any more — fall through to the hooks below. See the comment above.
+        // ── THE RETURN IS BACK, AND IT STAYS ─────────────────────────────────────────────────────
+        // 1.5.2 removed it so the DetoursEasy hooks below would finally run on 7.40. That shipped and
+        // crashed BOTH machines while loading — worse than the bug it was meant to fix, which had only
+        // ever hit one machine intermittently.
+        //
+        // The reasoning was wrong in a specific, avoidable way. I argued the worst case was "today's
+        // behaviour plus a log line", because a failed signature scan now hooks nothing. That is only
+        // true if a scan either matches the RIGHT function or matches nothing. A byte pattern can also
+        // match the WRONG function, and DetoursEasy then writes an inline patch into unrelated code.
+        // These signatures were written for other seasons (the disabled block above is marked "S9")
+        // and had never once executed against 7.40, so there was no evidence for either outcome.
+        //
+        // And inline-patching is exactly the thing we had just established gets the process killed
+        // here: Detours writes bytes into .text, and UAC hashes .text. Enabling two more inline
+        // patches on the theory that -nouac would be honoured was betting the release on an untested
+        // assumption.
+        //
+        // The popup this would have suppressed is real and worth suppressing — see the notes in the
+        // git history — but it needs a signature VERIFIED against this build first, ideally by
+        // resolving the address and disassembling it before patching. Not by turning it on and
+        // shipping.
+        return;
     }
 
     auto UnsafeEnvironmentPopupAddr = sigscan("4C 8B DC 55 49 8D AB ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 89 73 F0 49 89 7B E8 48 8B F9 4D 89 63 E0 4D 8B E0 4D 89 6B D8");
