@@ -21,8 +21,18 @@ import { IDLE, type UpdateState } from "./updater";
 const FIRST_DELAY_MS = 2_500;
 /** Backoff for failed attempts: ~8s, 30s, 2m, 5m, then every 15 minutes. */
 const RETRY_MS = [8_000, 30_000, 120_000, 300_000, 900_000];
-/** Re-check cadence once a check has SUCCEEDED. */
-const REFRESH_MS = 6 * 60 * 60 * 1000;
+/** Re-check cadence once a check has SUCCEEDED.
+ *
+ *  Was 6 hours, which is right for an app that ships monthly and wrong for this one. A launcher left
+ *  open through an evening of releases checked once and never looked again, so every update appeared
+ *  not to exist until the launcher was restarted — which is exactly what it looked like from the
+ *  outside: "the launcher doesn't detect the update".
+ *
+ *  15 minutes costs one conditional GET of a ~1.5KB manifest per quarter hour, against a release
+ *  landing within a quarter hour of being published. The failure path is untouched; RETRY_MS above
+ *  already backs off to the same 15 minutes, so a launcher that cannot reach GitHub still is not
+ *  hammering it. */
+const REFRESH_MS = 15 * 60 * 1000;
 
 export type UpdateCheck = {
   state: UpdateState;
