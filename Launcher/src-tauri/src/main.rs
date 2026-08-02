@@ -5,6 +5,7 @@ use std::os::windows::process::CommandExt;
 use sysinfo::System;
 use tauri::{AppHandle, Manager, Window};
 mod anticheat;
+mod diagnostics;
 mod carter;
 mod discord;
 mod host;
@@ -328,6 +329,7 @@ async fn main() {
             host::is_proxy_running,
             host::free_port,
             host::inject_reboot,
+            diagnostics::run_diagnostics,
             carter::launch_client_only,
             carter::launch_server_only,
             carter::server_launch_spec,
