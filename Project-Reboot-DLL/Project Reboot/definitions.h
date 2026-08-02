@@ -56,7 +56,21 @@ namespace Defines
 	//
 	// The countdown is pinned every tick (see Server::Hooks::TickFlush) because the game recomputes
 	// WarmupCountdownEndTime as players join, which would otherwise pull the bus back in.
-	inline float WarmupWaitSeconds = 90.f;
+	// How long the lobby stays open before the bus leaves. This is the single biggest chunk of the
+	// wait between pressing Play and being in a match — measured end to end on 2026-08-02:
+	//
+	//     ~48s  the headless Fortnite client boots to the point Reboot can be injected
+	//     ~13s  travel + Athena_Terrain load, until "Listening on port: 7777"
+	//      90s  this
+	//
+	// 90 was picked with no evidence. The part it actually has to cover is a second player CONNECTING
+	// to a server that is already listening — matchmaking plus a map load, about 10-20s — not another
+	// client boot, which has already happened by the time this starts counting. 45 leaves better than
+	// double that margin and takes roughly three quarters of a minute off every match.
+	//
+	// It drives the visible countdown too (see the WarmupCountdownDuration write in processevent.cpp),
+	// so the HUD stays honest without a second value to keep in step.
+	inline float WarmupWaitSeconds = 45.f;
 
 	// Absolute world time the warmup hold expires. 0 = not warming up. Set when warmup begins.
 	inline float WarmupHoldUntil = 0.f;
