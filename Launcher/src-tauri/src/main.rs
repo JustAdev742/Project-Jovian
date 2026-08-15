@@ -6,6 +6,7 @@ use sysinfo::System;
 use tauri::{AppHandle, Manager, Window};
 mod anticheat;
 mod diagnostics;
+mod net;
 mod carter;
 mod discord;
 mod host;
@@ -337,6 +338,7 @@ async fn main() {
             carter::server_readiness,
             carter::stop_server_instance,
             tailscale::ts_status,
+            tailscale::repair_connection,
             tailscale::ts_ensure_installed,
             tailscale::ts_up,
             tailscale::ts_ip,
