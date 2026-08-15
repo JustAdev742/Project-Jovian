@@ -854,15 +854,54 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     if (!p2pMode) { setHealth({ coordinator: "ok", detail: "" }); return; }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    /* SELF-REPAIR, not just reporting.
+     *
+     * "Servers unreachable" is usually true, but there is one case where it is a lie the player has
+     * no way to see through: this PC cannot LOOK UP the coordinator's address. Tailscale claims every
+     * *.ts.net name once installed, and if it is signed in to the wrong tailnet — which is what a
+     * reinstall does — it answers "no such name" and never falls back to normal DNS.
+     *
+     * That is a closed loop: no lookup, so no coordinator, so no auth key, so it can never rejoin the
+     * tailnet that would fix the lookup. The player sees a launcher blaming servers that are fine,
+     * and reinstalling makes it worse. It cost a real player several days.
+     *
+     * So on failure, ask the Rust side to reach the coordinator by address and, if it gets through,
+     * rejoin the tailnet properly. Then re-check. Only on a genuine failure, so a healthy launcher
+     * never does any of this. */
+    let repairTried = false;
     const tick = async () => {
-      const h = await coordinatorReachable();
+      let h = await coordinatorReachable();
       if (cancelled) return;
+
+      if (h.coordinator === "down" && !repairTried) {
+        repairTried = true; // once per mount — never a repair loop
+        try {
+          const r = await invoke<{ reachable: boolean; bypassedDns: boolean; rejoined: boolean; detail: string }>(
+            "repair_connection",
+            { coordinator: COORDINATOR, token: user?.token ?? null },
+          );
+          if (cancelled) return;
+          if (r.reachable) {
+            // It was reachable all along; the name lookup was the problem. Re-check so the banner
+            // clears rather than sitting there contradicting a launcher that now works.
+            h = await coordinatorReachable();
+            if (cancelled) return;
+            if (h.coordinator !== "ok") h = { coordinator: "ok", detail: r.detail };
+          }
+        } catch {
+          // Repair is best-effort. A launcher that crashes while trying to fix itself is worse than
+          // one that just reports the problem.
+        }
+      }
+
       setHealth(h);
       timer = setTimeout(tick, 30_000);
     };
     void tick();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [p2pMode]);
+    // user?.token is a real dependency: the repair below needs a signed-in session to fetch a
+    // tailnet key, so a token arriving after the first failed check must get a fresh attempt.
+  }, [p2pMode, user?.token]);
 
   return {
     // state

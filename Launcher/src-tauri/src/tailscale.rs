@@ -373,7 +373,13 @@ pub async fn mesh_announce(
 pub async fn ts_fetch_authkey(coordinator: String, token: String) -> Result<String, String> {
     let base = coordinator.trim_end_matches('/');
     let url = format!("{}/nova/api/tailnet-authkey", base);
-    let client = reqwest::Client::new();
+    // THIS is the call that has to work when nothing else does. It is the only way back onto the
+    // tailnet, and a PC that has lost the tailnet is exactly the PC that cannot resolve the
+    // coordinator's name — so a plain client here deadlocks the launcher permanently. See net.rs.
+    let (client, note) = crate::net::resilient_client(&url).await?;
+    if let Some(n) = note {
+        crate::dbg_log(&format!("authkey: {}", n));
+    }
     let res = client
         .get(&url)
         .header("Authorization", format!("bearer {}", token))
@@ -458,5 +464,134 @@ pub fn reboot_dll_present(dll_path: Option<String>) -> bool {
             "C:\\Users\\Admin\\Documents\\backends\\_extracted\\Project-Reboot-main\\Project Reboot\\x64\\Release\\Project Reboot.dll",
         )
         .exists(),
+    }
+}
+
+// ── Self-repair ───────────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct RepairResult {
+    /// Did the launcher end up able to reach the coordinator?
+    pub reachable: bool,
+    /// Did it have to route around this PC's broken name resolution to get there?
+    pub bypassed_dns: bool,
+    /// Did it rejoin the tailnet, i.e. fix the underlying cause rather than just working around it?
+    pub rejoined: bool,
+    /// Plain-English account of what happened, for the player.
+    pub detail: String,
+}
+
+/// Get this PC talking to the coordinator again, without asking the player to do anything.
+///
+/// The failure this repairs: Tailscale is installed and signed in to the WRONG tailnet (a reinstall
+/// puts you on your own empty one), so it answers for the coordinator's `*.ts.net` name and has no
+/// answer. The launcher cannot reach the coordinator, so it cannot fetch a tailnet key, so it can
+/// never rejoin — a closed loop the player has no way out of, reported as "Nova's servers are
+/// unreachable" while the servers are perfectly healthy.
+///
+/// Order matters here:
+///   1. Reach the coordinator anyway, going around the local resolver if needed (net.rs).
+///   2. With that connection, fetch a fresh tailnet key and rejoin.
+/// Step 2 is what actually repairs the machine — after it, the name resolves normally again and the
+/// bypass stops being needed. Step 1 alone would leave the launcher limping forever.
+///
+/// Deliberately conservative: it changes nothing about the player's system except joining the tailnet
+/// the launcher was always going to join. No hosts file, no registry, no signing them out of
+/// Tailscale.
+#[tauri::command]
+pub async fn repair_connection(coordinator: String, token: Option<String>) -> RepairResult {
+    let base = coordinator.trim_end_matches('/').to_string();
+    let info_url = format!("{}/nova/api/info", base);
+
+    let (client, note) = match crate::net::resilient_client(&info_url).await {
+        Ok(v) => v,
+        Err(e) => {
+            return RepairResult {
+                reachable: false,
+                bypassed_dns: false,
+                rejoined: false,
+                detail: format!(
+                    "Couldn't reach Nova's servers, and couldn't work out why from here. {}",
+                    e
+                ),
+            }
+        }
+    };
+    let bypassed = note.is_some();
+
+    let ok = matches!(client.get(&info_url).send().await, Ok(r) if r.status().is_success());
+    if !ok {
+        return RepairResult {
+            reachable: false,
+            bypassed_dns: bypassed,
+            rejoined: false,
+            detail: "Nova's servers didn't answer. They may genuinely be down — this doesn't look \
+                     like a problem with this PC."
+                .to_string(),
+        };
+    }
+
+    // Reachable. If nothing was in the way, there is nothing to repair.
+    if !bypassed {
+        return RepairResult {
+            reachable: true,
+            bypassed_dns: false,
+            rejoined: false,
+            detail: "Nova's servers are reachable from this PC.".to_string(),
+        };
+    }
+
+    crate::dbg_log("repair: coordinator reachable only by bypassing local DNS — rejoining tailnet");
+
+    // Name resolution IS broken here, so fix the cause. Needs a signed-in session: the key endpoint
+    // is authenticated, which is correct — it mints real tailnet credentials.
+    let Some(token) = token.filter(|t| !t.is_empty()) else {
+        return RepairResult {
+            reachable: true,
+            bypassed_dns: true,
+            rejoined: false,
+            detail: "Nova's servers are fine — this PC just couldn't look up their address, and Nova \
+                     went around the problem. Sign in and it will repair itself properly."
+                .to_string(),
+        };
+    };
+
+    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "nova-player".to_string());
+    match ts_fetch_authkey(base.clone(), token).await {
+        Ok(key) => {
+            if let Err(e) = ts_ensure_installed().await {
+                return RepairResult {
+                    reachable: true, bypassed_dns: true, rejoined: false,
+                    detail: format!("Nova reached its servers, but couldn't set up Tailscale: {}", e),
+                };
+            }
+            match ts_up(key, Some(hostname)) {
+                Ok(ip) => RepairResult {
+                    reachable: true,
+                    bypassed_dns: true,
+                    rejoined: true,
+                    detail: format!(
+                        "This PC had lost its place on Nova's private network, which is why it \
+                         couldn't find the servers. Nova reconnected it ({}). It should work \
+                         normally now.",
+                        ip
+                    ),
+                },
+                Err(e) => RepairResult {
+                    reachable: true, bypassed_dns: true, rejoined: false,
+                    detail: format!(
+                        "Nova reached its servers by working around this PC's address lookup, but \
+                         couldn't rejoin the private network: {}", e
+                    ),
+                },
+            }
+        }
+        Err(e) => RepairResult {
+            reachable: true, bypassed_dns: true, rejoined: false,
+            detail: format!(
+                "Nova reached its servers by working around this PC's address lookup, but couldn't \
+                 get the details needed to fix it permanently: {}", e
+            ),
+        },
     }
 }
