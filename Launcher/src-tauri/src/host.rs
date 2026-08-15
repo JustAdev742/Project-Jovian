@@ -282,6 +282,14 @@ pub fn inject_reboot(dll_path: Option<String>, pid: Option<u32>) -> Result<bool,
 // use the coordinator without touching Cobalt. Start it before launching in global P2P mode.
 
 const DEFAULT_COORDINATOR: &str = "https://clientfinder.tail0a8fd0.ts.net:8443";
+
+/// The coordinator the launcher talks to by default, for callers outside this module.
+///
+/// Exposed so the self-check tests the SAME address the launcher actually uses, rather than a second
+/// hardcoded copy that could drift out of step with this one.
+pub fn default_coordinator() -> &'static str {
+    DEFAULT_COORDINATOR
+}
 const DEFAULT_PROXY_DIR: &str = "C:\\Users\\Admin\\Documents\\Project Nova\\nova-proxy";
 
 fn proxy_pid_file() -> PathBuf {

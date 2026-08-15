@@ -101,6 +101,140 @@ fn port_open(port: u16) -> bool {
     .is_ok()
 }
 
+/// Resolve a host through the OS resolver, on a worker thread with a hard timeout.
+///
+/// std's ToSocketAddrs has no timeout and a black-holed lookup can block for many seconds, which
+/// would make the whole self-check feel broken. Answering "could not resolve in 4s" is the same
+/// answer for our purposes as "could not resolve".
+///
+/// Deliberately uses the OS resolver rather than querying a DNS server directly, because that is
+/// what the launcher and the game actually use — and on Windows the two can DISAGREE. See NOVA-203.
+fn resolve_with_timeout(host: &str, port: u16, secs: u64) -> Option<Vec<std::net::IpAddr>> {
+    use std::net::ToSocketAddrs;
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    let target = format!("{}:{}", host, port);
+    std::thread::spawn(move || {
+        let r = target
+            .to_socket_addrs()
+            .map(|it| it.map(|s| s.ip()).collect::<Vec<_>>());
+        let _ = tx.send(r.ok());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs)).ok().flatten()
+}
+
+/// Is Tailscale present on this machine at all?
+///
+/// Used only to word the advice correctly — the check itself does not depend on it. A machine with
+/// no Tailscale that cannot resolve the address has an ordinary DNS or internet problem; a machine
+/// WITH Tailscale almost certainly has the NRPT problem described in NOVA-203.
+fn tailscale_present() -> bool {
+    // new_all()+refresh_all() to match how the rest of the launcher enumerates processes (host.rs),
+    // rather than a second pattern that has to be kept in step with sysinfo's API changes.
+    use sysinfo::System;
+    let mut s = System::new_all();
+    s.refresh_all();
+    let running = s.processes().values().any(|p| {
+        let n = p.name().to_string_lossy().to_ascii_lowercase();
+        n.starts_with("tailscaled") || n.starts_with("tailscale-ipn") || n == "tailscale.exe"
+    });
+    running
+        || Path::new("C:\\Program Files\\Tailscale\\tailscale.exe").exists()
+        || Path::new("C:\\Program Files (x86)\\Tailscale\\tailscale.exe").exists()
+}
+
+// ── 2xx (continued) — can this PC actually reach Nova's servers? ──────────────────────────────────
+
+/// NOVA-203 exists because the launcher used to say "Nova's servers are unreachable" when the servers
+/// were perfectly healthy and the real fault was name resolution ON THIS PC.
+///
+/// The signature that makes this worth its own code, observed 2026-08-02:
+///     nslookup clientfinder.tail0a8fd0.ts.net   -> resolves fine (43.245.48.235, .174, + IPv6)
+///     Test-NetConnection ... -Port 8443         -> "Name resolution ... failed"
+/// DNS answers correctly, and the WINDOWS RESOLVER still fails. nslookup talks to the DNS server
+/// directly; everything else — the launcher, the game — goes through the Windows resolver, so the
+/// two can disagree and only one of them matters.
+///
+/// The cause is Tailscale's NRPT rule. Tailscale registers a Name Resolution Policy Table entry
+/// claiming *.ts.net and points it at its own resolver (100.100.100.100). The rule SURVIVES signing
+/// out, and signing back in does not help if the device is not actually on the tailnet — the lookups
+/// go to a resolver that has no answer, and never fall back to normal DNS. One machine on the tailnet
+/// and one not, on the same network with the same launcher, is exactly the asymmetry it produces.
+fn check_can_reach_nova(coordinator: &str, out: &mut Vec<Finding>) {
+    // Take the host out of the configured URL rather than hardcoding it, so this keeps working if the
+    // coordinator ever moves.
+    let host = coordinator
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let (hostname, port) = match host.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(443)),
+        None => (host, 443),
+    };
+    if hostname.is_empty() {
+        return;
+    }
+
+    let Some(ips) = resolve_with_timeout(hostname, port, 4) else {
+        let ts = tailscale_present();
+        out.push(Finding::new(
+            "NOVA-203", Level::Error, "This PC can't look up Nova's server address",
+            &format!(
+                "Windows could not turn \"{}\" into an address. Nova's servers may well be running \
+                 perfectly — this is a name-lookup problem on THIS PC, which is why the launcher says \
+                 the servers are down when other people can play.{}",
+                hostname,
+                if ts {
+                    " Tailscale is installed here, and it takes over lookups for addresses ending in \
+                     .ts.net. If this PC isn't properly connected to the Tailscale network, those \
+                     lookups stop working — and signing out and back in does NOT undo it on its own."
+                } else {
+                    ""
+                }
+            ),
+            if ts {
+                "Open Tailscale and check this PC is actually connected (it should appear in your \
+                 device list). If it does and this still fails, fully quit Tailscale from the system \
+                 tray — not just sign out — and try again."
+            } else {
+                "Check this PC's internet connection. If other sites work, your DNS may be blocking it."
+            },
+        ));
+        return;
+    };
+
+    // Resolution worked — so if we still cannot connect, it is the network, not the name.
+    let reachable = {
+        use std::net::{SocketAddr, TcpStream};
+        ips.iter().any(|ip| {
+            TcpStream::connect_timeout(
+                &SocketAddr::new(*ip, port),
+                std::time::Duration::from_millis(2500),
+            )
+            .is_ok()
+        })
+    };
+
+    if reachable {
+        out.push(Finding::new(
+            "NOVA-203", Level::Ok, "Nova's servers are reachable from this PC",
+            &format!("{} responded.", hostname), "",
+        ));
+    } else {
+        out.push(Finding::new(
+            "NOVA-204", Level::Error, "Nova's servers won't accept a connection from this PC",
+            &format!(
+                "The address for {} was found, but nothing answered on port {}. Either the servers are \
+                 genuinely down, or something on this PC or network is blocking the connection.",
+                hostname, port
+            ),
+            "If someone else can play right now, the block is on this PC — check a firewall or VPN.",
+        ));
+    }
+}
+
 // ── 1xx — install and files ───────────────────────────────────────────────────────────────────────
 
 fn check_install(build_path: &str, out: &mut Vec<Finding>) {
@@ -313,10 +447,13 @@ fn check_capability(out: &mut Vec<Finding>) -> String {
 
 /// Run every check and build the pasteable summary.
 #[tauri::command]
-pub fn run_diagnostics(build_path: String) -> Report {
+pub fn run_diagnostics(build_path: String, coordinator: Option<String>) -> Report {
     let mut findings = Vec::new();
     check_install(&build_path, &mut findings);
     check_services(&mut findings);
+    // Default to the same coordinator host.rs uses, so the check follows the real deployment.
+    let coord = coordinator.unwrap_or_else(|| crate::host::default_coordinator().to_string());
+    check_can_reach_nova(&coord, &mut findings);
     check_last_run(&build_path, &mut findings);
     check_server_run(&mut findings);
     let machine = check_capability(&mut findings);
