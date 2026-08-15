@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { Stethoscope, Copy, Check, AlertTriangle, AlertCircle, CircleCheck, CircleHelp } from "lucide-react";
 import { Button, Card, CardHeader } from "../ui/primitives";
 import { useToast } from "../ui/toast";
+import { COORDINATOR } from "../novaApi";
 
 type Level = "ok" | "warn" | "error" | "unknown";
 
@@ -51,7 +52,7 @@ export default function SelfCheck() {
     setRunning(true);
     try {
       const buildPath = localStorage.getItem("buildPath") ?? "";
-      setReport(await invoke<Report>("run_diagnostics", { buildPath }));
+      setReport(await invoke<Report>("run_diagnostics", { buildPath, coordinator: COORDINATOR }));
     } catch (e) {
       notify({ kind: "error", title: "Self-check failed to run", body: String(e) });
     } finally {
