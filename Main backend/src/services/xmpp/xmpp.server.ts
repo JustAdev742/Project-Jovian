@@ -4,6 +4,7 @@ import { Config } from '../../config';
 import { verifyToken } from '../auth/token.service';
 import { validateToken, getAccount } from '../../database';
 import { hasLiveGameServer, matchmakingStarted, matchmakingEnded } from '../matchmaking/matchmaking.routes';
+import { recordDiagnostic } from '../nova/diagnostics';
 
 /**
  * XMPP Server — WebSocket on port 80.
@@ -212,6 +213,28 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
   // guess. The client-side XMPP failure that looked like it pointed here turned out to be
   // patch_local_engine_ini() failing on the player's machine — see carter.rs.
   if (!isXmpp) {
+    // A matchmaker socket registers a waiter the instant it opens (handleMatchmaker ->
+    // matchmakingStarted), and in P2P mode a waiter is demand: enough of it elects a host and spins
+    // up a gameserver. So a socket that lands here by accident fabricates a match for nobody.
+    //
+    // Path and subprotocol CANNOT separate a real Play press from an accident in general — the real
+    // MMS client connects to Config.MMS_URL, which is the ROOT path, and arrives with no usable
+    // subprotocol (39 upgrades on the coordinator recorded "ws" 15, "wss" 11, "" 11, "xmpp" 2; the
+    // first two are URL schemes, not subprotocols). That is precisely why the default above must not
+    // be inverted on a guess.
+    //
+    // A NON-ROOT path is the one case that is unambiguous: nothing legitimate matchmakes against a
+    // sub-path, and the EOS sockets that used to land here are already returned above. Record those
+    // rather than silently counting them as players.
+    const path = url.split('?')[0];
+    if (path !== '/' && path !== '') {
+      recordDiagnostic({
+        category: 'UNEXPECTED_STATE',
+        method: 'WS',
+        url,
+        detail: `WebSocket upgrade on a non-root path was routed to the matchmaker and registered a waiter (subprotocol "${rawHeader || negotiated || 'none'}"). Real matchmaking connects to the root path, so this is fabricated demand.`,
+      });
+    }
     handleMatchmaker(ws);
     return;
   }

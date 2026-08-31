@@ -182,6 +182,43 @@ to write.
 
 ---
 
+## NOVA-AUDIT-005 — fabricated matchmaking demand is now attributable
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P3 (diagnosability) · **Subsystem** matchmaking / xmpp |
+| **Grade** | CONFIRMED behaviour; the *fix* is instrumentation, not a behaviour change |
+
+**Symptom.** A gameserver can spin up with nobody waiting to play.
+
+**Mechanism.** `handleMatchmaker` calls `matchmakingStarted()` the instant a socket opens, and in
+P2P mode a waiter *is* demand. Any WS upgrade routed there therefore fabricates a match.
+
+**Why this is instrumentation and not a fix.** The obvious change — route only sockets carrying the
+`xmpp` subprotocol away, or reject unknown paths — cannot be made safely, because a **real** Play
+press is indistinguishable from an accident: it connects to `Config.MMS_URL`, which is the **root**
+path, and arrives with no usable subprotocol. Inverting the default would break matchmaking to fix a
+guess, and the existing code already carries a comment warning against exactly that.
+
+The one separable case is a **non-root** path: nothing legitimate matchmakes against a sub-path, and
+EOS sockets are already returned earlier. That case now records an `UNEXPECTED_STATE` diagnostic
+naming the path and subprotocol, rather than silently counting as a player.
+
+**Verified live, with both controls in the same run:**
+
+| socket | expected | result |
+|---|---|---|
+| `/` (what a real Play press looks like) | not flagged | not flagged |
+| `/lobby/abc` (EOS, excluded upstream) | not flagged | not flagged |
+| `/stray/socket/path` | **flagged** | `UNEXPECTED_STATE` recorded with path and subprotocol |
+
+**Gap:** covered by a live probe, not an automated test. An HTTP/WS integration test is blocked on
+`index.ts` running `main()` at import time — it binds ports and starts XMPP on :80, so it cannot be
+imported into a test process. Making it importable is worth doing, but it is the live service's
+entrypoint and deserves its own change rather than being restructured in passing.
+
+---
+
 ## Test suite
 
 Added 2026-08-31 — there were **no tests in this repository before this date.**
