@@ -83,6 +83,59 @@ async function mintTailnetKey(): Promise<string> {
   return key;
 }
 
+/** Every address belonging to a device in OUR tailnet, cached. `null` = we cannot know right now.
+ *
+ *  WHY THIS EXISTS. The launcher decides it is "on the mesh" by testing whether its own Tailscale
+ *  address starts with "100." (tailscale.rs:162). 100.64.0.0/10 is shared CGNAT space and EVERY
+ *  tailnet allocates out of it, so that test also passes for a machine signed in to somebody else's
+ *  tailnet. Such a machine announces itself here, is scored, gets elected, and registers a
+ *  gameserver address that no other player can route to — while its own control traffic keeps
+ *  working, because that arrives over the public Funnel rather than the mesh.
+ *
+ *  Observed 2026-08-15: a candidate announced 4,588 times from 100.88.226.108 (8c/7.6GB) and was
+ *  elected 4 times, while `tailscale ping 100.88.226.108` from this box returns "no matching peer"
+ *  and `tailscale ping 100.99.211.58` (the other real player) returns a pong in 1ms.
+ *
+ *  The device list is the authority; a self-reported address is not. */
+let tailnetIpCache: { ips: Set<string>; at: number } | null = null;
+const TAILNET_IP_CACHE_MS = 60_000;
+
+let warnedNoTailnetVerification = false;
+
+async function tailnetMemberIps(): Promise<Set<string> | null> {
+  if (!Config.TS_API_KEY) {
+    // Say this ONCE. A log that is silent when the check is switched off reads exactly like a log
+    // where every candidate passed, and "the gate did not run" is not "the gate passed".
+    if (!warnedNoTailnetVerification) {
+      warnedNoTailnetVerification = true;
+      console.warn('[Mesh] tailnet membership is NOT being verified (NOVA_TS_API_KEY unset) — candidates are accepted on their self-reported address');
+    }
+    return null; // not configured — we cannot verify, so we must not judge
+  }
+  const cached = tailnetIpCache;
+  if (cached && Date.now() - cached.at < TAILNET_IP_CACHE_MS) return cached.ips;
+
+  const url = `https://api.tailscale.com/api/v2/tailnet/${encodeURIComponent(Config.TS_TAILNET)}/devices`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${Config.TS_API_KEY}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`Tailscale API ${res.status}`);
+  const body: any = await res.json();
+
+  const ips = new Set<string>();
+  for (const d of body?.devices || []) {
+    for (const a of d?.addresses || []) ips.add(String(a).trim());
+  }
+  // An empty list means the token lost its scope or the tailnet name is wrong — NOT that the tailnet
+  // is empty (this very process is a device in it). Treating it as truth would reject every
+  // candidate and stop all hosting, so raise instead and let the caller fall back to accepting.
+  if (ips.size === 0) throw new Error('device list came back empty');
+
+  tailnetIpCache = { ips, at: Date.now() };
+  return ips;
+}
+
 function serverKey(address: string, port: number, playlist: string): string {
   return `${address}:${port}:${playlist}`;
 }
@@ -1235,6 +1288,36 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
     // Older launchers don't send a region. They score neutrally rather than being excluded — an
     // out-of-date client should still be able to host, just without proximity working in its favour.
     const region = String(b.region || '').trim().toUpperCase();
+
+    // A candidate is only useful if the OTHER players can actually open a socket to it. Verify the
+    // address it reported is a device in this tailnet before letting it compete to host — see
+    // tailnetMemberIps() for what goes wrong otherwise.
+    //
+    // Deliberately fails OPEN. If NOVA_TS_API_KEY is unset, or the API is unreachable, or it answers
+    // with something we don't trust, we accept exactly as before and say so in the log. Rejecting
+    // everyone because an external API had a bad minute would take hosting down for the whole
+    // server, which is far worse than the problem being fixed.
+    if (tsIp) {
+      try {
+        const members = await tailnetMemberIps();
+        if (members && !members.has(tsIp)) {
+          console.warn(
+            `[Mesh] REJECTED ${accountId} @ ${tsIp} — not a device in tailnet "${Config.TS_TAILNET}". ` +
+            `It is signed in to a DIFFERENT tailnet, so no other player could connect to it. ` +
+            `Fix: on that machine, tailscale logout && tailscale up (the launcher will fetch a key for this tailnet).`
+          );
+          meshCandidates.delete(accountId); // drop any earlier accepted entry for this machine
+          return reply.status(409).send({
+            success: false,
+            reason: 'not-in-tailnet',
+            error: `${tsIp} is not a device in this tailnet — sign this machine into the Nova tailnet and try again.`,
+          });
+        }
+      } catch (e: any) {
+        console.warn(`[Mesh] could not verify tailnet membership (${e?.message || e}) — accepting ${tsIp} as before`);
+      }
+    }
+
     const score = scoreCandidate(cpuCores, ramGB, netScore);
     const existed = meshCandidates.has(accountId);
     meshCandidates.set(accountId, { accountId, tsIp, cpuCores, ramGB, netScore, region, score, lastSeen: Date.now() });

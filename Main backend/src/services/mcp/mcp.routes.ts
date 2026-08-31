@@ -16,6 +16,14 @@ import { Errors } from '../../utils/error-handler';
 import { getCurrency, updateCurrency } from '../../database';
 import { buildDeterministicGuid } from '../../utils/uuid';
 
+/** The only MCP operations that read a profile without writing to stored state.
+ *
+ *  Everything else in the switch below mutates: the locker blob (EquipBattleRoyaleCustomization,
+ *  SetCosmeticLockerSlot, …), the currency row (PurchaseCatalogEntry, RefundMtxPurchase), or the
+ *  item set (grantAthenaItems). Only the `client` route proves who the caller is, so only it may
+ *  reach those. See the `readOnly` guard in handleMcpOperation. */
+const READ_ONLY_MCP_OPERATIONS = new Set(['QueryProfile', 'SetMCPEnabled', 'ClientQuestLogin']);
+
 /** Minimal valid MCP envelope for ops that don't mutate a profile. */
 function emptyEnvelope(profileId: string, rvn: number): any {
   const r = rvn > 0 ? rvn : 1;
@@ -36,13 +44,37 @@ function emptyEnvelope(profileId: string, rvn: number): any {
  */
 export async function mcpRoutes(fastify: FastifyInstance): Promise<void> {
 
-  /** Core MCP handler — shared by client + dedicated_server + public routes */
-  async function handleMcpOperation(request: any, reply: any, isPublic: boolean = false) {
+  /** Core MCP handler — shared by client + dedicated_server + public routes.
+   *
+   *  `readOnly` is set by the two route families that carry NO proof of identity. Without it the
+   *  same mutation switch was reachable unauthenticated: a POST to
+   *  /fortnite/api/game/v2/profile/<any account>/dedicated_server/EquipBattleRoyaleCustomization
+   *  with no Authorization header rewrote that account's locker and persisted it, and
+   *  .../public/PurchaseCatalogEntry moved its currency — reproduced against a scratch database
+   *  during the 2026-08-15 audit. `public` does not constrain the damage either: it only picks a
+   *  DEFAULT profileId, which ?profileId=athena overrides. */
+  async function handleMcpOperation(
+    request: any,
+    reply: any,
+    isPublic: boolean = false,
+    readOnly: boolean = false,
+  ) {
     const { accountId, operation } = request.params as { accountId: string; operation: string };
     const query = request.query as Record<string, string>;
     const profileId = query.profileId || (isPublic ? 'common_public' : 'athena');
     const rvn = parseInt(query.rvn || '-1', 10);
     const body = request.body || {};
+
+    // Answer with a well-formed envelope rather than an error. This deliberately mirrors the
+    // `default` branch below and its "never return a 404 for unknown operations" rule: a caller we
+    // cannot identify is told nothing happened, in a shape the client can still parse. Failing
+    // closed with a 403 here would be the unsafe direction — nothing in the repo calls these routes
+    // (grep finds `dedicated_server` only in route definitions, and cobalt.log has zero such calls),
+    // but that is an absence argument, and NOVA-303 means a real call could escape unlogged.
+    if (readOnly && !READ_ONLY_MCP_OPERATIONS.has(operation)) {
+      console.warn(`[MCP] Refusing unauthenticated mutating operation ${operation} on ${accountId} (profile ${profileId})`);
+      return reply.send(emptyEnvelope(profileId, rvn));
+    }
 
     try {
       let response: any;
@@ -259,13 +291,14 @@ export async function mcpRoutes(fastify: FastifyInstance): Promise<void> {
     return handleMcpOperation(request, reply);
   });
 
-  // Dedicated server operations (game server → backend)
+  // Dedicated server operations (game server → backend). READ-ONLY: this route carries no token,
+  // so it must never reach the mutation switch — see handleMcpOperation's `readOnly` guard.
   fastify.post('/fortnite/api/game/v2/profile/:accountId/dedicated_server/:operation', async (request, reply) => {
-    return handleMcpOperation(request, reply);
+    return handleMcpOperation(request, reply, false, true);
   });
 
-  // Public operations (no auth required)
+  // Public operations (no auth required). READ-ONLY for the same reason.
   fastify.post('/fortnite/api/game/v2/profile/:accountId/public/:operation', async (request, reply) => {
-    return handleMcpOperation(request, reply, true);
+    return handleMcpOperation(request, reply, true, true);
   });
 }
