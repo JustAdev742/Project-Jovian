@@ -105,12 +105,42 @@ The fix was not to start erroring but to make the silence countable: see §5.
 ## 4. Persistence
 
 SQLite via `better-sqlite3` at `Config.DB_PATH` (`Main backend/data/nova.db`), overridable with
-`NOVA_DB_PATH` — which is how every experiment in this audit avoided touching real player data.
-Profiles and cloudstorage are files under `Main backend/data/`.
+`NOVA_DB_PATH`. Profiles and cloudstorage are files under `Main backend/data/`.
 
-**UNKNOWN, and worth resolving:** whether the coordinator and a host agent can ever open the same
-`DB_PATH` concurrently. `database.ts` was not audited. Flagged in the 2026-08-15 report and still
-open.
+A shim reproduces sql.js's `run`/`exec` signatures and its `[{columns, values}]` result shape, so the
+~78 call sites and 17 importing files did not have to change when the engine was swapped. WAL,
+`synchronous = NORMAL`, `foreign_keys = ON`, statements cached by SQL text.
+
+**Concurrent access — answered 2026-08-31, measured rather than reasoned about.** Two processes on
+one database file, 400 write cycles each:
+
+| | result |
+|---|---|
+| corruption | **none** — `integrity_check: ok`, all 800 rows present |
+| `SQLITE_BUSY` | **zero** — better-sqlite3 defaults to a 5,000 ms busy timeout, and WAL lets readers run during a write |
+| lost updates | **393 of 800** — read-modify-write, now fixed; re-measured at 800/800 |
+
+So the storage layer is safe to share; the application logic on top of it was not. Details in
+[REGRESSION_HISTORY.md](REGRESSION_HISTORY.md) NOVA-AUDIT-009. The realistic way two processes end up
+sharing the file is not the coordinator at all — it is `backend-eaddrinuse-zombie`, a second backend
+that loses the port race and keeps running with the database open.
+
+**Timestamp formats are mixed, and this is a trap.** Columns written from JavaScript hold ISO-8601
+(`2026-05-02T12:43:34.000Z`); columns using the `datetime('now')` default hold SQLite's format
+(`2026-05-02 08:43:34`). They differ at character 10 — `T` versus a space — and `T` sorts *above* a
+space, so comparing the two in SQL silently misorders any pair falling on the same date. **Compare
+ISO columns against a JS ISO string, never against `datetime('now')`.**
+
+**Indexing is adequate and was checked, not assumed.** Every hot lookup is covered: the tables keyed
+`(account_id, …)` get an implicit index whose leading column is `account_id`, so `WHERE account_id = ?`
+uses it. Three explicit indexes exist on `launcher_accounts`. The only unindexed scans are
+`accounts.display_name`, `match_history.session_id`, `anticheat_flags.account_id` and
+`player_stats.stat_name` (the leaderboard) — all trivial at present scale, and the leaderboard is the
+one that grows with players × stats.
+
+**Growth is bounded** for `telemetry` (pruned to the newest 5,000) and now for `tokens` (expired rows
+purged on each new token — 201 rows, 100% expired, oldest four months old, before that was added).
+`anticheat_flags` is append-only and unbounded in principle, though it only grows on detections.
 
 ---
 

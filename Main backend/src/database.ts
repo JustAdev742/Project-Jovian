@@ -87,10 +87,21 @@ export async function initDatabase(): Promise<SqlShim> {
       // A non-reader statement returns no columns; asking for them throws. sql.js returned [] for
       // these, so match it.
       if (!stmt.reader) { stmt.run(...bindable(params)); return []; }
-      const values = stmt.raw().all(...bindable(params)) as any[][];
-      // IMPORTANT: raw mode is sticky on the cached statement. Clear it, or a later caller reusing
-      // this SQL gets arrays where it expects objects.
-      stmt.raw(false);
+      // IMPORTANT: raw mode is sticky on the cached statement, and it survives a THROW — verified:
+      // after `stmt.raw().all()` throws, a plain `stmt.all()` returns arrays rather than objects
+      // until something clears the flag. The reset therefore belongs in a finally, not after the
+      // call, or one failed query leaves a shared cached statement in the wrong mode.
+      //
+      // No current path is affected, because every reader here goes through this function and this
+      // function always re-applies `.raw()`. That is exactly why it is worth pinning down now: the
+      // invariant the comment claims is one line away from not holding, and the failure would be a
+      // silent shape change rather than an error.
+      let values: any[][];
+      try {
+        values = stmt.raw().all(...bindable(params)) as any[][];
+      } finally {
+        stmt.raw(false);
+      }
       if (values.length === 0) return []; // sql.js gave [] rather than a result with no rows
       return [{ columns: stmt.columns().map((c: { name: string }) => c.name), values }];
     },
@@ -353,7 +364,12 @@ export function getDatabase(): SqlShim {
 export function ensureAccount(accountId: string, displayName: string): string {
   const existing = db.exec("SELECT id FROM accounts WHERE id = ?", [accountId]);
   if (existing.length > 0 && existing[0].values.length > 0) return accountId;
-  db.run("INSERT INTO accounts (id, display_name) VALUES (?, ?)", [accountId, displayName]);
+  // OR IGNORE, matching the currency insert immediately below. The SELECT above already established
+  // that no row existed, so single-process behaviour is unchanged — but with a second process on the
+  // same file (see backend-eaddrinuse-zombie) both can pass that check, and a bare INSERT makes the
+  // loser throw SQLITE_CONSTRAINT_PRIMARYKEY on a race whose correct outcome is "the row exists now,
+  // which is what you wanted".
+  db.run("INSERT OR IGNORE INTO accounts (id, display_name) VALUES (?, ?)", [accountId, displayName]);
   // Seed currency for new accounts
   db.run("INSERT OR IGNORE INTO currency (account_id, mtx_purchased, mtx_earned) VALUES (?, ?, ?)",
     [accountId, 999999, 0]);
@@ -563,6 +579,31 @@ export function getAccountIdByDisplayName(displayName: string): string | undefin
 export function storeToken(token: string, accountId: string, clientId: string, grantType: string, expiresAt: string): void {
   db.run("INSERT OR REPLACE INTO tokens (token, account_id, client_id, grant_type, expires_at) VALUES (?, ?, ?, ?, ?)",
     [token, accountId, clientId, grantType, expiresAt]);
+
+  // Drop tokens that have already expired.
+  //
+  // Nothing ever cleaned this table. Measured on the real database before this line existed: 201
+  // rows, ALL 201 expired, the oldest from 2026-05-02 — not one live token among them. It grows with
+  // logins x players forever, and every row is dead weight the moment its 8-hour expiry passes.
+  //
+  // Safe by construction: validateToken already rejects anything past expires_at, so deleting those
+  // rows cannot log anyone out or invalidate a session that would otherwise have worked.
+  //
+  // Done here rather than on a timer because it is self-limiting — purging on each new token keeps
+  // the table at roughly the number of LIVE tokens, so the scan it costs stays proportional to that
+  // rather than to everything ever issued. A timer would also have to be unref'd to avoid holding
+  // the process open (see NOVA-AUDIT-008).
+  //
+  // COMPARE AGAINST A JS ISO STRING, NOT datetime('now'). This table stores two different timestamp
+  // formats: `expires_at` is written from JavaScript as ISO-8601 ("2026-05-02T12:43:34.000Z") while
+  // `created_at` uses the column default `datetime('now')`, which is SQLite's own format
+  // ("2026-05-02 08:43:34"). They differ at character 10 — 'T' versus a space — and 'T' (0x54) sorts
+  // ABOVE ' ' (0x20). So `expires_at < datetime('now')` is wrong whenever the two land on the same
+  // date: a token that expired an hour ago compares as still live, and only gets collected once the
+  // date rolls over. The first version of this line had exactly that bug and looked correct against
+  // the real table purely because every row in it was months old. A test with a token that expired
+  // 60 seconds ago caught it.
+  db.run("DELETE FROM tokens WHERE expires_at < ?", [new Date().toISOString()]);
   saveDb();
 }
 
@@ -597,11 +638,34 @@ export function setPlayerStat(accountId: string, statName: string, value: number
   saveDb();
 }
 
+/**
+ * Increment a stat ATOMICALLY, in one statement.
+ *
+ * This used to SELECT the current value and then write `current + delta` back through
+ * setPlayerStat's `INSERT OR REPLACE` — a read-modify-write with nothing holding the row between
+ * the two steps. Within a single process that is safe by accident: better-sqlite3 is synchronous and
+ * Node is single-threaded, so nothing can interleave between the read and the write.
+ *
+ * It stops being safe the moment a second process has the same file open, and that is a state this
+ * project can actually reach — `backend-eaddrinuse-zombie` (KNOWN_ISSUES) is a second backend that
+ * loses the port race, logs it, and KEEPS RUNNING with the database open.
+ *
+ * Measured, two processes against one file, 400 increments each: **407 of 800 landed. 393 were
+ * silently lost.** No corruption, no error, no SQLITE_BUSY — just missing kills and matches.
+ *
+ * The UPSERT below cannot lose one: SQLite evaluates `stat_value + excluded.stat_value` inside the
+ * statement, holding the row lock for its duration. Single-process behaviour is byte-for-byte what
+ * it was, including creating the row when absent.
+ */
 export function incrementPlayerStat(accountId: string, statName: string, delta: number): void {
-  // Get current value first
-  const result = db.exec("SELECT stat_value FROM player_stats WHERE account_id = ? AND stat_name = ?", [accountId, statName]);
-  const current = (result.length > 0 && result[0].values.length > 0) ? (result[0].values[0][0] as number) : 0;
-  setPlayerStat(accountId, statName, current + delta);
+  db.run(
+    `INSERT INTO player_stats (account_id, stat_name, stat_value, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(account_id, stat_name)
+     DO UPDATE SET stat_value = stat_value + excluded.stat_value, updated_at = datetime('now')`,
+    [accountId, statName, delta]
+  );
+  saveDb();
 }
 
 /** Seed default stats for a new player (all zeroes) */
@@ -700,8 +764,10 @@ export function updateInventoryItemFlags(accountId: string, itemId: string, favo
 export function getCurrency(accountId: string): { mtx_purchased: number; mtx_earned: number } {
   const result = db.exec("SELECT mtx_purchased, mtx_earned FROM currency WHERE account_id = ?", [accountId]);
   if (result.length === 0 || result[0].values.length === 0) {
-    // Seed new account with default currency
-    db.run("INSERT INTO currency (account_id, mtx_purchased, mtx_earned) VALUES (?, ?, ?)", [accountId, 999999, 0]);
+    // Seed new account with default currency. OR IGNORE for the same reason as ensureAccount: the
+    // SELECT above already proved the row was absent, so this changes nothing single-process, and it
+    // turns a two-process race from a thrown constraint error into the no-op it should be.
+    db.run("INSERT OR IGNORE INTO currency (account_id, mtx_purchased, mtx_earned) VALUES (?, ?, ?)", [accountId, 999999, 0]);
     saveDb();
     return { mtx_purchased: 999999, mtx_earned: 0 };
   }

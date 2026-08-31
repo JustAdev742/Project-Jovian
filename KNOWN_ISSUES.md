@@ -118,8 +118,13 @@ See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md).
    2026-08-31: yes, and both are now fixed.** Note the shape of the mistake — the finding sat at
    PLAUSIBLE for two weeks because probing it was deferred, and it turned out to be a real P1 that
    took one afternoon to confirm. The remaining unprobed items below deserve the same suspicion.
-4. **Whether the coordinator and a host agent can open the same `DB_PATH` concurrently.**
-   `database.ts` (999 lines) has never been audited.
+4. ~~**Whether the coordinator and a host agent can open the same `DB_PATH` concurrently, and
+   `database.ts` (999 lines) has never been audited.**~~ **Both answered 2026-08-31.** Measured with
+   two real processes on one file: no corruption, no `SQLITE_BUSY` — but **393 of 800 increments
+   silently lost** to a read-modify-write, now fixed and re-measured at 800/800. The audit also found
+   the tokens table was never purged (201 rows, 100% expired) and a timestamp-format split that makes
+   date comparisons in SQL unsafe. See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md) NOVA-AUDIT-009
+   and -010, and [ARCHITECTURE.md](ARCHITECTURE.md) §4.
 5. ~~**Whether 7.40 sends the `xmpp` WebSocket subprotocol.**~~ **Partly answered 2026-08-31.** The
    client binary contains `Sec-WebSocket-Protocol` and 27/28 occurrences of `xmpp`, so the machinery
    exists (STRONGLY SUPPORTED). That is not the same as observing the header on the wire for the

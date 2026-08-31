@@ -364,6 +364,82 @@ directly — pointing it at real data to prove it by experiment is the one thing
 
 ---
 
+## NOVA-AUDIT-009 — read-modify-write silently lost stats across processes
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P2 (silent data loss) · **Subsystem** database |
+| **Grade** | CONFIRMED — measured with two real processes, then re-measured after the fix |
+
+**Symptom.** Kills and matches quietly not counting. No error, no corruption, nothing in a log.
+
+**Root cause.** `incrementPlayerStat` read the current value and wrote `current + delta` back through
+`setPlayerStat`'s absolute `INSERT OR REPLACE` — two statements with nothing holding the row between
+them. Inside one process that is safe *by accident*: better-sqlite3 is synchronous and Node is
+single-threaded, so nothing can interleave. It stops being safe as soon as a second process opens the
+same file, which `backend-eaddrinuse-zombie` makes reachable — that zombie keeps the database open.
+
+**Evidence.** Two processes, 400 increments each, one file:
+
+```
+before:  407 of 800 landed — 393 lost.  integrity_check ok, 0 SQLITE_BUSY, 0 errors
+after :  800 of 800 landed —   0 lost
+```
+
+**Fix.** One atomic UPSERT that adds inside SQL
+(`ON CONFLICT … DO UPDATE SET stat_value = stat_value + excluded.stat_value`). SQLite holds the row
+lock for the statement's duration, so no interleaving can lose an increment. Single-process behaviour
+is unchanged, including creating the row when absent.
+
+**Also fixed, same class:** `ensureAccount` and `getCurrency` both SELECT, find nothing, then plain
+`INSERT`. Two processes can pass that check together and the loser throws
+`SQLITE_CONSTRAINT_PRIMARYKEY` on a race whose correct outcome is "the row exists now, which is what
+you wanted". Both now use `INSERT OR IGNORE`, matching the sibling currency insert that already did.
+
+**Also hardened:** the `exec()` shim reset raw mode *after* `.all()` rather than in a `finally`.
+Verified that better-sqlite3's raw mode survives a throw — after `stmt.raw().all()` throws, a plain
+`stmt.all()` returns arrays instead of objects. No current path depends on it, because every reader
+goes through `exec()` and `exec()` always re-applies `.raw()`. Pinned down anyway: the invariant the
+comment claimed was one line from not holding, and the failure would be a silent shape change.
+
+**Regression tests.** `database.test.ts`. **The first version of the concurrency test was worthless
+and I caught it by trying to break it** — reverting the fix left it passing, because two synchronous
+calls in one process run strictly one after the other and never interleave. It was replaced with a
+structural assertion that the increment is a single UPSERT with no `SELECT`, which *does* fail
+against the old code. The cross-process measurement lives here rather than in the suite, because it
+cannot be reproduced inside one test process.
+
+---
+
+## NOVA-AUDIT-010 — the tokens table was never cleaned
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P3 · **Subsystem** database |
+| **Grade** | CONFIRMED — counted on the real database |
+
+**Evidence.** `Main backend/data/nova.db`: **201 token rows, all 201 expired**, oldest dated
+2026-05-02. Not one live token. It grows with logins × players and nothing ever removed a row.
+
+**Fix.** `storeToken` deletes expired rows as it writes. Safe by construction — `validateToken`
+already rejects anything past `expires_at`, so removing those rows cannot log anyone out. Done inline
+rather than on a timer because it is self-limiting: purging on each new token keeps the table at
+roughly the number of *live* tokens. A timer would also have needed `.unref()` (NOVA-AUDIT-008).
+
+**A bug in my own fix, caught by its test.** The first version compared
+`expires_at < datetime('now')`. This table stores **two different timestamp formats** — `expires_at`
+is ISO-8601 from JavaScript (`2026-05-02T12:43:34.000Z`), `created_at` uses SQLite's
+`datetime('now')` default (`2026-05-02 08:43:34`). They differ at character 10, `T` versus a space,
+and `T` sorts *above* a space. So the comparison is wrong whenever both fall on the same date: a
+token that expired an hour ago reads as still live. Against the real table it looked perfect, because
+every row there was months old and the dates diverged before reaching that character. A test using a
+token that expired 60 seconds ago exposed it. Now compares against a JS ISO string.
+
+**That format split is a live trap for any future date comparison in SQL** and is recorded in
+[ARCHITECTURE.md](ARCHITECTURE.md) §4.
+
+---
+
 ## Test suite
 
 Added 2026-08-31 — there were **no tests in this repository before this date.**
@@ -372,7 +448,7 @@ Added 2026-08-31 — there were **no tests in this repository before this date.*
 cd "Main backend" && npm test
 ```
 
-43 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
+56 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
 
 **Coverage is narrow and should be stated as such:** it covers the diagnostics module only. The
 matchmaking, MCP, auth and XMPP subsystems have no tests. The highest-value next additions, in order:
