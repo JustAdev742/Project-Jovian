@@ -219,6 +219,51 @@ entrypoint and deserves its own change rather than being restructured in passing
 
 ---
 
+## NOVA-AUDIT-006 — the 38 latent client endpoints are routed
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P3 · **Subsystem** compat |
+| **Grade** | endpoint list CONFIRMED (from the client binary); most response shapes UNKNOWN and treated as such |
+
+**What changed.** Every endpoint the 7.40 binary can call now has a route
+(`services/compat/latent.routes.ts`, 49 declarations covering the 38 previously-unrouted fragments).
+Full reasoning in [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §2c.
+
+**The rule applied.** A wrong shape is worse than no route. 14 declarations return a documented or
+reference-backed shape; the other 35 return **exactly** what the catch-all returned, verified
+byte-identical, and record an `UNKNOWN` diagnostic so a real call becomes visible. `MISSING` is
+reserved for genuinely unrecognised paths so the new module cannot swallow that signal.
+
+**Two real defects found while building it:**
+
+1. **A duplicate route that broke startup.** `/fortnite/api/stats/accountId/:accountId/bulk/window/:windowId`
+   was added here while `compat.routes.ts:21` already declared the same shape with a differently
+   *named* parameter (`:window`). Fastify treats those as one route and throws
+   `FST_ERR_DUPLICATED_ROUTE` — the backend fails to bind at all, not just that endpoint. The
+   fragment `api/stats/%s` had read as unrouted because the real path has a literal `accountId`
+   segment before the parameter. compat.routes.ts also implements it *better* than the reference
+   does — it seeds and returns real player stats where LawinServerV3 returns `{}` — so the duplicate
+   was simply dropped.
+
+2. **An integer that serialised larger than Int64.MAX.** `totalStorage` is `9223372036854775807` in
+   Epic's documented example, which is not representable as a JavaScript double; `JSON.stringify`
+   emits `9223372036854776000`. A client parsing that into an int64 overflows — on a value we
+   invented by rounding. The body is now serialised by hand so the exact documented integer reaches
+   the wire.
+
+**Regression tests** (`latent.routes.test.ts`, 4 tests): no route shape declared both here and
+elsewhere; no duplicate shape within the file; the stats route specifically stays out; and every
+parametric-service-prefix route pins at least two literal segments so none can broaden into a
+catch-all. **The collision test was verified to fail** by re-injecting the exact duplicate — it
+reported both the shape clash and the specific stats guard, and passed again once reverted.
+
+**Verified live:** all 49 routes registered without conflict and probed (0 unexpected statuses); the
+endpoints 7.40 actually uses re-checked unchanged in the same run; a still-unrouted control returning
+`200 {}` and recording `MISSING`.
+
+---
+
 ## Test suite
 
 Added 2026-08-31 — there were **no tests in this repository before this date.**
@@ -227,7 +272,7 @@ Added 2026-08-31 — there were **no tests in this repository before this date.*
 cd "Main backend" && npm test
 ```
 
-19 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
+23 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
 
 **Coverage is narrow and should be stated as such:** it covers the diagnostics module only. The
 matchmaking, MCP, auth and XMPP subsystems have no tests. The highest-value next additions, in order:

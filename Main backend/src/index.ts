@@ -22,6 +22,7 @@ import { startXmppServer, attachXmppWebSocket } from './services/xmpp/xmpp.serve
 import { novaRoutes } from './services/nova/nova.routes';
 import { anticheatRoutes } from './services/anticheat/anticheat.routes';
 import { compatRoutes } from './services/compat/compat.routes';
+import { latentRoutes } from './services/compat/latent.routes';
 import { installLogCapture } from './services/nova/logStore';
 import { recordDiagnostic, redactSecrets } from './services/nova/diagnostics';
 
@@ -140,6 +141,9 @@ async function main() {
     await app.register(novaRoutes);
     await app.register(anticheatRoutes);
     await app.register(compatRoutes);
+    // Registered LAST on purpose. Every static route above is claimed first, so the parametric
+    // service-prefix routes inside latentRoutes can only ever match what nothing else did.
+    await app.register(latentRoutes);
 
     // Not-found handler — return proper empty responses.
     //

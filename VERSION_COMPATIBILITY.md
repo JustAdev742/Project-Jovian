@@ -105,10 +105,17 @@ contiguous literal anywhere; `api/game/v2/profile` appears 17 times. The service
 configured separately and the fragment is appended at runtime. That is why a naive search for full
 paths finds nothing.
 
-**83 distinct fragments. 44 have a Nova route. 39 do not.**
+**83 distinct fragments. 45 already had a Nova route. 38 did not — and all 38 are now routed**
+(`services/compat/latent.routes.ts`, 49 declarations). See §2c for how, and for the rule that governs
+what each one returns.
 
-Every one of the 39 is an endpoint **the observed sessions never called** — they are latent, not
-broken. Grouped by whether they could plausibly matter for this deployment:
+> The first pass reported 44/39. `api/stats/%s` was a false positive: the real route
+> (`/fortnite/api/stats/accountId/:accountId/bulk/window/:window`) has a literal `accountId` segment
+> before the parameter, which the fragment match missed. Fastify caught it as a duplicate at startup,
+> and there is now a regression test for that whole class of mistake.
+
+Every one of the 38 is an endpoint **the observed sessions never called** — latent, not broken.
+Grouped by whether they could plausibly matter for this deployment:
 
 **Could matter — worth a decision**
 
@@ -131,14 +138,63 @@ use: `api/shared/{bulk/items,categories,currencies,namespace,offers/price,code/,
 `api/messaging/`, `api/dss/v1/`, `api/endpoints`, `api/3/timestamp`, `api/stats/%s`,
 `api/accounts/`, `api/shared/{accounts/,agreements/}`.
 
-**None of these is a bug today.** They currently fall to the catch-all (`200 {}` / `204`), which for
-an endpoint the client never calls costs nothing. The point of listing them is that if one *is* ever
-called it will now surface as a `MISSING` diagnostic rather than a silent `{}` — so this table is a
-watch-list, not a work-list. Do not implement any of them speculatively.
-
 **Caveat, stated plainly.** A literal in a shipping binary proves the build knows the name, not that
 any reachable path calls it. Shipping builds carry code for platforms, storefronts and modes this
 deployment never touches. Absence is the more conclusive direction.
+
+---
+
+## 2c. How the 38 are routed — and why most of them return nothing new
+
+`services/compat/latent.routes.ts`, registered **last** in `index.ts` so every existing static route
+is claimed before its parametric ones are considered.
+
+The governing rule: **a route that returns the wrong shape is worse than no route at all.** An
+unrouted `GET` already got `200 {}` and an unrouted `POST` already got `204`, and the client tolerates
+both. A plausible-looking but wrong body gets parsed and then fails somewhere further from the cause.
+So the module is split by how much evidence exists, and nothing is invented.
+
+**Tier 1 — evidenced shape (14 declarations).** Where documentation or the reference backend gives a
+real answer, that answer is returned:
+
+| endpoint | now returns | source |
+|---|---|---|
+| `GET /fortnite/api/entitlementCheck` | `204` | endpoint docs — 204 means "has entitlement"; it was returning `200 {}` |
+| `POST .../storeaccess/v1/{request,redeem}_access/:accountId` | `204` | endpoint docs |
+| `GET /fortnite/api/cloudstorage/storage/:accountId/info` | `{accountId, totalStorage, totalUsed}` | endpoint docs |
+| `POST /fortnite/api/matchmaking/session/matchMakingRequest` | `[]` | LawinServerV3 `matchmaking.js:102` |
+| `GET /affiliate/api/public/affiliates/slug/:slug` | `404 {}` for an unknown slug | LawinServerV3 `affiliate.js:9` |
+| `GET /account/api/public/account/email/:email` | `{id, displayName, externalAuths}` or `404` | endpoint docs, backed by the launcher account store |
+| `GET .../lookup/externalAuth/:type/displayName/:name` | `[]` | endpoint docs — documented as an **array**; the catch-all's `{}` was the wrong *type* |
+| `POST .../lookup/{externalId,externalDisplayName}` | `{}` | endpoint docs |
+| `GET /account/api/accounts/:accountId/metadata[/:key]`, `/email` | `{}` / `204` | endpoint docs |
+
+**Tier 2 — no authoritative shape (35 declarations).** These return **exactly** what the catch-all
+returned — `200 {}` for GET, `204` otherwise, verified byte-identical including headers and
+`content-length` — and record a diagnostic so we learn if one is ever actually called. Behaviour is
+unchanged by construction; the gain is visibility and a named place to put the real shape later.
+
+They are recorded under category `UNKNOWN`, deliberately **not** `MISSING`. `MISSING` keeps meaning
+"no route matched and we have no idea what this is"; `UNKNOWN` means "known client endpoint,
+undocumented shape". Collapsing the two would have let this module quietly swallow the diagnostic
+signal it was built alongside.
+
+**One genuine bug was found and fixed while writing it.** `totalStorage` is Int64.MAX in Epic's
+example, and `9223372036854775807` cannot be represented as a JavaScript double —
+`JSON.stringify` emits `9223372036854776000`, which is **greater than Int64.MAX** and would overflow
+a client parsing that field into an int64. The body is serialised by hand so the exact documented
+integer goes on the wire.
+
+**Where the service prefix was unknown**, the route uses a parametric first segment
+(`/:service/api/...`) rather than a guessed prefix — the binary carries `%s/api/accesscontrol/status`,
+so the owning service is genuinely not recoverable from the build. Fastify resolves static segments
+before parametric ones, so these cannot shadow a real route, and a test asserts every such route
+still pins at least two literal segments so none of them can broaden into a catch-all.
+
+**Verified:** all 49 routes registered without conflict; all 49 probed and answering; and the
+endpoints 7.40 actually uses re-checked unchanged in the same run (timeline 2,408 B, cloudstorage
+1,319 B, stats 1,425 B, lightswitch 330 B, `enabled_features` `[]`, `versioncheck`
+`{"type":"NO_UPDATE"}`), with a still-unrouted control returning `200 {}` and recording `MISSING`.
 
 ---
 
