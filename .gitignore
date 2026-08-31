@@ -35,3 +35,8 @@ Launcher/src-tauri/resources/
 _backup-*/
 Nova-Multiplayer-Test/
 Nova-Multiplayer-Test.zip
+
+# Supplied research corpus (~974 MB of archives: endpoint docs, datamining, build/map
+# archives, SDKs). Reference material, not source — it is read, never built. Findings
+# distilled from it live in VERSION_COMPATIBILITY.md and PROJECT_MEMORY.md.
+Full documentation/
