@@ -40,7 +40,7 @@ decision, not a code decision.
 | `cobalt-reports-success-unverified` | CONFIRMED | `Cobalt/dllmain.cpp:468-483` | Prints "initialised successfully" without checking the hook installed. |
 | `cobalt-logs-bearer-tokens` | CONFIRMED | `curlhook.h:80`, `log.cpp:73-88` | `eg1~` JWTs written to `cobalt.log` and POSTed to the backend. **Backend half fixed 2026-08-31; the Cobalt half is still open** — see NOVA-AUDIT-001. |
 | `trap8-systemic-unguarded-offsets` | CONFIRMED | `structs.cpp:414-422` | Offset-0-means-failure unchecked at most assignment sites (257 of 299 with no in-file zero-check). |
-| `mcp-rvn-from-client` | CONFIRMED | `mcp.routes.ts:20-31` | Revisions computed from the client's `rvn` query param rather than stored state. Latent on 7.40 — see [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §3. |
+| `mcp-rvn-from-client` | CONFIRMED | `mcp.routes.ts:20-31` | Revisions computed from the client's `rvn` query param rather than stored state. Latent on 7.40, and **narrower than it looks**: a binary scan shows this build reads only `profileChangesBaseRevision` and `profileChanges` — `profileRevision`, `profileCommandRevision` and `responseVersion` are absent from it entirely, so those three are ignored. See [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §2b. |
 | `common-core-stateless-rvn` | CONFIRMED | `common_core.ts:80,122` | `rvn`/`commandRevision` hard-coded to 1, never persisted. |
 | `ws-root-path-fabricates-matchmaking` | CONFIRMED | `xmpp.server.ts:186-217` | Any WS upgrade to `/` without the `xmpp` subprotocol registers a matchmaking waiter. |
 | `no-capability-floor` | CONFIRMED | `matchmaking.routes.ts:418-423` | No floor below which a machine is never elected host. |
@@ -117,7 +117,14 @@ See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md).
 3. **Whether `social.routes.ts` / `eos.routes.ts` are exploitable in practice.** Not probed.
 4. **Whether the coordinator and a host agent can open the same `DB_PATH` concurrently.**
    `database.ts` (999 lines) has never been audited.
-5. **Whether 7.40 sends the `xmpp` WebSocket subprotocol.** The header was never observed, which
-   leaves `ws-root-path-fabricates-matchmaking` unresolved.
-6. **Endpoint coverage for flows the six retained sessions never exercised.** Now self-answering —
+5. ~~**Whether 7.40 sends the `xmpp` WebSocket subprotocol.**~~ **Partly answered 2026-08-31.** The
+   client binary contains `Sec-WebSocket-Protocol` and 27/28 occurrences of `xmpp`, so the machinery
+   exists (STRONGLY SUPPORTED). That is not the same as observing the header on the wire for the
+   XMPP connection specifically, so `ws-root-path-fabricates-matchmaking` stays open — but the
+   cheap remaining step is now just logging `Sec-WebSocket-Protocol` on upgrade in
+   `xmpp.server.ts`, not a two-machine experiment.
+6. ~~**Endpoint coverage for flows the six retained sessions never exercised.**~~ **Answered
+   2026-08-31** — the client's full 83-fragment endpoint table was extracted from the binary; see
+   [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §2a. 44 routed, 39 latent-and-unrouted, none
+   of them a bug today. Also self-answering at runtime via
    `GET /nova/api/diagnostics?category=MISSING`.

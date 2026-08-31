@@ -49,6 +49,18 @@ Companions: [ARCHITECTURE.md](ARCHITECTURE.md) · [VERSION_COMPATIBILITY.md](VER
     *first-chance* vectored handler, which cannot know whether a fault was fatal. Crash triage from
     that file cannot distinguish a crash from a handled exception.
 
+11. **The client binary is on this machine, and it is the best evidence source the project has.**
+    `C:\Users\Admin\Downloads\v7.40\7.40\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe`
+    (the launcher records the path in `launcher-startup.log`). `node tools/binscan.js <exe> count …`
+    answers version questions in seconds that documentation and inference cannot — it has already
+    settled party-V1, MCP-not-EOS, `mutualPrivacy`, and which MCP revision fields this build reads.
+    **Ask the binary before writing code against a version question.**
+
+12. **The client stores endpoint path FRAGMENTS, not whole URLs.** `/fortnite/api` appears nowhere as
+    a contiguous literal; `api/game/v2/profile` appears 17 times. The service base is configured
+    separately and the fragment appended at runtime. A search for full paths finds nothing and looks
+    like proof of absence.
+
 ---
 
 ## 2. Method — what this project has learned about being right
@@ -95,6 +107,16 @@ Practices that follow, and that have each already paid for themselves:
    metadata for a file held open by a running process. It was 23,003 bytes.
 7. **Shrinking `JOIN_WINDOW_MS` looks right and is wrong.** It converts "player B is late" into
    "A and B never play together" by electing B as a second host. See KNOWN_ISSUES "Do not fix these".
+8. **Binary scans lie in two specific ways.** UE4 stores `FString`/`TEXT()` literals as **UTF-16LE**,
+   so an ASCII-only search reports real strings as absent (`acceptInvites` reads as 0 in ASCII and 1
+   in UTF-16). And **Git Bash rewrites arguments beginning with `/`** — `/fortnite/api` becomes
+   `C:/Program Files/Git/fortnite/api`, so every path search silently returns zero. Always
+   `export MSYS_NO_PATHCONV=1`, always search both encodings, and always run a positive control that
+   must be PRESENT. Both traps were hit during the 2026-08-31 pass and each produced a confident
+   wrong answer before a control caught it.
+9. **Modern endpoint documentation describes a later era.** The friend-settings doc shows
+   `mutualPrivacy`, which does not exist in 7.40 at all. Implementing from documentation without
+   checking the binary imports anachronisms — the exact trap Rule 3 warns about.
 
 ---
 
@@ -102,8 +124,20 @@ Practices that follow, and that have each already paid for themselves:
 
 **Available:** `cobalt.log` (792 KB, 6 launches), `FortniteGame.log` / `FortniteGame_2.log`
 (client + gameserver, 2026-08-15), coordinator `nova.log`, Reboot `crash.log` / `baseaddress.log`,
-and the research corpus in `Full documentation/` (endpoint documentation, EpicResearch, decompiled
-Retrofit service interfaces, AES archive, datamining, map archives).
+**the 7.40 client binary itself** (see fact 11), and the research corpus in `Full documentation/`.
+
+### The supplied corpus, assessed — so nobody mines it twice
+
+| archive | verdict |
+|---|---|
+| `FortniteEndpointsDocumentation` (755 files, 411 documented paths) | **Most useful.** Authoritative request/response shapes. `FriendsService/Old/` is specifically the legacy API 7.40 uses. **Caveat: examples are 2023-era** — check the binary before implementing a documented field. |
+| `EpicResearch` | Useful for auth: OAuth grant types, permissions, account endpoints. |
+| gist `4dff32bf…` (`FortnitePublicService.java` etc.) | Decompiled Retrofit interfaces — a compact authoritative route list with methods and query params. Oct 2019, so slightly post-7.40. |
+| `Fortnite-Aes-Keys-Archive` | 7.40 primary key + 5 chunk keys. Needed only for pak work. |
+| `Fortnite-Datamining` | **Not relevant.** Current build `42.00`; playlist/cosmetic data is 2024+. Chapter 6 era, nothing for Chapter 1. |
+| `fortnite-archives` (933 MB) | Map imagery and tiles. No backend value. |
+| `UAssetAPI` (83 MB) | A C# library for reading `.uasset`. Only relevant if the project ever parses assets directly; not needed for the backend. |
+| `Research.txt` | Good on Part I architecture; **self-graded as inference with no citations for Chapters 2–4 and live events.** Do not build a compatibility matrix from it. |
 
 **Not available, and this is the central gap:**
 

@@ -76,11 +76,11 @@ This is the single most useful negative result available right now, and it redir
 | 33 | `POST /fortnite/api/game/v2/profile/{acct}/client/EquipBattleRoyaleCustomization` | 33 | `…/client/:operation` | mcp |
 | 34 | `GET/POST /fortnite/api/matchmaking/session/{uuid}[/join]`, `…/game/v2/matchmaking/account/{acct}/session/{uuid}`, `statsv2/*` | 1 each | parameterised | matchmaking / stats |
 
-### Limits of this result — read before relying on it
+### Limits of this result
 
 - It covers **only flows these six sessions exercised.** A code path never taken (a purchase, a
   friend request accepted, Save-the-World) would not appear. It is a floor on coverage, not a proof
-  of completeness.
+  of completeness. **§2a lifts this limit** using the client binary itself.
 - It is the **HTTP surface only.** XMPP/WebSocket traffic is not in `cobalt.log`.
 - Cobalt logs the URL it *redirects*. A request that escaped the hook (see NOVA-303 in
   [KNOWN_ISSUES.md](KNOWN_ISSUES.md)) would be absent from both the log and the backend.
@@ -88,6 +88,102 @@ This is the single most useful negative result available right now, and it redir
 **From 2026-08-31 this no longer has to be reconstructed by hand.** Any unrouted call is now recorded
 as a `MISSING` diagnostic and readable at `GET /nova/api/diagnostics`. See
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
+
+---
+
+## 2a. The client's full endpoint table, from the binary — STRONGLY SUPPORTED
+
+§2 says what 7.40 *did* call. This says what it *can* call, which is the stronger question.
+
+Method: extract every `api/…` path literal from
+`FortniteClient-Win64-Shipping.exe` (106 MB, 7.40) in both ASCII and UTF-16LE, then match against
+Nova's routes. See [tools/README.md](tools/README.md) — including the two traps that produce
+confident wrong answers, both of which were hit and corrected during this analysis.
+
+**The client stores path FRAGMENTS, not whole URLs.** `/fortnite/api` does not appear as a
+contiguous literal anywhere; `api/game/v2/profile` appears 17 times. The service base URL is
+configured separately and the fragment is appended at runtime. That is why a naive search for full
+paths finds nothing.
+
+**83 distinct fragments. 44 have a Nova route. 39 do not.**
+
+Every one of the 39 is an endpoint **the observed sessions never called** — they are latent, not
+broken. Grouped by whether they could plausibly matter for this deployment:
+
+**Could matter — worth a decision**
+
+| fragment | note |
+|---|---|
+| `api/game/v2/matchmakingservice/ticket/session/` | a *session* ticket; Nova routes only `ticket/player/` |
+| `api/matchmaking/session/matchMakingRequest` | matchmaking, unrouted |
+| `api/game/v2/world/validate` | STW; Nova routes `world/info` only |
+| `api/entitlementCheck` | distinct from Nova's `/entitlement/api/account/:id/entitlements` |
+| `api/accesscontrol/status` · `api/game/v2/exchange_access/%s%s` · `api/storeaccess/v1/redeem_access/%s` | access gating |
+| `api/game/v2/twitch/{accountId}/register` · `/update` | Nova routes the base only |
+| `api/cloudstorage/storage/` | a cloudstorage variant Nova does not route |
+| `api/feedback/log-snapshot/%s` | client-side feedback upload |
+
+**Almost certainly irrelevant here** — storefront/EGS/launcher plumbing this deployment does not
+use: `api/shared/{bulk/items,categories,currencies,namespace,offers/price,code/,accounts/}`,
+`api/public/{imagetypes,sources/,payment/accounts/,lookup/,accounts/,assets/info/launcher/}`,
+`api/public/account/{email/,lookup/externalAuth/,lookup/externalId}`,
+`api/public/affiliates/slug/{affiliatename}`, `api/v1/{config/,groups/,groups/in/,recent/,user/in/}`,
+`api/messaging/`, `api/dss/v1/`, `api/endpoints`, `api/3/timestamp`, `api/stats/%s`,
+`api/accounts/`, `api/shared/{accounts/,agreements/}`.
+
+**None of these is a bug today.** They currently fall to the catch-all (`200 {}` / `204`), which for
+an endpoint the client never calls costs nothing. The point of listing them is that if one *is* ever
+called it will now surface as a `MISSING` diagnostic rather than a silent `{}` — so this table is a
+watch-list, not a work-list. Do not implement any of them speculatively.
+
+**Caveat, stated plainly.** A literal in a shipping binary proves the build knows the name, not that
+any reachable path calls it. Shipping builds carry code for platforms, storefronts and modes this
+deployment never touches. Absence is the more conclusive direction.
+
+---
+
+## 2b. Version questions settled directly from the binary
+
+Each with positive controls (`QueryProfile`, `enabled_features`, `reserveGeneralChatRooms` — all
+PRESENT) and negative controls (`bUsePartySystemV2`, `EOS_Initialize` — both ABSENT) in the same run.
+
+| question | result | grade |
+|---|---|---|
+| Does 7.40 know `mutualPrivacy`? | **ABSENT** (ascii 0 / utf16 0) — so Nova returning only `acceptInvites` is **correct**, and the modern doc's second field is later-era | CONFIRMED |
+| Does 7.40 know `acceptInvites`? | PRESENT (utf16 1) | CONFIRMED |
+| Which MCP envelope fields does 7.40 read? | `profileChangesBaseRevision` **PRESENT**, `profileChanges` **PRESENT**; `profileRevision`, `profileCommandRevision`, `responseVersion` **ABSENT** | STRONGLY SUPPORTED |
+| Which `versioncheck` values does it accept? | all five documented values present — `NO_UPDATE`, `NOT_ENABLED`, `SOFT_UPDATE`, `HARD_UPDATE`, `APP_REDIRECT` | CONFIRMED |
+| Does the client have WebSocket subprotocol machinery? | `Sec-WebSocket-Protocol` PRESENT; `xmpp` ×27 ASCII / ×28 UTF-16 | STRONGLY SUPPORTED |
+
+**Consequence for the revision defect.** Only `profileChangesBaseRevision` matters on 7.40. The three
+other revision fields Nova sends are ignored by this build, so they are harmless — which narrows the
+`mcp-rvn-from-client` issue considerably and is a further reason not to rewrite that code now.
+
+### 7.40 playlists — CONFIRMED
+
+The complete set in the client, for matchmaking and timeline work:
+
+```
+Playlist_DefaultSolo      Playlist_DefaultDuo        Playlist_DefaultSquad
+Playlist_50v50            Playlist_FiftyFifty        Playlist_Playground
+Playlist_PlaygroundV2     Playlist_Showdown_Solo     Playlist_Showdown_Duos
+Playlist_Showdown_Squads  Playlist_ShowdownAlt_Solo  Playlist_ShowdownAlt_Duos
+Playlist_ShowdownAlt_Squads
+Playlist_Deimos_SoloShow  Playlist_Deimos_DuoShow    Playlist_Deimos_SquadShow
+Playlist_Tile_Image (not a playlist — a UI asset name)
+```
+
+Nova's names align with these. `playlist_fill_squads` appears in Nova but **not** in the client, so
+it is Nova-internal — do not expect the client to request it.
+
+### 7.40 content key — CONFIRMED
+
+Primary AES key for 7.40, from `Fortnite-Aes-Keys-Archive`:
+`F2A0859F249BC9A511B3A8766420C6E943004CF0EAEE5B7CFFDB8F10953E994F`
+
+Five chunk keys are listed for 7.40; two are known (Deep Sea set, Brite Blimp Glider) and three are
+`???`. Recorded because any future work reading 7.40 paks needs it. Nothing in the backend uses it
+today.
 
 ---
 
