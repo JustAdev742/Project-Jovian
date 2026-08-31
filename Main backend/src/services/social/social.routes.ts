@@ -2,6 +2,8 @@ import { FastifyInstance } from 'fastify';
 import { generateUUID } from '../../utils/uuid';
 import { getFriends, addFriend, acceptFriend, removeFriend, blockUser, getAccount, logTelemetry } from '../../database';
 import { Config } from '../../config';
+import { requireAuth } from '../../middleware/auth.middleware';
+import { Errors } from '../../utils/error-handler';
 
 /** Friends, Party, Social, and miscellaneous gameplay routes */
 export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
@@ -107,9 +109,46 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
     return reply.send({ acceptInvites: 'public' });
   });
 
-  // Friends CRUD — DB-backed
-  fastify.post('/friends/api/v1/:accountId/friends/:friendId', async (request, reply) => {
+  // ── Friends CRUD — DB-backed ───────────────────────────────────────────────────────────────
+  //
+  // TWO PATH FAMILIES, ONE SET OF HANDLERS.
+  //
+  // Only the `/friends/api/v1/...` forms existed here, and 7.40 does not use them: a scan of
+  // FortniteClient-Win64-Shipping.exe finds `friends/api/v1` zero times, and the only
+  // friends-related literals in the whole binary are `api/public/friends/` and
+  // `api/public/blocklist/`. The mutating forms this build actually calls —
+  // POST/DELETE /friends/api/public/friends/:accountId/:friendId and the blocklist equivalent,
+  // both documented in the endpoint corpus under FriendsService/Old — had NO route, so they fell
+  // to the catch-all, which answers a POST with 204. The client saw success and nothing happened.
+  // Adding a friend in game could never work, and nothing said so.
+  //
+  // OWNERSHIP IS NOW ENFORCED on both families. Before this, every one of these was reachable with
+  // no Authorization header at all, taking the victim's accountId straight from the path. Proven
+  // against a scratch database, surviving a process restart: an unauthenticated caller could put a
+  // friend request on someone else's account, add arbitrary entries to their blocklist, and delete
+  // an existing mutual friendship.
+  //
+  // Requiring auth here CANNOT make things worse, which is what makes it the safe direction: the
+  // `public` forms did nothing at all before, and the `v1` forms are not on 7.40's path. If a
+  // caller does turn out to need one and has no token, it now fails visibly as an AUTH_FAILURE
+  // diagnostic instead of silently succeeding while doing nothing.
+
+  /** Verify the caller holds a valid token FOR THE ACCOUNT NAMED IN THE PATH.
+   *  Returns false once a response has been sent, so handlers just `return`. */
+  async function ownsAccount(request: any, reply: any, pathAccountId: string): Promise<boolean> {
+    await requireAuth(request, reply);
+    if (reply.sent) return false;
+    if (request.accountId !== pathAccountId) {
+      console.warn(`[Friends] Refusing ${request.method} on ${pathAccountId} from token for ${request.accountId}`);
+      Errors.unauthorized(reply, 'The token does not belong to the account being modified.');
+      return false;
+    }
+    return true;
+  }
+
+  async function sendFriendRequest(request: any, reply: any) {
     const { accountId, friendId } = request.params as { accountId: string; friendId: string };
+    if (!(await ownsAccount(request, reply, accountId))) return;
     // Check if the other side already sent a request (auto-accept)
     const theirFriends = getFriends(friendId);
     const existingRequest = theirFriends.find(f => f.friend_id === accountId && f.status === 'pending');
@@ -120,28 +159,43 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
       addFriend(accountId, friendId, 'pending');
       console.log(`[Friends] ${accountId} sent friend request to ${friendId}`);
     }
-    reply.status(204).send();
-  });
+    return reply.status(204).send();
+  }
 
-  fastify.delete('/friends/api/v1/:accountId/friends/:friendId', async (request, reply) => {
+  async function deleteFriend(request: any, reply: any) {
     const { accountId, friendId } = request.params as { accountId: string; friendId: string };
+    if (!(await ownsAccount(request, reply, accountId))) return;
     removeFriend(accountId, friendId);
     console.log(`[Friends] ${accountId} removed ${friendId}`);
-    reply.status(204).send();
-  });
+    return reply.status(204).send();
+  }
 
-  fastify.post('/friends/api/v1/:accountId/blocklist/:blockedId', async (request, reply) => {
+  async function blockAccount(request: any, reply: any) {
     const { accountId, blockedId } = request.params as { accountId: string; blockedId: string };
+    if (!(await ownsAccount(request, reply, accountId))) return;
     blockUser(accountId, blockedId);
     console.log(`[Friends] ${accountId} blocked ${blockedId}`);
-    reply.status(204).send();
-  });
+    return reply.status(204).send();
+  }
 
-  fastify.delete('/friends/api/v1/:accountId/blocklist/:blockedId', async (request, reply) => {
+  async function unblockAccount(request: any, reply: any) {
     const { accountId, blockedId } = request.params as { accountId: string; blockedId: string };
+    if (!(await ownsAccount(request, reply, accountId))) return;
     removeFriend(accountId, blockedId); // Unblock = remove the blocked entry
-    reply.status(204).send();
-  });
+    return reply.status(204).send();
+  }
+
+  // The forms 7.40 actually calls (FriendsService/Old in the endpoint documentation).
+  fastify.post('/friends/api/public/friends/:accountId/:friendId', sendFriendRequest);
+  fastify.delete('/friends/api/public/friends/:accountId/:friendId', deleteFriend);
+  fastify.post('/friends/api/public/blocklist/:accountId/:blockedId', blockAccount);
+  fastify.delete('/friends/api/public/blocklist/:accountId/:blockedId', unblockAccount);
+
+  // The v1 forms, kept for any later build that uses them.
+  fastify.post('/friends/api/v1/:accountId/friends/:friendId', sendFriendRequest);
+  fastify.delete('/friends/api/v1/:accountId/friends/:friendId', deleteFriend);
+  fastify.post('/friends/api/v1/:accountId/blocklist/:blockedId', blockAccount);
+  fastify.delete('/friends/api/v1/:accountId/blocklist/:blockedId', unblockAccount);
 
   // ═══════════════════════════════════════════════
   //  PARTY SERVICE

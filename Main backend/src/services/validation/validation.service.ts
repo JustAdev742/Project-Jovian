@@ -128,4 +128,6 @@ setInterval(() => {
       recentUpdates.set(accountId, recent);
     }
   }
-}, 5 * 60 * 1000);
+  // .unref(): a module-level timer must not keep a process alive merely because this file was
+  // imported — see the note on the EOS session reaper in eos.routes.ts.
+}, 5 * 60 * 1000).unref?.();

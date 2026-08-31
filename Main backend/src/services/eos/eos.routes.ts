@@ -7,6 +7,7 @@ import {
   getCurrency, getInventory, storeToken, validateToken,
 } from '../../database';
 import { generateAccessToken, verifyToken } from '../auth/token.service';
+import { Errors } from '../../utils/error-handler';
 import { Config } from '../../config';
 import fs from 'fs';
 import path from 'path';
@@ -114,7 +115,14 @@ function anonEosId(): string {
   return `eos-anon-${generateHex(8)}`;
 }
 
-// Cleanup stale EOS sessions every 10 minutes
+// Cleanup stale EOS sessions every 10 minutes.
+//
+// .unref() matters: this is a module-level timer, so it is armed by the mere act of IMPORTING this
+// file. Without unref it keeps Node's event loop alive forever, and any process that loads this
+// module — a test runner, a script, a one-off tool — hangs on exit instead of finishing. That is
+// exactly what it did: the first run of friends-auth.test.ts completed its assertions and then never
+// returned. unref keeps the timer firing for as long as the server is up while letting a process
+// that has nothing else to do exit. `reapStaleWaiters` in matchmaking.routes.ts already did this.
 setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, session] of eosSessions) {
@@ -122,7 +130,7 @@ setInterval(() => {
       eosSessions.delete(id);
     }
   }
-}, 10 * 60 * 1000);
+}, 10 * 60 * 1000).unref?.();
 
 export async function eosRoutes(fastify: FastifyInstance): Promise<void> {
 
@@ -682,10 +690,39 @@ export async function eosRoutes(fastify: FastifyInstance): Promise<void> {
     });
   });
 
+  /** Ownership guard for the EOS friend/block writers.
+   *
+   *  These three routes reach exactly the same tables as `/friends/api/...`, so leaving them open
+   *  while that family was locked down would just have moved the door. Proven against a scratch
+   *  database: an unauthenticated `POST /epic/friends/v1/<dep>/users/<victim>/blocked/<anyone>`
+   *  returned 204 and the entry showed up when the victim's blocklist was read back through the
+   *  FRIENDS api.
+   *
+   *  `productUserMap.get(x) || x` is what makes it trivially targetable — an unmapped value falls
+   *  through as a raw accountId, so an attacker does not even need a PUID.
+   *
+   *  Uses this file's own `resolveAccountId`, which accepts a real EOS v2 token (those are
+   *  storeToken()'d with the caller's account) but not the anonymous ids the token endpoint hands
+   *  to unidentified callers — those are deliberately never registered as credentials. */
+  function eosOwnsAccount(request: any, reply: any, targetAccountId: string): boolean {
+    const caller = resolveAccountId(request);
+    if (!caller) {
+      Errors.unauthorized(reply, 'A valid access token is required.');
+      return false;
+    }
+    if (caller !== targetAccountId) {
+      console.warn(`[EOS] Refusing ${request.method} on ${targetAccountId} from token for ${caller}`);
+      Errors.unauthorized(reply, 'The token does not belong to the account being modified.');
+      return false;
+    }
+    return true;
+  }
+
   fastify.post('/epic/friends/v1/:deploymentId/users/:userId/friends/:friendId', async (request, reply) => {
     const { userId, friendId } = request.params as { userId: string; friendId: string };
     const accountId = productUserMap.get(userId) || userId;
     const friendAccountId = productUserMap.get(friendId) || friendId;
+    if (!eosOwnsAccount(request, reply, accountId)) return;
 
     const theirFriends = getFriends(friendAccountId);
     const existing = theirFriends.find(f => f.friend_id === accountId && f.status === 'pending');
@@ -702,6 +739,7 @@ export async function eosRoutes(fastify: FastifyInstance): Promise<void> {
     const { userId, friendId } = request.params as { userId: string; friendId: string };
     const accountId = productUserMap.get(userId) || userId;
     const friendAccountId = productUserMap.get(friendId) || friendId;
+    if (!eosOwnsAccount(request, reply, accountId)) return;
     removeFriend(accountId, friendAccountId);
     return reply.status(204).send();
   });
@@ -722,6 +760,7 @@ export async function eosRoutes(fastify: FastifyInstance): Promise<void> {
     const { userId, blockedId } = request.params as { userId: string; blockedId: string };
     const accountId = productUserMap.get(userId) || userId;
     const blockedAccountId = productUserMap.get(blockedId) || blockedId;
+    if (!eosOwnsAccount(request, reply, accountId)) return;
     blockUser(accountId, blockedAccountId);
     return reply.status(204).send();
   });

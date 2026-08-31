@@ -317,7 +317,9 @@ function reapDeadServers(): void {
     }
   }
 }
-setInterval(reapDeadServers, 30 * 1000);
+// .unref(): a module-level timer must not keep a process alive merely because this file was
+// imported — see the note on the EOS session reaper in eos.routes.ts.
+setInterval(reapDeadServers, 30 * 1000).unref?.();
 
 // ───────────────────────────────────────────────────────────────────────────
 //  P2P HOST ELECTION
@@ -883,7 +885,7 @@ function cleanupStaleSessions(): void {
     }
   }
 }
-setInterval(cleanupStaleSessions, 5 * 60 * 1000);
+setInterval(cleanupStaleSessions, 5 * 60 * 1000).unref?.();
 
 export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void> {
 

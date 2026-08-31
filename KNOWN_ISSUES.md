@@ -44,7 +44,7 @@ decision, not a code decision.
 | `common-core-stateless-rvn` | CONFIRMED | `common_core.ts:80,122` | `rvn`/`commandRevision` hard-coded to 1, never persisted. |
 | `ws-root-path-fabricates-matchmaking` | CONFIRMED, **narrower than first stated** | `xmpp.server.ts` | A WS upgrade that is neither XMPP nor an EOS path registers a matchmaking waiter the instant it opens, and in P2P mode a waiter is demand — enough of it elects a host and starts a gameserver for nobody. **But it is not separable by path or subprotocol:** the real MMS client also connects to the *root* path with no usable subprotocol (39 coordinator upgrades recorded `"ws"` 15, `"wss"` 11, `""` 11, `"xmpp"` 2 — the first two are URL schemes, not subprotocols). EOS paths are already excluded upstream. **Do not invert the routing default on a guess** — the code says so too. Since 2026-08-31 the one unambiguous case, a *non-root* path, is recorded as an `UNEXPECTED_STATE` diagnostic instead of silently counting as a player. |
 | `no-capability-floor` | CONFIRMED | `matchmaking.routes.ts:418-423` | No floor below which a machine is never elected host. |
-| `unauth-route-families` | PLAUSIBLE | `eos.routes.ts` (88 routes, 0 `requireAuth`), `social.routes.ts` (49 routes, 0) | Same shape as the fixed MCP finding, reaching `addFriend`/`removeFriend`/`writeFileSync`. **Never probed.** `eos.routes.ts` is not on 7.40's path; `social.routes.ts` is. |
+| ~~`unauth-route-families`~~ | **CONFIRMED then FIXED 2026-08-31** | `social.routes.ts`, `eos.routes.ts` | Probed at last. It was real: unauthenticated callers could add a friend request to, block on, and unfriend from **any** account, in both families, persisting across a restart. Fixed with an ownership guard on both. The same probe found that the POST/DELETE forms 7.40 actually uses were never routed at all. See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md) NOVA-AUDIT-007. |
 
 ## Open — P3
 
@@ -114,7 +114,10 @@ See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md).
    claim is a mechanism read out of PC-side code.
 2. **Whether a two-machine session has ever worked.** The only end-to-end success on record is the PC
    connecting to *itself* over its own tailnet address.
-3. **Whether `social.routes.ts` / `eos.routes.ts` are exploitable in practice.** Not probed.
+3. ~~**Whether `social.routes.ts` / `eos.routes.ts` are exploitable in practice.**~~ **Answered
+   2026-08-31: yes, and both are now fixed.** Note the shape of the mistake — the finding sat at
+   PLAUSIBLE for two weeks because probing it was deferred, and it turned out to be a real P1 that
+   took one afternoon to confirm. The remaining unprobed items below deserve the same suspicion.
 4. **Whether the coordinator and a host agent can open the same `DB_PATH` concurrently.**
    `database.ts` (999 lines) has never been audited.
 5. ~~**Whether 7.40 sends the `xmpp` WebSocket subprotocol.**~~ **Partly answered 2026-08-31.** The

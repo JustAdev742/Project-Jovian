@@ -264,6 +264,106 @@ endpoints 7.40 actually uses re-checked unchanged in the same run; a still-unrou
 
 ---
 
+## NOVA-AUDIT-007 — friend and blocklist writes had no owner
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P1 (unauthorised write to another player's account) |
+| **Subsystem** | social · eos |
+| **Grade** | CONFIRMED — reproduced against a scratch database, persisting across a process restart |
+
+**Symptom.** None. Every handler did exactly what it said; the route simply never asked who was
+calling.
+
+**Root cause.** `accountId` came straight off the URL path with no auth check on any of the friend or
+blocklist writers, in **two** families that reach the same tables:
+`/friends/api/v1/:accountId/...` and `/epic/friends/v1/:deploymentId/users/:userId/...`. The EOS side
+is trivially targetable because `productUserMap.get(x) || x` lets an unmapped value fall through as a
+raw account id.
+
+**Evidence** — no `Authorization` header, scratch database, control in the same run:
+
+```
+POST   /friends/api/v1/<victim>/friends/<attacker>   -> 204, victim now has an outgoing request
+POST   /friends/api/v1/<victim>/blocklist/<anyone>   -> 204, victim's blocklist modified
+DELETE /friends/api/v1/<victim>/friends/<real friend>-> 204, an existing mutual friendship removed
+POST   /epic/friends/v1/<dep>/users/<victim>/blocked/<x> -> 204, visible via the FRIENDS api
+control: POST /bogus/api/v1/x/friends/y             -> 204   (so 204 alone proves nothing;
+                                                              the persistence check is the signal)
+```
+
+All of it survived killing and restarting the process — these are committed rows, not cache.
+
+**A second, functional defect found in the same place.** Only the **GET** forms of the legacy
+`/friends/api/public/...` API were routed. The **POST/DELETE** forms — the ones 7.40 actually uses —
+had no route and fell to the catch-all, which answers a POST with `204`. **Adding a friend in game
+returned success and did nothing, silently.** The binary settles which API this build uses: it
+contains `friends/api/v1` zero times, and the only friends-related literals anywhere in it are
+`api/public/friends/` and `api/public/blocklist/`.
+
+**Fix.** One set of handlers behind an ownership guard, registered on both path families. The guard
+checks that the caller's token belongs to *the account named in the path* — not merely that a token
+exists. EOS reuses that file's own `resolveAccountId`, which accepts a real EOS v2 token but not the
+anonymous ids the token endpoint hands to unidentified callers.
+
+**Why requiring auth here is the safe direction** — the argument that matters, since adding auth
+usually is not: the `public` forms did nothing at all before, and the `v1` forms are not on 7.40's
+path. A caller that needs one and has no token now fails *visibly* as an `AUTH_FAILURE` diagnostic
+instead of silently succeeding while doing nothing.
+
+**Verified, with both controls:** unauthenticated → `401` and no state change; valid token on
+**another** account → `401`; valid token on **your own** account → `204` **and the write lands** —
+including through the legacy path that previously no-opped.
+
+**Regression tests.** `friends-auth.test.ts`, 17 tests, HTTP-level via `app.inject()` — no port
+bound, no network, `index.ts` never imported. Covers all 11 refusal routes, both wrong-account cases,
+and the positive path in both families.
+
+---
+
+## NOVA-AUDIT-008 — module-level timers stopped any process from exiting
+
+| | |
+|---|---|
+| **Date** | 2026-08-31 · **Severity** P3 · **Subsystem** eos · matchmaking · validation |
+| **Grade** | CONFIRMED — the hang was observed, then fixed, then the same suite exited cleanly |
+
+**Symptom.** The first run of `friends-auth.test.ts` executed its assertions and then **never
+returned** — it had to be killed after two minutes.
+
+**Root cause.** Four `setInterval` calls at module top level, armed by the mere act of *importing*
+the file, with no `.unref()`. Node keeps the event loop alive for a referenced timer, so any process
+that loads these modules — a test runner, a script, a one-off tool — hangs on exit forever.
+`reapStaleWaiters` in `matchmaking.routes.ts` already called `.unref?.()`; three others and the EOS
+session reaper had simply missed it.
+
+**Fix.** `.unref?.()` on all four. The timers still fire for as long as the server runs; they just no
+longer hold a process open on their own.
+
+**Beyond tests:** this is also why nothing that imports these modules can shut down cleanly.
+
+---
+
+## An error I made, recorded because the trap is the point
+
+While writing `friends-auth.test.ts` I set `process.env.NOVA_DB_PATH` at the top of the file and
+imported the database module normally. **`import` declarations are hoisted** — they run before any
+top-level statement — so `config.ts` resolved `Config.DB_PATH` *before* the assignment executed, and
+the suite ran against `Main backend/data/nova.db`. It created a `tester` account and a blocklist row
+in the real database.
+
+Removed afterwards: a backup was taken first (`data/nova.db.bak-before-cleanup-*`), 4 rows deleted
+across `accounts`, `tokens`, `currency` and `friends`, and the result verified — 114 accounts remain,
+the friends table is empty, and the real user account is intact.
+
+`config.ts` warns about exactly this: without `NOVA_DB_PATH`, "did my change work" and "did I just
+edit live player accounts" become the same question. The fix is structural, not a note to be careful:
+the database modules are now loaded **dynamically inside `before()`**, and `assertScratchDatabase`
+refuses to run the suite unless the resolved path is a temp file. Three tests exercise that guard
+directly — pointing it at real data to prove it by experiment is the one thing it exists to prevent.
+
+---
+
 ## Test suite
 
 Added 2026-08-31 — there were **no tests in this repository before this date.**
@@ -272,7 +372,7 @@ Added 2026-08-31 — there were **no tests in this repository before this date.*
 cd "Main backend" && npm test
 ```
 
-23 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
+43 tests, `node:test` via `tsx`, no new dependency. `npm run typecheck` runs `tsc --noEmit`.
 
 **Coverage is narrow and should be stated as such:** it covers the diagnostics module only. The
 matchmaking, MCP, auth and XMPP subsystems have no tests. The highest-value next additions, in order:
