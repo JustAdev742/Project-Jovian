@@ -23,6 +23,7 @@ import { novaRoutes } from './services/nova/nova.routes';
 import { anticheatRoutes } from './services/anticheat/anticheat.routes';
 import { compatRoutes } from './services/compat/compat.routes';
 import { installLogCapture } from './services/nova/logStore';
+import { recordDiagnostic, redactSecrets } from './services/nova/diagnostics';
 
 // Capture console output into a ring buffer so the launcher can stream live logs.
 installLogCapture();
@@ -102,9 +103,26 @@ async function main() {
     await app.register(formbody);
     app.addHook('onRequest', versionRouter);
 
-    // Global request logger
+    // Global request logger.
+    //
+    // Two things here are load-bearing and easy to undo by accident:
+    //
+    // 1. THE URL IS REDACTED. Fortnite 7.40 puts a live bearer token in the URL *path* — every
+    //    session ends with `DELETE /account/api/oauth/sessions/kill/eg1~<jwt>`, 76 of them in the
+    //    retained cobalt.log. This line used to log `request.url` verbatim into the ring buffer that
+    //    GET /nova/api/logs then serves with no Authorization header required, so anyone who could
+    //    reach the backend could harvest live session tokens. Verified by planting an `eg1~` canary
+    //    and reading it back unauthenticated.
+    //
+    // 2. THE LOG READS ARE NOT LOGGED. The launcher's Logs tab polls /nova/api/logs every 2500 ms
+    //    and each poll used to append its own line, so watching the log evicted the very evidence
+    //    being watched for — the buffer's newest 800 entries became mostly the reader's own
+    //    requests. Reading a diagnostic surface must not perturb it.
+    const SELF_READ_PATHS = ['/nova/api/logs', '/nova/api/components', '/nova/api/diagnostics'];
     app.addHook('onRequest', async (request, reply) => {
-      console.log(`[HTTP] ${request.method} ${request.url}`);
+      const path = request.url.split('?')[0];
+      if (SELF_READ_PATHS.some((p) => path === p || path.startsWith(p + '/'))) return;
+      console.log(`[HTTP] ${request.method} ${redactSecrets(request.url)}`);
     });
 
     // Register all route modules
@@ -123,9 +141,26 @@ async function main() {
     await app.register(anticheatRoutes);
     await app.register(compatRoutes);
 
-    // Not-found handler — return proper empty responses
+    // Not-found handler — return proper empty responses.
+    //
+    // The RESPONSE SHAPE IS DELIBERATELY UNCHANGED. A `200 {}` for an unrouted GET is
+    // indistinguishable from a real empty result, which is exactly the trap that has cost this
+    // project so much time — but it is also what keeps a client that treats 404 as fatal working.
+    // The fix is not to start erroring; it is to make the silence countable. Every unrouted call is
+    // now recorded as a MISSING diagnostic, aggregated by normalised route so that repeats
+    // increment a counter instead of evicting each other from the log buffer.
     app.setNotFoundHandler(async (request, reply) => {
-      console.log(`[UNHANDLED] ${request.method} ${request.url}`);
+      const safeUrl = redactSecrets(request.url);
+      console.log(`[UNHANDLED] ${request.method} ${safeUrl}`);
+      recordDiagnostic({
+        category: 'MISSING',
+        method: request.method,
+        url: request.url,
+        version: (request as any).gameVersion?.buildString,
+        accountId: (request as any).accountId,
+        status: request.method === 'GET' ? 200 : 204,
+        detail: 'no route matched; answered by the catch-all',
+      });
       if (request.method === 'GET') return reply.send({});
       return reply.status(204).send();
     });
@@ -135,7 +170,21 @@ async function main() {
       // and don't leak internal error text on real server errors.
       const sc = (error as any).statusCode;
       const status = typeof sc === 'number' && sc >= 400 ? sc : 500;
-      console.error(`[ERROR ${status}] ${request.method} ${request.url}:`, error.message);
+      console.error(`[ERROR ${status}] ${request.method} ${redactSecrets(request.url)}:`, redactSecrets(error.message || ''));
+
+      // Classify rather than lumping everything together. "500s went up" is not actionable;
+      // "AUTH_FAILURE on /account/api/oauth/token for build 7.40 went up" is.
+      recordDiagnostic({
+        category: status === 401 || status === 403 ? 'AUTH_FAILURE'
+          : status >= 500 ? 'INTERNAL_ERROR'
+          : 'FAILED',
+        method: request.method,
+        url: request.url,
+        version: (request as any).gameVersion?.buildString,
+        accountId: (request as any).accountId,
+        status,
+        detail: error.message,
+      });
       reply.status(status).send({
         errorCode: status < 500 ? 'errors.com.epicgames.common.bad_request' : 'errors.com.epicgames.common.server_error',
         errorMessage: status < 500 ? (error.message || 'Bad request') : 'Internal server error',

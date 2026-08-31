@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getLogs, clearLogs, ingestLogs, getComponentStatuses } from './logStore';
+import { getDiagnostics, getDiagnosticsSummary, clearDiagnostics, type DiagnosticCategory } from './diagnostics';
 import { getNews } from './news';
 import { getLeaderboard, getAccount, getAccountIdByDisplayName } from '../../database';
 import { getEquippedCharacterId, getEquippedCosmetics } from '../mcp/profiles/athena';
@@ -54,6 +55,38 @@ export async function novaRoutes(fastify: FastifyInstance): Promise<void> {
 
   fastify.delete('/nova/api/logs', async (_request, reply) => {
     clearLogs();
+    return reply.send({ ok: true });
+  });
+
+  /**
+   * GET /nova/api/diagnostics — the structured failure view, most severe first.
+   *
+   * This is the endpoint that answers the questions the raw log cannot: which endpoints are missing
+   * for which build, how often, affecting how many distinct players, and whether it is getting
+   * worse. Unlike /nova/api/logs it AGGREGATES, so a problem that happened 700 times is one row with
+   * count=700 rather than 700 lines that push everything else out of the buffer.
+   *
+   * `?category=MISSING` filters to one failure class; `?summary=1` returns only the rollups.
+   * Every value is already redacted at write time — no token or raw account id is stored, so this
+   * response cannot leak one even though (like the rest of /nova/api/*) it carries no auth.
+   */
+  fastify.get('/nova/api/diagnostics', async (request, reply) => {
+    const q = (request.query || {}) as Record<string, string>;
+    const summary = getDiagnosticsSummary();
+    if (q.summary === '1') return reply.send({ summary });
+
+    const limit = parseInt(q.limit || '200', 10);
+    return reply.send({
+      summary,
+      entries: getDiagnostics({
+        category: q.category as DiagnosticCategory | undefined,
+        limit: isNaN(limit) ? 200 : limit,
+      }),
+    });
+  });
+
+  fastify.delete('/nova/api/diagnostics', async (_request, reply) => {
+    clearDiagnostics();
     return reply.send({ ok: true });
   });
 

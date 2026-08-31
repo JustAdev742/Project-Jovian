@@ -1,4 +1,5 @@
 import { FastifyReply } from 'fastify';
+import { recordDiagnostic } from '../services/nova/diagnostics';
 
 /**
  * Standard Epic Games error response format.
@@ -28,6 +29,27 @@ export function sendEpicError(
     originatingService: 'com.epicgames.account.public',
     intent: 'prod',
   };
+
+  // Every deliberate error in this codebase funnels through here, and none of them ever reached the
+  // diagnostics store before: these helpers call reply.send() directly rather than throwing, so
+  // Fastify's setErrorHandler — where the classification in index.ts lives — is never invoked. That
+  // made every 401 and 404 the backend chose to return invisible to the failure view, which is
+  // precisely the class of failure most worth counting. Recording it here catches all of them in one
+  // place. Wrapped because a diagnostics problem must never stop an error response being sent.
+  try {
+    const request: any = (reply as any).request;
+    recordDiagnostic({
+      category: statusCode === 401 || statusCode === 403 ? 'AUTH_FAILURE'
+        : statusCode >= 500 ? 'INTERNAL_ERROR'
+        : 'FAILED',
+      method: request?.method || 'UNKNOWN',
+      url: request?.url || '/',
+      version: request?.gameVersion?.buildString,
+      accountId: request?.accountId,
+      status: statusCode,
+      detail: `${errorCode}: ${errorMessage}`,
+    });
+  } catch { /* never let diagnostics break an error path */ }
 
   reply.status(statusCode).send(error);
 }
