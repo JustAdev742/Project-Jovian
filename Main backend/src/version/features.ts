@@ -198,6 +198,7 @@ export const FEATURES: readonly FeatureRecord[] = [
       {
         atMajor: null, change: 'ADDED', confidence: 'CONFIRMED',
         evidence: 'Binary scan of the 7.40 client: `acceptInvites` PRESENT (utf16 ×1). Observed 59× in session logs.',
+        detail: 'Bounded 2026-09-06 by a second binary: ABSENT from ++Fortnite+Release-Live-CL-3240987 (December 2016). So the field was added somewhere between that build and 7.40 - still not a major, but no longer unbounded below.',
       },
       {
         atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
@@ -446,6 +447,20 @@ export const FEATURES: readonly FeatureRecord[] = [
     ],
     failureBehaviour: 'An unhandled operation returns an empty-success envelope, never a 404. The client believes it succeeded and nothing happens.',
     notes: 'The 63 operations 7.40 has and Nova does not handle are overwhelmingly Save the World and Creative, where empty success is the right answer for a Battle Royale backend. Audited in KNOWN_ISSUES.md; deliberately NOT implemented, because a literal in a shipping binary proves the build knows the name and none of them appear in the observed request log.',
+  },
+  {
+    feature: 'mcp.profile.profile0',
+    subsystem: 'mcp',
+    description: 'The single combined MCP profile that predates common_core / campaign / athena.',
+    timeline: [{
+      atMajor: null, change: 'REPLACED', replacedBy: 'mcp.profile.operation', confidence: 'CONFIRMED',
+      evidence: 'TWO BINARIES, which is what makes this the first properly bounded change in this table. ++Fortnite+Release-Live-CL-3240987 (UE 4.14.0, December 2016): profile0 PRESENT (utf16 x2), common_core / campaign / athena ALL ABSENT. 7.40: exactly the reverse - profile0 ABSENT, common_core x9, campaign x14, athena x33. Corroborates the endpoint corpus, which calls profile0 a relict "basicly like common_core, athena and campaign combined".',
+      detail: 'WHERE the split happened is still UNKNOWN: the two binaries bracket it between December 2016 and 7.40, and nothing in the corpus narrows it further. The 2016 build also has no Athena or BattleRoyale at all, so it predates Battle Royale entirely and is outside the Chapter 1-4 range this work targets.',
+    }],
+    implementation: 'services/mcp/operations/QueryProfile.ts - unknown profileIds fall to buildStubProfile',
+    failureBehaviour: 'A profile0 request returns an empty stub rather than a 404, so an ancient client is answered rather than errored. That is the safe direction and is already the behaviour.',
+    tests: ['operations.test.ts - Release-Live builds'],
+    notes: 'Recorded rather than implemented. Nova is a Battle Royale backend and this build has no Battle Royale in it; serving profile0 properly would mean modelling a 2016 Save the World profile from a binary alone.',
   },
 ];
 

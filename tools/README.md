@@ -28,6 +28,28 @@ The 7.40 client is at
 `C:\Users\Admin\Downloads\v7.40\7.40\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe`
 (the launcher records this path in `%LOCALAPPDATA%\Project Launcher\launcher-startup.log`).
 
+
+### Binaries actually on this machine
+
+Both were found 2026-09-06 by searching the user's drives; neither is in the repo.
+
+| build | path | what it is |
+|---|---|---|
+| **7.40** | `C:\Users\Admin\Downloads\v7.40\7.40\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe` | the target. 101.8 MB, Chapter 1 Season 7, CL-5046157 |
+| **Release-Live** | `C:\Users\Admin\Documents\OT 6.5\OT6.5-Live-CL-2870186\Fortnite\.lysEB\Install\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe` | 70.1 MB, `++Fortnite+Release-Live-CL-3240987`, UE 4.14.0, **December 2016** |
+
+A duplicate of the second sits under `Documents\OT0.6.5\` — same size, same CL.
+
+**What the 2016 one is and is not.** `Athena` and `BattleRoyale` are both ABSENT from it, so it is
+**pre-Battle-Royale** and cannot answer any Chapter 1–4 question directly. What it can do is bound
+changes from below, which is worth a great deal when the alternative is one binary and an inference:
+`profile0` is PRESENT in it and ABSENT from 7.40, while `common_core` / `campaign` / `athena` are the
+exact reverse. That is the first change in `VERSION_COMPATIBILITY.md` bracketed by two measurements.
+
+Note its User-Agent carries **no major.minor at all** — `Release-Live`, a branch name. Anything
+parsing versions must handle that; `identifyVersion` reports `id: 'live'` with UNKNOWN confidence and
+keeps the changelist, and must never be read as an era.
+
 ### Two traps that will give you a wrong answer
 
 **1. Search both encodings.** UE4 stores `FString` / `TEXT()` literals as **UTF-16LE**, while

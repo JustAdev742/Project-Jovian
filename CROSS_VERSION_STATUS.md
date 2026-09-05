@@ -109,9 +109,37 @@ Reboot resolve their targets by byte-signature scan. No amount of backend work l
 *play* another build: the client would never be redirected, and nothing could host. **The backend is
 now ahead of what the rest of the stack can use.**
 
-**4. No second build has ever been run.** Every claim still rests on one client binary. The table
-above proves the backend *responds* per build; it does not prove any of those responses are what
-that build wants, because none has ever connected.
+**4. No second build has ever been RUN, and that is still the binding gap.** ~~Every claim still
+rests on one client binary.~~ **Amended 2026-09-06 — that half is no longer true.**
+
+A second binary was found on this machine and scanned: `++Fortnite+Release-Live-CL-3240987`,
+UE 4.14.0, December 2016, at `Documents/OT 6.5/OT6.5-Live-CL-2870186/…/FortniteClient-Win64-Shipping.exe`.
+It is **pre-Battle-Royale** — `Athena` and `BattleRoyale` are both absent — so it is outside the
+Chapter 1–4 range and cannot validate any Chapter 2–4 response. It is still worth what it cost,
+because it turned three claims that rested on one binary into claims that rest on two:
+
+| probe | Release-Live (Dec 2016) | 7.40 (2019) | what it settles |
+|---|---|---|---|
+| `profile0` | PRESENT ×2 | ABSENT | the old combined profile is real, and gone by 7.40 |
+| `common_core` · `campaign` · `athena` | ALL ABSENT | ×9 · ×14 · ×33 | the split into three profiles happened between them |
+| `acceptInvites` | ABSENT | PRESENT | the friend-settings field has a lower bound now |
+| `mutualPrivacy` | ABSENT | ABSENT | still later than both; unchanged |
+| `OnlineSubsystemMcp` | ×898 | present | both are MCP-era, neither is EOS |
+
+**And it found a defect in this session's own work.** `identifyVersion` fills in chapter and season
+from the configured fallback even when it parses nothing, so the cosmetics era filter — added hours
+earlier, with a comment promising it would not act on a guess — was serving a Chapter 1 Season 7
+locker to any build it could not identify. A `Release-Live` request and a bare `curl` were
+indistinguishable at that point. Both are fixed: the filter now keys off `confidence`, and
+Release-Live is recognised as its own id with its changelist kept. Three regression tests pin it.
+
+That is the argument for step 1 below in miniature. One binary from outside the target range,
+scanned for twenty minutes, corrected a bug that a hundred more tests against 7.40 could not have
+found — because 7.40 is exactly the build the wrong answer was accidentally right for.
+
+The original point stands otherwise: the table above proves the backend *responds* per build; it
+does not prove any of those responses are what that build wants, because no other build has ever
+connected.
 
 ---
 

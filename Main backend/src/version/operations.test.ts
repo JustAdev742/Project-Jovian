@@ -107,3 +107,49 @@ describe('MCP operation coverage', () => {
     assert.equal(NOT_IN_740.size, 12);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+//  Release-Live — the branch-named builds that predate numbered releases.
+//
+//  CONFIRMED from a real binary: ++Fortnite+Release-Live-CL-3240987, UE 4.14.0, December 2016.
+//  `Athena` and `BattleRoyale` are both ABSENT from it, so it is pre-Battle-Royale, and `profile0`
+//  is PRESENT while `common_core` / `campaign` / `athena` are all absent — the reverse of 7.40.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+import { identifyVersion } from './identify';
+
+describe('Release-Live builds', () => {
+  const id = (ua: string) => identifyVersion({ 'user-agent': ua }, 7);
+
+  test('a Release-Live client is distinguishable from a non-client', () => {
+    // These were identical before: both fell through to the configured target with no signal saying
+    // which was which, so an unexpected old client was invisible in the diagnostics.
+    const live = id('Fortnite/++Fortnite+Release-Live-CL-3240987 Windows/10.0.14393');
+    const curl = id('curl/8.0');
+    assert.equal(live.id, 'live');
+    assert.equal(curl.id, 'unknown');
+    assert.notEqual(live.id, curl.id);
+  });
+
+  test('its changelist is kept — the only version information it carries', () => {
+    assert.equal(id('Fortnite/++Fortnite+Release-Live-CL-3240987 Windows/10.0').changelist, 3240987);
+    assert.equal(id('curl/8.0').changelist, undefined);
+  });
+
+  test('confidence stays UNKNOWN — a changelist does not place a build in a chapter', () => {
+    // The whole point. Detecting the build must not be mistaken for dating it, and the era filter
+    // in mcp/profiles/athena.ts keys off exactly this field.
+    const live = id('Fortnite/++Fortnite+Release-Live-CL-3240987 Windows/10.0');
+    assert.equal(live.confidence, 'UNKNOWN');
+    assert.ok(live.signals.includes('user-agent:Release-Live'));
+    assert.ok(live.signals.includes('fallback:configured-target'));
+  });
+
+  test('the 7.40 baseline is untouched by any of this', () => {
+    const v = id('Fortnite/++Fortnite+Release-7.40-CL-5046157 Windows/10.0.17763.1.256.64bit');
+    assert.equal(v.id, '7.40');
+    assert.equal(v.confidence, 'CONFIRMED');
+    assert.equal(v.chapter, 1);
+    assert.equal(v.season, 7);
+    assert.equal(v.changelist, 5046157);
+  });
+});

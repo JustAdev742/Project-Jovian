@@ -189,3 +189,39 @@ describe('enabled_features follows the calling build', () => {
     assert.deepEqual(await featuresFor(undefined), []);
   });
 });
+
+describe('an era that was GUESSED must not filter anything', () => {
+  // THE BUG THIS PINS, found 2026-09-06 against a real pre-Chapter-1 binary
+  // (++Fortnite+Release-Live-CL-3240987, UE 4.14, Dec 2016 — no Athena, no BattleRoyale).
+  //
+  // identifyVersion fills in chapter and season even when it parses nothing, taking them from the
+  // CONFIGURED FALLBACK and marking the result UNKNOWN. The first version of the era filter checked
+  // only that chapter/season were numbers, so a build it could not identify — and a bare curl
+  // request — were both served a Chapter 1 Season 7 locker as though that had been measured.
+  //
+  // Null-checking the fields is not enough. The confidence is the only honest signal.
+  test('a Release-Live build is not filtered as Chapter 1 Season 7', async () => {
+    const items = await lockerFor('Live');
+    assert.ok(
+      items.includes('AthenaDance:EID_Conga'),
+      'an unidentifiable build had its locker filtered on a fallback guess',
+    );
+  });
+
+  test('a request with no version at all is not filtered either', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/fortnite/api/game/v2/profile/e2e-noua/public/QueryProfile?profileId=athena&rvn=-1',
+      headers: { 'content-type': 'application/json' },
+      payload: {},
+    });
+    assert.equal(res.statusCode, 200);
+    const full = res.json().profileChanges.find((c: any) => c.changeType === 'fullProfileUpdate');
+    assert.ok(full.profile.items['AthenaDance:EID_Conga'], 'no-UA request was filtered on a guess');
+  });
+
+  test('but a build it CAN identify is still filtered', () => {
+    // The guard must not have been bought by disabling the feature.
+    assert.equal(existsByEra('EID_Conga', 1, 7), false);
+  });
+});

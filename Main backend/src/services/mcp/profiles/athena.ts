@@ -391,10 +391,18 @@ function runOp(accountId: string, queryRevision: number, mutate: (p: any) => any
   return envelope(profile, baseRevision, queryRevision, changes);
 }
 
-/** The era of the build that is asking. Null fields mean "not established" — see identify.ts. */
+/**
+ * The era of the build that is asking, as identify.ts reports it.
+ *
+ * `confidence` is NOT optional decoration. When nothing usable can be parsed out of a request,
+ * identifyVersion still fills in chapter and season — from the CONFIGURED FALLBACK — and marks the
+ * result UNKNOWN. So null fields are not the way an unidentified build announces itself; the
+ * confidence is. Reading only chapter/season means treating a guess as a measurement.
+ */
 export interface ProfileEra {
   chapter: number | null;
   season: number | null;
+  confidence?: string;
 }
 
 /**
@@ -413,8 +421,13 @@ export interface ProfileEra {
  * out of the request; taking a player-s items away on a guess is worse than one blank tile.
  */
 function filterItemsByEra(profile: any, era?: ProfileEra | null): any {
-  const chapter = era?.chapter;
-  const season = era?.season;
+  // An UNKNOWN identification carries a chapter and season anyway — the configured fallback — so
+  // checking them for null is not enough and was the bug here: a Release-Live build and a bare
+  // curl request were both being served a Chapter 1 Season 7 locker, filtered as though that had
+  // been measured. Found 2026-09-06 against a real pre-Chapter-1 binary.
+  if (!era || era.confidence === 'UNKNOWN' || !era.confidence) return profile;
+  const chapter = era.chapter;
+  const season = era.season;
   if (typeof chapter !== 'number' || typeof season !== 'number') return profile;
 
   const items: Record<string, any> = {};

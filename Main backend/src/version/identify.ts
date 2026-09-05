@@ -60,6 +60,23 @@ const RELEASE_RE = /Release-(\d+)\.(\d+)/;
 const CL_RE = /CL-(\d+)/;
 
 /**
+ * `++Fortnite+Release-Live-CL-3240987` — a branch name where a version number should be.
+ *
+ * CONFIRMED against a real binary on this machine (UE 4.14.0-3240987, December 2016; `Athena` and
+ * `BattleRoyale` both absent, so pre-Battle-Royale). Epic shipped from a `Live` branch before the
+ * numbered-release convention, and there is no major.minor to recover — the changelist is the only
+ * version information such a build carries.
+ *
+ * Worth detecting rather than letting it fall through, because the fallback answer is actively
+ * misleading: without this, a Release-Live request and a bare `curl` are indistinguishable, both
+ * reported as the configured target with UNKNOWN confidence. They are not the same thing. One is a
+ * Fortnite client whose era cannot be named; the other is not a game client at all. Confidence stays
+ * UNKNOWN either way — this adds a SIGNAL, not certainty, and nothing downstream may treat it as an
+ * era. See the era filter in mcp/profiles/athena.ts, which this distinction exists to protect.
+ */
+const LIVE_RE = /Release-Live/;
+
+/**
  * Pull the client id out of `Authorization: basic base64(clientId:secret)`.
  *
  * Case-insensitive on the scheme because Fortnite sends a lowercase `basic`, which is legal and has
@@ -92,6 +109,7 @@ export function identifyVersion(
 
   const release = RELEASE_RE.exec(ua);
   const cl = CL_RE.exec(ua);
+  const changelistOnly = cl ? parseInt(cl[1], 10) : undefined;
 
   // SECOND SIGNAL: the OAuth client id, from the Basic auth header the client sends on its very
   // first request. It does not depend on the User-Agent being parseable, which is the point.
@@ -102,19 +120,32 @@ export function identifyVersion(
   const client = clientById(basicAuthClientId(headers));
 
   if (!release) {
-    // No version in the request at all: the launcher, tooling, or proxied traffic. Answer with the
-    // configured target and be honest that it is a default. Note season/chapter still come from the
-    // registry — the fallback picks a MAJOR, it does not get to invent an era.
+    // No numbered version in the request. Two quite different cases, and collapsing them was a real
+    // defect: a Release-Live client (a Fortnite build predating the numbered-release convention) and
+    // a bare `curl` both came out identical here.
+    //
+    // Answer with the configured target and be honest that it is a default. Note season/chapter
+    // still come from the registry — the fallback picks a MAJOR, it does not get to invent an era —
+    // and confidence stays UNKNOWN in BOTH cases, because a changelist alone does not place a build
+    // in a chapter. Callers that branch on era must key off the confidence, never the fields.
     const era = eraForMajor(fallbackMajor);
+    const live = LIVE_RE.test(ua);
+    if (live) signals.push('user-agent:Release-Live');
+    if (changelistOnly !== undefined) signals.push('user-agent:CL');
+    if (client) signals.push('client-id:platform');
+    signals.push('fallback:configured-target');
     return {
       major: fallbackMajor,
       minor: 0,
       season: era?.season ?? null,
       chapter: era?.chapter ?? null,
+      changelist: changelistOnly,
       buildString: ua || 'unknown',
       confidence: 'UNKNOWN',
-      signals: client ? ['fallback:configured-target', 'client-id:platform'] : ['fallback:configured-target'],
-      id: 'unknown',
+      signals,
+      // A distinct id so diagnostics can group these separately from "no version at all", which is
+      // what makes an unexpected old client visible instead of silently counted as the default.
+      id: live ? 'live' : 'unknown',
       platform: client?.platform,
     };
   }
@@ -126,7 +157,7 @@ export function identifyVersion(
   const era = eraForMajor(major);
   if (era) signals.push('registry:chapter-season');
 
-  const changelist = cl ? parseInt(cl[1], 10) : undefined;
+  const changelist = changelistOnly;
   if (changelist !== undefined) signals.push('user-agent:CL');
   if (client) signals.push('client-id:platform');
 
