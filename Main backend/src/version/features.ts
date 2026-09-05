@@ -462,6 +462,32 @@ export const FEATURES: readonly FeatureRecord[] = [
     tests: ['operations.test.ts - Release-Live builds'],
     notes: 'Recorded rather than implemented. Nova is a Battle Royale backend and this build has no Battle Royale in it; serving profile0 properly would mean modelling a 2016 Save the World profile from a binary alone.',
   },
+  {
+    feature: 'mcp.profile.versionString',
+    subsystem: 'mcp',
+    description: 'The `version` field in an MCP profile blob (Epic uses migration names like `fortnitemares_part4_fixup_oct_18`).',
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: 'The corpus ProfileVersions.md lists Athena migration names from fortnite_start through Chapter 4, so the value genuinely differs by era. BUT: scanned the 7.40 client for fortnite_start, season5_cumulative_adding_week_8and9_aug_18, fortnitemares_part4_fixup_oct_18 and style_adds_streetracers_fishguy_may_2019 - ALL FOUR ABSENT, with QueryProfile PRESENT as the control in the same run.',
+      detail: 'So the field is SERVER-OPAQUE to this client: it round-trips the string and has no code comparing it to any known name. Nova sends `nova_lawin_ch1s7`, which is not an Epic migration name and does not need to be.',
+    }],
+    implementation: 'services/mcp/profiles/athena.ts - buildSeedProfile',
+    failureBehaviour: 'None observed or reachable on 7.40. A build that DID parse the field is unidentified; the assumption that `version` equals the newest applied migration is not documented anywhere.',
+    tests: ['version.test.ts - 7.40 baseline'],
+    notes: 'DELIBERATELY NOT CHANGED. Substituting a real Epic migration name would be an unforced change to a working baseline, justified by an undocumented assumption, to satisfy a client that provably cannot read it.',
+  },
+  {
+    feature: 'cloudstorage.system.restrictedError',
+    subsystem: 'cloudstorage',
+    description: 'The error returned when a client asks for a restricted system file.',
+    timeline: [{
+      atMajor: null, change: 'REPLACED', replacedBy: 'cloudstorage.system.hotfix', confidence: 'CONFIRMED',
+      evidence: 'Cloudstorage/System/File/README.md documents both, explicitly as old and new: `errors.com.epicgames.common.missing_permission` (numericErrorCode 1023, leaks the filename in messageVars) gave way to `errors.com.epicgames.modules.cloudstorage.file_restricted` (numericErrorCode -1, no filename).',
+      detail: 'WHERE is UNKNOWN and the corpus does not even gesture at it - the wording is "at some point". Unlike enabled_features, which at least says "(2017)", there is nothing here to bound a cutoff with, so none is invented.',
+    }],
+    failureBehaviour: 'Not reachable on 7.40. Scanned the client for both strings: BOTH ABSENT, while errors.com.epicgames.common.oauth.invalid_token is PRESENT (utf16 x2) in the same run - so error-code literals DO appear in this binary when the client handles them, and neither of these does.',
+    notes: 'NOT IMPLEMENTED, and the absence scan is why that is a decision rather than an omission: which string Nova returns cannot affect a 7.40 client. Revisit only if a build is found that contains either literal.',
+  },
 ];
 
 const BY_ID = new Map<string, FeatureRecord>(FEATURES.map((f) => [f.feature, f]));
