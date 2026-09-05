@@ -1,4 +1,6 @@
 import { FastifyInstance } from 'fastify';
+import { FEATURES, getFeature, supportReport } from '../../version/features';
+import { BUILD_ERAS } from '../../version/builds';
 import { getLogs, clearLogs, ingestLogs, getComponentStatuses } from './logStore';
 import { getDiagnostics, getDiagnosticsSummary, clearDiagnostics, type DiagnosticCategory } from './diagnostics';
 import { getNews } from './news';
@@ -49,6 +51,40 @@ export async function novaRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /** Current status line per component, so the launcher can show what is running. */
+  /**
+   * GET /nova/api/compatibility — the cross-version support table, as data.
+   *
+   * A compatibility table nobody can read is a document, not a system. This exposes what the backend
+   * believes about each feature and, crucially, WHY — including the rows where the honest answer is
+   * "we do not know". `?level=IMPLEMENTED` narrows it to the features that have code but have not
+   * earned the word "supported".
+   */
+  fastify.get('/nova/api/compatibility', async (request, reply) => {
+    const q = (request.query as any) || {};
+    const level = q.level ? String(q.level).toUpperCase() : null;
+    const rows = supportReport().filter((r) => !level || r.level === level);
+    const counts = supportReport().reduce<Record<string, number>>((acc, r) => {
+      acc[r.level] = (acc[r.level] || 0) + 1;
+      return acc;
+    }, {});
+    return reply.send({
+      summary: { total: FEATURES.length, byLevel: counts, knownBuildEras: BUILD_ERAS.length },
+      features: rows.map((r) => {
+        const rec = getFeature(r.feature)!;
+        return {
+          feature: r.feature,
+          subsystem: r.subsystem,
+          level: r.level,
+          missing: r.missing,
+          description: rec.description,
+          timeline: rec.timeline,
+          implementation: rec.implementation ?? null,
+          tests: rec.tests ?? [],
+        };
+      }),
+    });
+  });
+
   fastify.get('/nova/api/components', async (_request, reply) => {
     return reply.send({ components: getComponentStatuses() });
   });

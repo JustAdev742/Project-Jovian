@@ -1,47 +1,30 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { Config } from '../config';
+import { identifyVersion } from '../version/identify';
 
 /**
- * Version Router Middleware
+ * Attach the client's version to the request.
  *
- * Intercepts the User-Agent header from the Fortnite client to detect the game version.
- * Format: "Fortnite/++Fortnite+Release-X.XX-CL-XXXXXXX Windows/10.0.xxxxx.xxx"
+ * The parsing and the chapter/season lookup live in `src/version/` so they can be tested without a
+ * server; this is only the Fastify glue.
  *
- * This allows us to dynamically adjust responses for S7 vs S8 differences.
+ * WHAT CHANGED, AND WHY IT IS NOT A BEHAVIOUR CHANGE FOR 7.40. This used to set `season = major`
+ * with the comment "In Ch1, major version = season number" — true, and true only for Chapter 1.
+ * `gameVersion` now carries `major`, `minor`, `chapter`, `season` (season WITHIN the chapter),
+ * `confidence` and `id`. For every Chapter 1 build the numeric values are identical to before,
+ * because there season and major coincide; `version.test.ts` pins that for 7.40 specifically.
+ *
+ * THE TRAP THIS EXPOSED. Making `season` correct is not automatically safe for its consumers, and
+ * one of them would have broken. Epic's timeline uses the CONTINUOUS major for `seasonNumber` and
+ * `athenaseason<n>` — Calendar.md shows `seasonNumber: 24` for what the build registry independently
+ * places at Chapter 4 Season 2. So the timeline wants `major`; a chapter-relative 2 would have told
+ * a Chapter 4 client it was in Chapter 1 Season 2. Consumers that need a wire value read `major`;
+ * `season`/`chapter` are for human-facing and per-chapter reasoning. See
+ * `calendar.seasonNumber.isMajor` in `src/version/features.ts`.
  */
 export async function versionRouter(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const userAgent = request.headers['user-agent'] || '';
-
-  // Parse Fortnite version from User-Agent
-  // Example: "Fortnite/++Fortnite+Release-7.40-CL-5046157 Windows/10.0.17763.1.256.64bit"
-  const versionMatch = userAgent.match(/Release-(\d+)\.(\d+)/);
-
-  if (versionMatch) {
-    const majorVersion = parseInt(versionMatch[1], 10);
-    const minorVersion = parseInt(versionMatch[2], 10);
-
-    (request as any).gameVersion = {
-      major: majorVersion,
-      minor: minorVersion,
-      season: majorVersion, // In Ch1, major version = season number
-      buildString: userAgent,
-    };
-  } else {
-    // Fall back to the CONFIGURED target season, not a hardcoded 8. Hardcoding it meant that on a
-    // 7.40-only install every request with an unparseable UA (proxied/tunnelled traffic, the
-    // launcher, tooling) was served the S8 lobby/LTM flag set — and it made the documented
-    // `|| Config.SEASON_NUMBER` fallback in social.routes.ts unreachable.
-    (request as any).gameVersion = {
-      major: Config.SEASON_NUMBER,
-      minor: 0,
-      season: Config.SEASON_NUMBER,
-      buildString: 'unknown',
-    };
-  }
-
-  // Extract CL (changelist) number if present
-  const clMatch = userAgent.match(/CL-(\d+)/);
-  if (clMatch) {
-    (request as any).gameVersion.changelist = parseInt(clMatch[1], 10);
-  }
+  (request as any).gameVersion = identifyVersion(
+    request.headers as Record<string, unknown>,
+    Config.SEASON_NUMBER,
+  );
 }

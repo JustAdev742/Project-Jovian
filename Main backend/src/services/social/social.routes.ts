@@ -534,7 +534,10 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
     // Advertise the season the CLIENT is actually on (parsed from its build by versionRouter), so a
     // 7.40 client gets S7 and an 8.x client gets S8 — the "S7/S8" project can serve both at once.
     // Falls back to Config.SEASON_NUMBER only when the build can't be parsed.
-    const season = Number((request as any).gameVersion?.season) || Config.SEASON_NUMBER;
+    // The MAJOR, not the chapter-relative season. Epic's timeline uses continuous numbering:
+    // Calendar.md shows seasonNumber 24 / athenaseason24 for what the build registry places at
+    // Chapter 4 Season 2. Identical to the old value for every Chapter 1 build.
+    const season = Number((request as any).gameVersion?.major) || Config.SEASON_NUMBER;
 
     // Base season flags plus that season's limited-time-mode / event flags, so the LTM tiles and
     // in-lobby event decorations for S7 (14 Days of Fortnite, Frostnite, Festivus, …) / S8 (Spring

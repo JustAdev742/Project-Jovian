@@ -19,10 +19,19 @@ function safeAccountDir(accountId: string): string | null {
   return path.join(USER_STORAGE_DIR, clean);
 }
 
-/** Season the client is running (set by versionRouter), so S7 and S8 settings don't clobber each other. */
+/**
+ * The build era this client is on, used to keep one build's saved settings away from another's.
+ *
+ * Deliberately the MAJOR version, not `gameVersion.season`. Season is now season-within-chapter, so
+ * Chapter 1 Season 7 and Chapter 2 Season 7 would both key on 7 and overwrite each other's
+ * ClientSettings.Sav. Major is unique across the whole range.
+ *
+ * For every Chapter 1 build this is numerically what the old `season = major` produced, so existing
+ * `ClientSettings-7.Sav` files keep resolving — the rename is a no-op on disk, not a migration.
+ */
 function seasonOf(request: any): number {
-  const s = request?.gameVersion?.season;
-  return Number.isFinite(s) ? s : Config.SEASON_NUMBER;
+  const m = request?.gameVersion?.major;
+  return Number.isFinite(m) ? m : Config.SEASON_NUMBER;
 }
 
 function clientSettingsFile(accountId: string, season: number): string | null {
