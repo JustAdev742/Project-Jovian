@@ -86,16 +86,36 @@ cd Launcher/src-tauri/resources/Backend-Coordinator && npm ci --omit=dev
 > find Launcher/src-tauri/resources -maxdepth 3 \( -name data -o -name "*.db" -o -name .env \)
 > ```
 
-### 3. Build (signed)
-
-The private key must be in the environment or the updater artefacts come out unsigned and clients
-reject them:
+### 3. Build, then sign EXPLICITLY
 
 ```bash
 cd Launcher
-export TAURI_PRIVATE_KEY="C:/Users/Admin/.nova-updater/nova-updater.key"
-export TAURI_KEY_PASSWORD=""
 npx tauri build --features custom-protocol
+
+# Then sign. Do NOT rely on the environment for this.
+npx tauri signer sign -f "C:/Users/Admin/.nova-updater/nova-updater.key" -p ""   "src-tauri/target/release/bundle/nsis/Project Launcher_<ver>_x64-setup.nsis.zip"
+```
+
+> **Why the env-var route silently fails on Windows.** The documented form was
+> `TAURI_KEY_PASSWORD=""`, and **Windows cannot hold an empty environment variable** — setting a
+> variable to an empty string deletes it, in `cmd` and PowerShell alike. The key is an *encrypted*
+> rsign key, so with no password variable present the signer cannot decrypt it and the build
+> finishes **without producing a `.sig` at all**, with no error anyone notices. That is how 1.6.0
+> first came out unsigned, and clients reject an unsigned update.
+>
+> `signer sign -p ""` passes the empty password as an argument, which has no such problem.
+
+**Always check the `.sig` exists before writing `latest.json`:**
+
+```bash
+ls "src-tauri/target/release/bundle/nsis/"*<ver>*.sig
+```
+
+**And re-hash the zip after signing.** A second build racing the first once overwrote an
+already-signed zip, leaving a signature for a file that no longer existed:
+
+```bash
+md5sum "src-tauri/target/release/bundle/nsis/Project Launcher_<ver>_x64-setup.nsis.zip"
 ```
 
 Out come three files in `Launcher/src-tauri/target/release/bundle/nsis/`:

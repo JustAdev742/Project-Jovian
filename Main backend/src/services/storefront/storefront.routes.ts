@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { generateUUID } from '../../utils/uuid';
+import { keychainForBuild, buildString } from '../../version/keychain';
 
 // Build the shop once at module load so both the catalog endpoint AND PurchaseCatalogEntry (MCP)
 // resolve the SAME offers — the offer's itemGrants/finalPrice are the server-authoritative source
@@ -40,26 +40,35 @@ export async function storefrontRoutes(fastify: FastifyInstance): Promise<void> 
   });
 
   /**
-   * Keychain — the AES keys that decrypt 7.40's encrypted cosmetic pak chunks.
+   * Keychain — the AES keys that decrypt a build's encrypted cosmetic pak chunks.
    *
-   * Format is `GUID:base64(key)`, one string per chunk. Verified 2026-09-05 against
-   * `Fortnite-Aes-Keys-Archive` (the 7.40 "Secondary Keys" table): both GUIDs and both keys match
-   * byte for byte once the archive's hex is base64-encoded. CONFIRMED — do not "correct" these.
+   * PER-BUILD, because the keys are. Chunk keys do not carry forward between builds: serving 7.40's
+   * to an 8.00 client hands it keys for chunks that build does not have, which is worse than serving
+   * none because it presents as a decryption failure rather than a missing key. So the lookup is
+   * exact, and an unknown build gets an empty array — the same thing it got before this endpoint
+   * knew about any build but 7.40.
    *
-   * The archive lists FIVE chunks for 7.40. Chunks 1000/1001/1002 have known GUIDs but their keys
-   * are recorded as `???`, so they cannot be served and the cosmetics inside them stay undecryptable.
-   * That is an evidence gap, not a bug here — there is nothing to ship until a key surfaces.
-   *   1000 `121D529E48141A7E5D0F278BF4559F22`  key UNKNOWN
-   *   1001 `558C4703445945BA01B8A4A7F5AEEC5E`  key UNKNOWN
-   *   1002 `8A29D48D47F92655750C38908C8DD218`  key UNKNOWN
+   * Data: `version/keychain.ts`, generated from the Fortnite-Aes-Keys-Archive corpus — 75 builds,
+   * 634 keys, CONFIRMED. 66 chunks are recorded there as `???` and are omitted rather than guessed;
+   * the cosmetics inside them stay undecryptable, which is an evidence gap and not a defect.
+   *
+   * This is the first endpoint in the project whose response genuinely differs by build. Before it,
+   * every client got 7.40's two keys.
    */
   fastify.get('/fortnite/api/storefront/v2/keychain', async (request, reply) => {
-    return reply.send([
-      // pakchunk1003 — Deep Sea set
-      "91C415954BF27B6E43970FB8A75FE8BB:YhHyxIA+Ru33r3pThiWqKNYdvDbL05yXSxKarRuMSxw=",
-      // pakchunk1004 — Brite Blimp Glider
-      "D776CA2A40FD9EC1F8522E9E13E99031:uRYulzQ2zdGG9UisQw2wM9OOM/9JsSWFwFt5d/3okng="
-    ]);
+    const v = (request as any).gameVersion as { major?: number; minor?: number } | undefined;
+    const build =
+      Number.isFinite(v?.major) && Number.isFinite(v?.minor)
+        ? buildString(v!.major!, v!.minor!)
+        : null;
+
+    const chain = build ? keychainForBuild(build) : null;
+    if (!chain) {
+      // Unknown or unparseable build. An empty keychain means "no encrypted chunks I can help with",
+      // which the client handles; a wrong key would not be.
+      return reply.send([]);
+    }
+    return reply.send(chain.entries);
   });
 }
 

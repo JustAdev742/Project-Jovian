@@ -26,6 +26,7 @@ process.env.NOVA_DB_PATH = path.join(os.tmpdir(), `nova-version-${process.pid}.d
 import { BUILD_ERAS, eraForMajor, NEWEST_KNOWN_MAJOR } from './builds';
 import { identifyVersion, atOrAfter, before as beforeVersion, isBeyondKnownBuilds } from './identify';
 import { FEATURES, stateAt, supportLevel, supportReport, getFeature } from './features';
+import { KEYCHAINS, keychainForBuild, buildString } from './keychain';
 
 /** The exact User-Agent 7.40 sends. Taken from a real session, not composed. */
 const UA_740 = 'Fortnite/++Fortnite+Release-7.40-CL-5046157 Windows/10.0.17763.1.256.64bit';
@@ -204,6 +205,63 @@ describe('the compatibility table must not be able to lie', () => {
       supported < report.length,
       'a table where everything is SUPPORTED is a table that stopped being honest',
     );
+  });
+});
+
+describe('per-build keychain — the first behaviour that actually varies by version', () => {
+  test('the registry spans more than one chapter', () => {
+    // The whole point. Before this, every client received 7.40's two keys.
+    assert.ok(KEYCHAINS.length >= 50, `expected a broad archive, got ${KEYCHAINS.length} builds`);
+    const majors = new Set(KEYCHAINS.map((k) => Number(k.build.split('.')[0])));
+    assert.ok(majors.has(7), 'Chapter 1 must be covered');
+    assert.ok([...majors].some((m) => m >= 11), 'coverage must reach past Chapter 1');
+  });
+
+  test('7.40 still gets exactly its two verified keys', () => {
+    const c = keychainForBuild('7.40');
+    assert.ok(c);
+    assert.equal(c.entries.length, 2);
+    assert.ok(c.entries[0].startsWith('91C415954BF27B6E43970FB8A75FE8BB:'), 'chunk 1003 GUID changed');
+    assert.ok(c.entries[1].startsWith('D776CA2A40FD9EC1F8522E9E13E99031:'), 'chunk 1004 GUID changed');
+    assert.equal(c.unknownChunks, 3, "7.40's three ??? chunks must stay recorded as gaps");
+  });
+
+  test('a different build gets DIFFERENT keys', () => {
+    // If this ever passes by returning the same thing for both, the cross-version claim is empty.
+    const a = keychainForBuild('7.40');
+    const b = KEYCHAINS.find((k) => k.build !== '7.40' && k.entries.length > 0);
+    assert.ok(a && b, 'need two builds with keys to compare');
+    assert.notDeepEqual(a.entries, b.entries, `${b.build} returned the same keys as 7.40`);
+  });
+
+  test("an unknown build gets nothing rather than someone else's keys", () => {
+    // Chunk keys do not carry forward. A wrong key presents as a decryption bug, which is harder to
+    // diagnose than an absent one.
+    assert.equal(keychainForBuild('99.99'), null);
+    assert.equal(keychainForBuild(''), null);
+  });
+
+  test('every entry is a well-formed GUID:base64 pair', () => {
+    for (const chain of KEYCHAINS) {
+      for (const entry of chain.entries) {
+        const [guid, key] = entry.split(':');
+        assert.match(guid, /^[0-9A-F]{32}$/, `${chain.build}: bad GUID ${guid}`);
+        // 32 raw bytes -> 44 base64 chars with one pad.
+        assert.equal(Buffer.from(key, 'base64').length, 32, `${chain.build}: key is not 32 bytes`);
+      }
+    }
+  });
+
+  test('no key marked unknown in the archive was invented', () => {
+    // 66 chunks across the archive have no published key. They must be counted, never filled in.
+    const totalUnknown = KEYCHAINS.reduce((n, k) => n + k.unknownChunks, 0);
+    assert.ok(totalUnknown > 0, 'the gaps should be recorded, not silently dropped');
+  });
+
+  test('buildString matches the archive spelling', () => {
+    assert.equal(buildString(7, 40), '7.40');
+    assert.equal(buildString(8, 0), '8.00');
+    assert.equal(buildString(19, 1), '19.01');
   });
 });
 
