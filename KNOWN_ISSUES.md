@@ -61,14 +61,32 @@ sessions), so this is not a coverage gap — the request never arrived. The hotf
 party system, so every HTTP service URL comes from the client's compiled-in defaults and Cobalt's
 hook is the only thing redirecting them.
 
-**A lead, not a fix.** The 7.40 binary contains per-service config sections —
-`OnlineSubsystemMcp.BaseServiceMcp` (×1), `OnlineSubsystemMcp.OnlineIdentityMcp` (×2),
-`OnlineSubsystemMcp.OnlineFriendsMcp` (×1), all UTF-16 — alongside relative paths like
-`/api/public/friends/`id`. That means service base URLs are *configurable*, and a hotfix that set
-them would make the redirect independent of the hook for those services. **The key names are not yet
-established**, and inventing them would violate Rule 5. The next step is to recover the real key
-names from the binary; `BaseServiceMcp`'s neighbours (`QueryOffersUrl`, `QueryItemsUrl`,
-`QueryCategoriesUrl`) suggest a `…Url` convention but that is not proof.
+**A lead, and how far it was taken (2026-09-05).** If service URLs are *configurable*, a hotfix
+could point them at Nova directly and the redirect would no longer depend on Cobalt's hook at all —
+for every service, not just this one. That would retire a whole class of failure without a DLL
+release. What the binary says:
+
+| question | answer | grade |
+|---|---|---|
+| Are there per-service config sections? | **Yes** — `OnlineSubsystemMcp.BaseServiceMcp` ×1, `…OnlineIdentityMcp` ×2, `…OnlineFriendsMcp` ×1 (UTF-16) | CONFIRMED |
+| Are service URLs compiled in? | **Almost none.** Only three `*.ol.epicgames.com` literals exist in the whole 106 MB binary: `datarouter`, `metric-public-service-prod`, `fnreplay-public-service-prod11`. Everything else comes from config | CONFIRMED |
+| Does the `[Section Env]` convention work on this build? | **Yes** — Nova's own hotfix already uses `[OnlineSubsystemMcp.Xmpp Prod]` and XMPP works | CONFIRMED |
+| Is the key called `Domain`? | **Unresolved.** `Domain` occurs 78× in UTF-16 but **not** within 4 KB of any of the three section names | UNKNOWN |
+| What keys ARE near them? | Per-operation absolute-URL keys: `QueryOffersUrl`, `QueryItemsUrl`, `QueryCategoriesUrl`, `QueryEndpointsUrl`, `CheckAffiliateNameUrl` (BaseServiceMcp); `EnumerateUserFilesUrl`, `UserFileUrl`, `WriteUserFileUrl`, `RequestUsageInfoUrl`, `ReceiptRoute` (OnlineIdentityMcp). **None for OnlineFriendsMcp** | STRONGLY SUPPORTED |
+
+So the model is probably per-operation URL keys rather than one base `Domain` — but string pooling
+means proximity is weak evidence in both directions, and the friends section yielded no keys at all.
+
+**Not guessed, deliberately.** A wrong INI key is merely ignored by UE4, so trying one is *cheap* —
+but it is untestable from here, and shipping an unverified config change to a live deployment is
+precisely what produced 1.5.2 and 1.5.6. **What would settle it:** a 7.40-era `DefaultEngine.ini`
+from any source that used these sections, or one test launch with a candidate key and a check of
+whether the request lands on Nova.
+
+Note `QueryEndpointsUrl` alongside the client's `%s/api/endpoints` fragment — that looks like service
+discovery, which would be a cleaner lever than overriding each service. It is routed by Nova only as
+a Tier-2 stub (`200 {}`), has never been observed being called, and **nothing in the corpus documents
+its shape.**
 
 ---
 
