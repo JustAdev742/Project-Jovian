@@ -20,6 +20,7 @@ import { statsRoutes } from './services/stats/stats.routes';
 import { eosRoutes } from './services/eos/eos.routes';
 import { startXmppServer, attachXmppWebSocket } from './services/xmpp/xmpp.server';
 import { novaRoutes } from './services/nova/nova.routes';
+import { diagnosticsRoutes } from './services/nova/diagnostics.routes';
 import { anticheatRoutes } from './services/anticheat/anticheat.routes';
 import { compatRoutes } from './services/compat/compat.routes';
 import { latentRoutes } from './services/compat/latent.routes';
@@ -139,6 +140,7 @@ async function main() {
     await app.register(statsRoutes);
     await app.register(eosRoutes);
     await app.register(novaRoutes);
+    await app.register(diagnosticsRoutes);
     await app.register(anticheatRoutes);
     await app.register(compatRoutes);
     // Registered LAST on purpose. Every static route above is claimed first, so the parametric
@@ -160,7 +162,7 @@ async function main() {
         category: 'MISSING',
         method: request.method,
         url: request.url,
-        version: (request as any).gameVersion?.buildString,
+        version: (request as any).gameVersion?.id,
         accountId: (request as any).accountId,
         status: request.method === 'GET' ? 200 : 204,
         detail: 'no route matched; answered by the catch-all',
@@ -184,7 +186,7 @@ async function main() {
           : 'FAILED',
         method: request.method,
         url: request.url,
-        version: (request as any).gameVersion?.buildString,
+        version: (request as any).gameVersion?.id,
         accountId: (request as any).accountId,
         status,
         detail: error.message,

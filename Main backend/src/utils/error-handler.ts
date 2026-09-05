@@ -44,7 +44,7 @@ export function sendEpicError(
         : 'FAILED',
       method: request?.method || 'UNKNOWN',
       url: request?.url || '/',
-      version: request?.gameVersion?.buildString,
+      version: request?.gameVersion?.id,
       accountId: request?.accountId,
       status: statusCode,
       detail: `${errorCode}: ${errorMessage}`,

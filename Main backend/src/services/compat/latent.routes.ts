@@ -52,7 +52,7 @@ function stub(label: string) {
       category: 'UNKNOWN',
       method: request.method,
       url: request.url,
-      version: (request as any).gameVersion?.buildString,
+      version: (request as any).gameVersion?.id,
       accountId: (request as any).accountId,
       status: request.method === 'GET' ? 200 : 204,
       detail: `routed stub (${label}) — known 7.40 client endpoint, no documented response shape; answering as the catch-all did`,

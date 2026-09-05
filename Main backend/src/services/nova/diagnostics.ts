@@ -29,28 +29,47 @@
  * module's job is to make the silence VISIBLE, not to break it. Everything here is observation.
  */
 
-/** Failure taxonomy. Deliberately NOT collapsed into one bucket — the whole point is that a missing
- *  endpoint and a failed login need different responses from whoever reads this. */
-export type DiagnosticCategory =
-  | 'MISSING'           // No route matched. The catch-all answered instead of a real handler.
-  | 'FAILED'            // A handler ran and deliberately returned a 4xx.
-  | 'TIMEOUT'
-  | 'AUTH_FAILURE'      // 401/403 — a token was absent, malformed or rejected.
-  | 'INVALID_RESPONSE'
-  | 'UNEXPECTED_STATE'
-  | 'NETWORK_FAILURE'
-  | 'INTERNAL_ERROR'    // 5xx, or a handler threw.
-  | 'VERSION_MISMATCH'  // The caller's build is not the one this response was written for.
-  | 'UNKNOWN';
+/**
+ * Failure taxonomy and source, now defined once in diagnostics.schema.ts because three processes
+ * emit these — the backend, Cobalt inside the game, and Reboot inside the gameserver.
+ *
+ * Re-exported here so the many existing importers of this module do not have to change.
+ */
+export type { DiagnosticCategory, DiagnosticSource } from './diagnostics.schema';
+import type { DiagnosticCategory, DiagnosticSource } from './diagnostics.schema';
+import { noteOccurrence } from './incidents';
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL';
 
 export interface DiagnosticInput {
   category: DiagnosticCategory;
+  /**
+   * Which component OBSERVED the failure. Defaults to BACKEND so every pre-existing call site keeps
+   * its exact meaning — this field was added when clients and hosts started reporting, and the
+   * dashboard must never confuse "the client could not reach us" with "we returned a 500".
+   */
+  source?: DiagnosticSource;
+  /** Emitting component: `cobalt`, `reboot`, `launcher`, `backend`. */
+  component?: string;
+  /**
+   * Ties one player action across Cobalt → backend → host, so the FIRST point of failure is
+   * answerable rather than just the last symptom.
+   */
+  correlationId?: string;
+  /** Occurrences already aggregated by the emitter before it sent this. Defaults to 1. */
+  count?: number;
   method: string;
   /** Raw request URL. Normalised and redacted in here — callers must not pre-clean it. */
   url: string;
-  /** Game build string from the User-Agent, as parsed by version-router. */
+  /**
+   * The build id — `"7.40"`, or `"unknown"`. NOT the raw User-Agent.
+   *
+   * This dimension is part of the aggregation key, so feeding it a whole User-Agent was a real
+   * defect: every browser that opened the dashboard became its own "build", rows were keyed on
+   * 200-character strings, and the incident model started reporting VERSION_SPECIFIC because it
+   * could see several distinct "versions" that were actually Chrome. Found by looking at the live
+   * dashboard, not by a test. `identifyVersion` produces the short id; use that.
+   */
   version?: string;
   /** Opaque per-caller identifier used ONLY to count distinct affected users. Never stored raw. */
   accountId?: string | null;
@@ -62,6 +81,8 @@ export interface DiagnosticInput {
 
 export interface DiagnosticEntry {
   category: DiagnosticCategory;
+  source: DiagnosticSource;
+  component: string;
   method: string;
   /** Path with volatile segments replaced by placeholders, so repeats aggregate. */
   route: string;
@@ -76,6 +97,8 @@ export interface DiagnosticEntry {
   affectedUsers: number;
   severity: Severity;
   score: number;
+  /** Sample correlation ids, newest first. Bounded — the entry point for tracing one failure. */
+  correlationIds: string[];
 }
 
 /** Cap on DISTINCT problems retained. Aggregation means this is a count of *kinds* of failure, not
@@ -84,9 +107,11 @@ const MAX_KEYS = 400;
 /** Per-entry cap on the distinct-caller set, so one endpoint cannot grow unboundedly. */
 const MAX_TRACKED_USERS = 64;
 
-interface InternalEntry extends Omit<DiagnosticEntry, 'severity' | 'score' | 'affectedUsers'> {
+interface InternalEntry extends Omit<DiagnosticEntry, 'severity' | 'score' | 'affectedUsers' | 'correlationIds'> {
   users: Set<string>;
   overflowUsers: number;
+  /** Bounded ring of recent correlation ids — enough to trace, not enough to be a log. */
+  correlations: string[];
   /** Event timestamps (ms) inside the trend window, for the "is this getting worse" term. */
   recent: number[];
 }
@@ -183,7 +208,13 @@ export const SUBSYSTEM_WEIGHT: Record<string, number> = {
 };
 
 export const CATEGORY_WEIGHT: Record<DiagnosticCategory, number> = {
-  INTERNAL_ERROR: 5, UNEXPECTED_STATE: 4, AUTH_FAILURE: 4, VERSION_MISMATCH: 4,
+  // A dead gameserver ends the match for everyone in it, so CRASH outranks everything.
+  CRASH: 6,
+  INTERNAL_ERROR: 5,
+  // These three mean the player cannot play. That is the definition of CRITICAL in the incident
+  // model, so they are weighted above the generic transport failures that merely might mean it.
+  MATCHMAKING_FAILURE: 5, SESSION_FAILURE: 5,
+  UNEXPECTED_STATE: 4, AUTH_FAILURE: 4, VERSION_MISMATCH: 4, PARTY_FAILURE: 4,
   MISSING: 3, INVALID_RESPONSE: 3, NETWORK_FAILURE: 3, TIMEOUT: 3, FAILED: 2, UNKNOWN: 2,
 };
 
@@ -212,8 +243,8 @@ function severityFor(score: number): Severity {
 }
 
 function scoreOf(e: InternalEntry, now: number): { score: number; severity: Severity } {
-  const users = e.users.size + e.overflowUsers;
   const recent = e.recent.filter((t) => now - t <= TREND_WINDOW_MS).length;
+  const users = e.users.size + e.overflowUsers;
 
   const subsystem = SUBSYSTEM_WEIGHT[e.subsystem] ?? 1;
   const category = CATEGORY_WEIGHT[e.category] ?? 1;
@@ -222,7 +253,20 @@ function scoreOf(e: InternalEntry, now: number): { score: number; severity: Seve
   const growthFactor = 1 + Math.min(recent / Math.max(1, e.count), 1); // caps at 2x
 
   const score = subsystem * category * volume * userFactor * growthFactor;
-  return { score: Math.round(score * 100) / 100, severity: severityFor(score) };
+
+  // CRITICAL REQUIRES BREADTH. Observed on the dashboard with real data: a single player retrying
+  // matchmaking 480 times scored 103 and rendered as CRITICAL beside the caption "one machine —
+  // probably local to that player". Both were true, and together they were absurd.
+  //
+  // The volume term is logarithmic precisely so repetition cannot outrank importance, but with one
+  // affected user the userFactor only contributes 1.1x, which is not enough to hold a very loud
+  // single-machine problem below the top band. The brief defines CRITICAL as "cannot connect /
+  // cannot play / WIDESPREAD failure", so breadth is part of the definition rather than a tuning
+  // knob: one player blocked is HIGH, however many times they retry.
+  //
+  // The score itself is left untouched so ranking within HIGH still reflects how loud it is.
+  const severity = users <= 1 && severityFor(score) === 'CRITICAL' ? 'HIGH' : severityFor(score);
+  return { score: Math.round(score * 100) / 100, severity };
 }
 
 /** Short non-reversible tag for distinct-user counting. Never stored alongside anything that could
@@ -242,7 +286,12 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     const route = normaliseRoute(input.url);
     const subsystem = subsystemFor(route);
     const version = input.version || 'unknown';
-    const key = `${input.category}|${input.method}|${route}|${version}`;
+    const source = input.source || 'BACKEND';
+    const component = input.component || 'backend';
+    // Source is part of the key on purpose. The client failing to reach a route and the backend
+    // returning 500 on it are different problems with different fixes, and merging them would hide
+    // exactly the distinction the dashboard exists to draw.
+    const key = `${source}|${input.category}|${input.method}|${route}|${version}`;
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
 
@@ -250,16 +299,22 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     if (!e) {
       if (entries.size >= MAX_KEYS) evictOne(nowMs);
       e = {
-        category: input.category, method: input.method, route, subsystem, version,
+        category: input.category, source, component, method: input.method, route, subsystem, version,
         status: input.status, detail: input.detail ? redactSecrets(input.detail).slice(0, 300) : undefined,
         count: 0, firstSeen: nowIso, lastSeen: nowIso,
-        users: new Set<string>(), overflowUsers: 0, recent: [],
+        users: new Set<string>(), overflowUsers: 0, recent: [], correlations: [],
       };
       entries.set(key, e);
     }
 
-    e.count++;
+    // An emitter may have aggregated locally before sending, so it reports how many. Bounded by the
+    // schema's MAX_CLAIMED_COUNT at the ingest boundary — a client cannot inflate a ranking.
+    e.count += Math.max(1, Math.min(input.count ?? 1, 1000));
     e.lastSeen = nowIso;
+    if (input.correlationId) {
+      e.correlations.unshift(input.correlationId.slice(0, 64));
+      if (e.correlations.length > 5) e.correlations.length = 5;
+    }
     if (input.status !== undefined) e.status = input.status;
     if (input.detail) e.detail = redactSecrets(input.detail).slice(0, 300);
 
@@ -274,6 +329,11 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     // Keep only the trend window, and cap the array so a hot endpoint cannot grow it without bound.
     e.recent.push(nowMs);
     if (e.recent.length > 200) e.recent = e.recent.slice(-200);
+
+    // Longer, coarser history for spike detection. `recent` is a 5-minute window capped at 200
+    // entries, which is enough for the severity model's growth term but far too short to establish
+    // a BASELINE — and without a baseline "is this getting worse" is unanswerable. See incidents.ts.
+    noteOccurrence(key, input.count ?? 1, nowMs);
   } catch {
     /* diagnostics must never break a request */
   }
@@ -296,17 +356,21 @@ function evictOne(now: number): void {
 }
 
 /** Snapshot for the launcher / dashboard, most severe first. */
-export function getDiagnostics(opts: { category?: DiagnosticCategory; limit?: number } = {}): DiagnosticEntry[] {
+export function getDiagnostics(opts: { category?: DiagnosticCategory; source?: DiagnosticSource; subsystem?: string; limit?: number } = {}): DiagnosticEntry[] {
   const now = Date.now();
   const out: DiagnosticEntry[] = [];
   for (const e of entries.values()) {
     if (opts.category && e.category !== opts.category) continue;
+    if (opts.source && e.source !== opts.source) continue;
+    if (opts.subsystem && e.subsystem !== opts.subsystem) continue;
     const { score, severity } = scoreOf(e, now);
     out.push({
-      category: e.category, method: e.method, route: e.route, subsystem: e.subsystem,
+      category: e.category, source: e.source, component: e.component,
+      method: e.method, route: e.route, subsystem: e.subsystem,
       version: e.version, status: e.status, detail: e.detail, count: e.count,
       firstSeen: e.firstSeen, lastSeen: e.lastSeen,
       affectedUsers: e.users.size + e.overflowUsers, severity, score,
+      correlationIds: [...e.correlations],
     });
   }
   out.sort((a, b) => b.score - a.score || b.count - a.count);
