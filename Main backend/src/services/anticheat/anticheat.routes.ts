@@ -79,7 +79,12 @@ export async function anticheatRoutes(fastify: FastifyInstance): Promise<void> {
     const authority = analyzeReportAuthority({
       reporterAccountId: reporter,
       claimedHostAccountId: meta.hostAccountId,
-      participants: meta.participants,
+      // No roster — deliberately, and NOT `meta.participants`. See the `roster` doc comment in
+      // anticheat.service.ts: `match_participants` is the RESULTS table, so feeding it here makes
+      // the membership check flag every player reported after the first one, against the honest
+      // host. Empty means "unknown roster", which skips the check. `alreadyReported` below is the
+      // question `match_participants` genuinely answers.
+      roster: [],
       subjectAccountId: subject,
       alreadyReported: meta.participants.includes(subject),
     });

@@ -1,3 +1,5 @@
+import { redactSecrets } from './diagnostics';
+
 // In-memory ring buffer that captures the backend's console output so the launcher
 // can show a live log viewer via GET /nova/api/logs. Call installLogCapture() once,
 // early, before other logs run.
@@ -69,7 +71,7 @@ export function ingestLogs(
   if (status && typeof status.text === 'string') {
     statuses.set(src, {
       source: src,
-      text: status.text.slice(0, 300),
+      text: redactSecrets(status.text).slice(0, 300),
       healthy: status.healthy !== false,
       ts: new Date().toISOString(),
     });
@@ -79,7 +81,19 @@ export function ingestLogs(
 
   let accepted = 0;
   for (const e of entries.slice(0, 200)) {
-    const msg = typeof e?.msg === 'string' ? e.msg.slice(0, MAX_MSG) : '';
+    // REDACT ON INGEST — NOVA-AUDIT-012. This is where the session tokens actually are.
+    //
+    // NOVA-AUDIT-001 redacted the `[HTTP]` line this process writes about its OWN requests, which
+    // was the smaller half. Cobalt lives inside the game, logs `URL: <full url>` for every request
+    // it redirects, and ships those lines here — and 7.40 ends every session with
+    // `DELETE /account/api/oauth/sessions/kill/eg1~<jwt>`, so a live bearer token is in the URL
+    // PATH of a line this function receives. Stored verbatim, it was then served by
+    // `GET /nova/api/logs`, which takes no Authorization header.
+    //
+    // Redact here rather than waiting on a Cobalt release: whatever a component chooses to send,
+    // this process decides what it keeps and what it serves. That also fixes it for every launcher
+    // already installed, which a new DLL cannot.
+    const msg = typeof e?.msg === 'string' ? redactSecrets(e.msg).slice(0, MAX_MSG) : '';
     if (!msg) continue;
     const level = typeof e?.level === 'string' ? e.level.slice(0, 16) : 'info';
     buffer.push({ ts: new Date().toISOString(), level, msg, source: src });

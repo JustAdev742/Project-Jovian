@@ -39,13 +39,25 @@ export async function storefrontRoutes(fastify: FastifyInstance): Promise<void> 
     });
   });
 
-  // Keychain endpoint — returns the AES keys for decryption
+  /**
+   * Keychain — the AES keys that decrypt 7.40's encrypted cosmetic pak chunks.
+   *
+   * Format is `GUID:base64(key)`, one string per chunk. Verified 2026-09-05 against
+   * `Fortnite-Aes-Keys-Archive` (the 7.40 "Secondary Keys" table): both GUIDs and both keys match
+   * byte for byte once the archive's hex is base64-encoded. CONFIRMED — do not "correct" these.
+   *
+   * The archive lists FIVE chunks for 7.40. Chunks 1000/1001/1002 have known GUIDs but their keys
+   * are recorded as `???`, so they cannot be served and the cosmetics inside them stay undecryptable.
+   * That is an evidence gap, not a bug here — there is nothing to ship until a key surfaces.
+   *   1000 `121D529E48141A7E5D0F278BF4559F22`  key UNKNOWN
+   *   1001 `558C4703445945BA01B8A4A7F5AEEC5E`  key UNKNOWN
+   *   1002 `8A29D48D47F92655750C38908C8DD218`  key UNKNOWN
+   */
   fastify.get('/fortnite/api/storefront/v2/keychain', async (request, reply) => {
-    // Fortnite expects keys in the format: "GUID:Base64EncodedKey"
     return reply.send([
-      // pakchunk1003
+      // pakchunk1003 — Deep Sea set
       "91C415954BF27B6E43970FB8A75FE8BB:YhHyxIA+Ru33r3pThiWqKNYdvDbL05yXSxKarRuMSxw=",
-      // pakchunk1004
+      // pakchunk1004 — Brite Blimp Glider
       "D776CA2A40FD9EC1F8522E9E13E99031:uRYulzQ2zdGG9UisQw2wM9OOM/9JsSWFwFt5d/3okng="
     ]);
   });

@@ -202,15 +202,38 @@ async function main() {
     return app;
   }
 
-  // Start HTTP server
+  // Start HTTP server.
+  //
+  // A FAILED BIND HERE IS FATAL, AND DELIBERATELY SO. This used to log the error and carry on, which
+  // produced the worst possible outcome: a live process with no HTTP surface at all. Nothing about
+  // it looked wrong from outside — the launcher's port probe saw *someone* listening (the instance
+  // that won the race), a process-existence check saw a running backend, and the zombie went on
+  // holding an open handle to the SQLite database. That is also the realistic way two processes end
+  // up sharing `nova.db`, which is the exact condition measured in ARCHITECTURE.md §4.
+  //
+  // EADDRINUSE almost always means "another Nova is already serving this port", and in that case
+  // the right move is to get out of the way and say so, loudly, with a non-zero exit the launcher
+  // or `run-nova.sh` can actually see. A restart loop is noisy; a silent zombie is undiagnosable.
+  //
+  // HTTPS below stays non-fatal — port 443 is optional (Cobalt redirects everything to HTTP_PORT)
+  // and commonly needs privilege, so failing there is expected and harmless.
   let httpServer: any = null;
   try {
     const httpApp = await buildApp();
     await httpApp.listen({ host: Config.HOST, port: Config.HTTP_PORT });
     httpServer = httpApp.server;
     console.log(`\n[Server] Nova Backend (HTTP) running on http://${Config.HOST}:${Config.HTTP_PORT}`);
-  } catch (err) {
-    console.error('[Server] Failed to start HTTP:', err);
+  } catch (err: any) {
+    const where = `${Config.HOST}:${Config.HTTP_PORT}`;
+    if (err?.code === 'EADDRINUSE') {
+      console.error(`[Server] FATAL: ${where} is already in use — another Nova backend is almost certainly running.`);
+      console.error('[Server] Refusing to run without an HTTP surface. Stop the other instance, or set NOVA_PORT.');
+    } else if (err?.code === 'EACCES') {
+      console.error(`[Server] FATAL: not permitted to bind ${where}. Use a port above 1024 via NOVA_PORT.`);
+    } else {
+      console.error(`[Server] FATAL: could not bind ${where}:`, err);
+    }
+    process.exit(1);
   }
 
   // Start HTTPS server

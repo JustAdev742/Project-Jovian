@@ -47,11 +47,42 @@ const ALLOWED_MODULE_PATTERNS = [
   'obs', 'graphics-hook', 'nvcamera', 'medal', 'overwolf',
 ];
 
-/** Substrings that a lazy cheat/loader leaves in a module name. Catches the careless only. */
-const SUSPICIOUS_NAME_PATTERNS = [
-  'cheat', 'hack', 'aimbot', 'esp', 'wallhack', 'triggerbot', 'injector', 'inject.exe',
-  'xenos', 'manualmap', 'extremeinjector', 'processhacker', 'cheatengine', 'speedhack',
-  'unknowncheats', 'skinchanger', 'spoofer', 'bypass',
+/**
+ * Names that legitimately contain a word from the suspicious list. Checked FIRST, so a real module
+ * can never be flagged by a substring collision.
+ *
+ * `EasyAntiCheat` is the one that matters most: Fortnite ships Epic's own anti-cheat, and the naive
+ * rule flagged it at severity 7 for containing "cheat". `mavinject` and `ttdinject` are signed
+ * Microsoft binaries (App-V injector, Time Travel Debugging).
+ */
+const SUSPICIOUS_EXCEPTIONS = [
+  'easyanticheat', 'battleye', 'mavinject.exe', 'ttdinject.exe', 'espeak',
+];
+
+/**
+ * Distinctive enough to match anywhere in a name — no legitimate module is called these.
+ */
+const SUSPICIOUS_SUBSTRINGS = [
+  'aimbot', 'wallhack', 'triggerbot', 'xenos', 'manualmap', 'extremeinjector',
+  'processhacker', 'cheatengine', 'speedhack', 'unknowncheats', 'skinchanger',
+];
+
+/**
+ * Short or ambiguous words that must appear as their OWN token, not buried inside a longer word.
+ *
+ * "esp" was the expensive one. As a bare substring it matched 8 legitimate Windows binaries in a
+ * 6,120-name sweep of System32 and Program Files — FDResPub.dll (r-ESP-ub),
+ * gamingservicesproxy.dll (servic-ESP-roxy), SystemPropertiesPerformance.exe
+ * (properti-ESP-erformance), ThreatResponseEngine.dll, imagesp1.dll, libespeak-ng.dll — because
+ * "…es" followed by "p…" is ordinary CamelCase. Each was worth severity 7, and three of them
+ * together clear an autoban threshold of 20. Xbox's gamingservicesproxy.dll in particular is
+ * present on a great many gaming PCs.
+ *
+ * A token must be flanked by a non-letter (or a string boundary), so "esp.dll", "my_esp.dll" and
+ * "esp-loader.dll" still match while "ResPub" does not.
+ */
+const SUSPICIOUS_TOKENS = [
+  'cheat', 'hack', 'esp', 'inject', 'injector', 'spoofer', 'bypass',
 ];
 
 function isAllowedModule(name: string): boolean {
@@ -61,7 +92,14 @@ function isAllowedModule(name: string): boolean {
 
 function suspiciousName(name: string): string | null {
   const n = name.toLowerCase();
-  return SUSPICIOUS_NAME_PATTERNS.find((p) => n.includes(p)) || null;
+  if (SUSPICIOUS_EXCEPTIONS.some((e) => n.includes(e))) return null;
+
+  const substring = SUSPICIOUS_SUBSTRINGS.find((p) => n.includes(p));
+  if (substring) return substring;
+
+  // Flanked by anything that is not a letter — digits, separators and the extension dot all count
+  // as boundaries, so "esp2.dll" and "esp_x64.dll" match but "ResPub.dll" does not.
+  return SUSPICIOUS_TOKENS.find((p) => new RegExp(`(^|[^a-z])${p}([^a-z]|$)`).test(n)) || null;
 }
 
 /**
@@ -153,7 +191,27 @@ export function analyzeMatchReport(r: MatchReport): Detection[] {
 export function analyzeReportAuthority(opts: {
   reporterAccountId: string;
   claimedHostAccountId: string | null;
-  participants: string[];
+  /**
+   * The EXPECTED roster for this match — who was supposed to be playing.
+   *
+   * Empty means "unknown", and the membership check below is then skipped. That is the current
+   * state of the world: nothing in this backend records a roster. `match_history` stores only the
+   * host, and `match_participants` is written by the RESULTS path, so it lists players whose results
+   * have already been stored — a different question entirely.
+   *
+   * This parameter used to be fed `match_participants` directly, which made the check answer "has
+   * someone already reported for this subject" while claiming to answer "was this subject in the
+   * match". In any match with more than one player that inverted: the host reported player one
+   * (accepted, stored), and every player after that was then judged against a list containing only
+   * player one, so each got `report.subject_not_in_match` at severity 8 — against the HOST — and had
+   * their results discarded. A four-player match cost the honest host 24 risk; with
+   * NOVA_AC_AUTOBAN_AT set anywhere near the config's own example, hosting a few matches was enough
+   * to be banned for it. Confirmed by test before the fix.
+   *
+   * Kept as a parameter rather than deleted so the check is ready the moment a real roster exists
+   * (the obvious source being the players routed to a match at matchmaking time).
+   */
+  roster: string[];
   subjectAccountId: string;
   alreadyReported: boolean;
 }): Detection[] {
@@ -165,7 +223,7 @@ export function analyzeReportAuthority(opts: {
       detail: `${opts.reporterAccountId} reported results for a session hosted by ${opts.claimedHostAccountId}`,
     });
   }
-  if (opts.participants.length > 0 && !opts.participants.includes(opts.subjectAccountId)) {
+  if (opts.roster.length > 0 && !opts.roster.includes(opts.subjectAccountId)) {
     out.push({
       rule: 'report.subject_not_in_match',
       severity: 8,

@@ -41,19 +41,36 @@ version in `latest.json`, so **it must go up** or clients will not take the upda
 
 ### 2. Refresh the bundled payload
 
-The installer ships prebuilt binaries. If you changed any of them, restage before building:
+**The backend is scripted — do not do it by hand.**
 
 ```bash
-cd "Main backend" && npx tsc                      # backend -> dist/
+node tools/stage-backend.mjs
 ```
 
-Then copy the current artefacts into `Launcher/src-tauri/resources/`:
+This compiles `Main backend` and replaces `resources/Backend-Coordinator/dist`, then refuses to
+finish if an expected module is missing or if a database, log, `.env` or private key has found its
+way into the payload.
+
+> **Why it is a script.** This used to be a manual copy step in this table, and between 2026-08-01
+> and 2026-09-05 nobody performed it — so releases 1.5.1 through 1.5.9 all shipped a 1 August
+> backend. `main.rs` prefers `dist/` over sources, so that stale copy is what an installed launcher
+> actually ran. It was missing the whole diagnostics subsystem, the 38 latent client routes, and
+> **three P1 security fixes that KNOWN_ISSUES.md recorded as FIXED** (`unauth-route-families`,
+> `mcp-unauth-mutation`, `logs-serve-live-bearer-tokens`). They were fixed in source, and live on
+> the coordinator — which runs `tsx src/` — but had never reached a player's machine.
+>
+> Verify before building, and wire this into CI if it ever exists:
+> ```bash
+> node tools/stage-backend.mjs --check   # exit 1 if the payload is behind the source
+> ```
+
+The remaining artefacts are still manual. Copy them into `Launcher/src-tauri/resources/`:
 
 | Goes to | From |
 |---|---|
 | `resources/Project Reboot.dll` | `backends/_extracted/Project-Reboot-main/x64/Release/Project Reboot.dll` |
 | `resources/Cobalt.dll` | wherever you built Cobalt |
-| `resources/Backend-Coordinator/dist` | `Main backend/dist` |
+| ~~`resources/Backend-Coordinator/dist`~~ | **scripted above — do not copy by hand** |
 | `resources/nova-proxy/` | `nova-proxy/` (proxy.js + node_modules) |
 | `resources/node/node.exe` | your installed Node |
 
