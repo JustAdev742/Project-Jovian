@@ -326,6 +326,25 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     return () => clearInterval(id);
   }, [user?.token]);
 
+  /* Forward this machine's diagnostics once we have a token to attribute them with.
+   *
+   * Cobalt and Reboot report anonymously to the local agent — neither holds a credential, and
+   * Cobalt in particular sees the player's bearer token as a matter of course, so it must not be
+   * the thing that authenticates telemetry. The launcher is the only component that legitimately
+   * has an identity, so attribution happens here.
+   *
+   * The Rust side is idempotent, so a re-render cannot start a second loop and double every batch. */
+  useEffect(() => {
+    if (!user?.token) return;
+    invoke("diagnostics_start_forwarding", {
+      agent: AGENT,
+      coordinator: COORDINATOR,
+      token: user.token,
+    }).catch(() => {
+      /* diagnostics must never interrupt play */
+    });
+  }, [user?.token]);
+
   /* ── becoming a gameserver ─────────────────────────────────────────────────────────────────── */
 
   /**

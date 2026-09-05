@@ -84,6 +84,32 @@ function takeTokens(accountId: string, n: number, now = Date.now()): boolean {
 /** Test hook. */
 export function resetRateLimits(): void {
   buckets.clear();
+  forwardQueue.length = 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+//  THE FORWARD QUEUE
+//
+//  Events from Cobalt and Reboot land on the LOCAL agent, which has no player identity and no route
+//  to the coordinator's authenticated endpoint. The launcher does have both, so it drains this queue
+//  and posts upstream under its own token. That split is what keeps credentials out of the in-game
+//  components entirely.
+//
+//  Bounded and lossy by design: if the launcher is not running, or the coordinator is unreachable
+//  for an hour, the queue must not grow. The OLDEST events are dropped, because in an ongoing
+//  failure the newest are the ones that describe what is happening now. The drop count is forwarded
+//  as its own event so the gap is visible rather than silent.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+const MAX_FORWARD_QUEUE = 500;
+const forwardQueue: unknown[] = [];
+let forwardDropped = 0;
+
+function enqueueForForwarding(ev: unknown): void {
+  forwardQueue.push(ev);
+  while (forwardQueue.length > MAX_FORWARD_QUEUE) {
+    forwardQueue.shift();
+    forwardDropped++;
+  }
 }
 
 export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void> {
@@ -184,8 +210,34 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
         detail: ev.detail,
         // No accountId: this endpoint has no authenticated identity and must not invent one.
       });
+      enqueueForForwarding(ev);
     }
     return reply.send({ accepted: events.length });
+  });
+
+  /**
+   * GET /nova/api/diagnostics/pending — drain the forward queue.
+   *
+   * The launcher calls this on the LOCAL agent and posts what it gets to the coordinator under its
+   * own token. Draining is destructive on purpose: this is a hand-off, not a view, and leaving
+   * events behind would either duplicate them upstream or grow without bound.
+   *
+   * Unauthenticated for the same reason as the local ingest — localhost only, kept local by
+   * nova-proxy's LOCAL_PREFIXES. It returns no account id because it never had one.
+   */
+  fastify.get('/nova/api/diagnostics/pending', async (_request, reply) => {
+    const events = forwardQueue.splice(0, forwardQueue.length);
+    const dropped = forwardDropped;
+    forwardDropped = 0;
+    if (dropped > 0) {
+      // Report our own loss in the same channel, so "we stopped queueing" is visible.
+      events.push({
+        source: 'CLIENT', category: 'UNEXPECTED_STATE', method: 'DIAG',
+        url: '/diagnostics/forward-overflow', component: 'launcher', count: dropped,
+        detail: 'local forward queue overflowed; oldest events dropped',
+      });
+    }
+    return reply.send({ events });
   });
 
   /** GET /nova/api/incidents — ranked, spiking first. Admin only. */

@@ -6,6 +6,7 @@ use sysinfo::System;
 use tauri::{AppHandle, Manager, Window};
 mod anticheat;
 mod diagnostics;
+mod diagreport;
 mod net;
 mod carter;
 mod discord;
@@ -322,6 +323,8 @@ async fn main() {
             host::setup_playit,
             host::download_playit,
             host::p2p_should_i_host,
+            diagreport::diagnostics_forward_now,
+            diagreport::diagnostics_start_forwarding,
             host::p2p_register_host,
             host::p2p_unregister_host,
             host::is_gameserver_running,

@@ -38,7 +38,7 @@ const AGENT = process.env.NOVA_LOCAL_AGENT || 'http://127.0.0.1:3552';
 // deliberately unauthenticated — Cobalt and Reboot hold no credential and must not — which is
 // only safe while it is reachable from this machine alone. Forwarding it upstream would put an
 // open ingest endpoint on the coordinator, which Tailscale Funnel publishes to the internet.
-const LOCAL_PREFIXES = ['/nova/api/host/', '/nova/api/logs', '/nova/api/components', '/nova/api/diagnostics/local'];
+const LOCAL_PREFIXES = ['/nova/api/host/', '/nova/api/logs', '/nova/api/components', '/nova/api/diagnostics/local', '/nova/api/diagnostics/pending'];
 
 function isLocal(url) {
   const path = (url || '/').split('?')[0].toLowerCase();

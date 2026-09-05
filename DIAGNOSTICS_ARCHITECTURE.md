@@ -138,10 +138,36 @@ report, which is worse than having none.
 construction. That is the larger cause (see KNOWN_ISSUES `nova-303-request-escape`). What the check
 does catch is the other one — a host nobody added to the list — and the two are worth telling apart.
 
-## 9. Not yet wired
+## 9. Forwarding — the last link
 
-**The launcher does not yet forward local events to the coordinator.** Everything below that step
-works and is tested; the Rust side is the remaining piece, and until it ships, local events stay on
-the player's machine and are visible only through that machine's own `/nova/api/diagnostics`.
+`Launcher/src-tauri/src/diagreport.rs`. Every 60 s it drains
+`GET /nova/api/diagnostics/pending` on the local agent and posts the result to the coordinator's
+authenticated endpoint under the launcher's own token. The UI starts it once a token exists
+(`useLauncher.ts`), and the Rust side is idempotent so a re-render cannot start a second loop and
+double every batch.
 
-The coordinator's own backend failures already appear on the dashboard today.
+**Draining is destructive on purpose.** It is a hand-off, not a view: leaving events behind would
+either duplicate them upstream or grow the queue without bound.
+
+**The queue is bounded and lossy**, capped at 500 with the OLDEST dropped first — in an ongoing
+failure the newest events describe what is happening now. The drop count is forwarded as its own
+event, so the gap is visible rather than silent.
+
+**A failed upload drops that batch rather than retrying forever.** An unbounded retry buffer in the
+launcher would move the leak rather than remove it, and hour-old diagnostics are worth little. A
+`429` backs off to 5 minutes — ignoring the ceiling the coordinator just stated would be precisely
+the client behaviour this system exists to detect.
+
+Verified end to end against a running backend:
+
+```
+1. Cobalt + Reboot POST to /diagnostics/local, no token      -> accepted 2
+2. launcher drains /diagnostics/pending                      -> 2 events
+3. second drain                                              -> 0 events (destructive)
+4. launcher POSTs to /diagnostics/ingest with its token      -> accepted 2
+5. dashboard                                                 -> HOST/reboot HOST_ISSUE
+                                                                NETWORK/cobalt, trace NV-ABC123
+```
+
+Source, component and correlation id survive the whole path — which is the point: the dashboard can
+say a gameserver failed rather than guessing from the wording.
