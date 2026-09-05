@@ -178,6 +178,41 @@ settled five 7.40 questions this way.
 
 ---
 
+---
+
+## The bottom line, 2026-09-06
+
+Asked directly whether cross-version support is finished, the honest answer has three parts, because
+"support" turns out to mean three different things here.
+
+**1. Serving a build correctly — as finished as the evidence allows.** Every response Nova gives that
+the evidence says should vary by build, now does: season number, lobby background, timeline flags,
+per-build AES chunk keys, per-era locker contents, `enabled_features`. 30 features carry an evidence
+grade; 13 are SUPPORTED, meaning implemented **and** with defined failure behaviour **and** pinned by
+a test. Nothing is graded above what its evidence supports.
+
+**2. Knowing what a build wants — blocked on binaries, not on effort.** Chapter 2-4 *behavioural*
+differences cannot be established from what is here. The narrative source grades its own Chapter 2-4
+material as inference with no citations; the datamining corpus's playlist file is a single 2024
+snapshot; the AES archive stops at 19.01. The method that works is scanning a client binary, and
+**there is no Chapter 2, 3 or 4 binary on this machine.** Two exist and both were scanned: 7.40, and
+a December 2016 pre-Battle-Royale build. That is the whole corpus of clients.
+
+This is the gate. It is a measurement task and about twenty minutes per question once a binary
+exists — proven six times over now, most recently by the 2016 build catching a live defect.
+
+**3. Getting a later build to ASK Nova — impossible by this mechanism, and that is not a gap.**
+See the EOS ceiling above. Chapter 1 clients resolve services by URL, so a host redirect reaches
+them. EOS-era clients resolve by ProductId/SandboxId/DeploymentId. There is no URL to rewrite, so no
+amount of backend work makes a Chapter 3 client talk to Nova. Separately, Cobalt and Reboot both find
+their targets by byte-signature scan against 7.40, so even a Chapter 1 build from a different season
+could neither be redirected nor hosted.
+
+**So: parts 1 and 3 are finished, in the sense that there is nothing further to do — one because the
+work is done, the other because the work is impossible. Part 2 is open and will stay open until a
+client binary from Chapters 2-4 exists on disk.** Everything else on the original list has been
+either implemented, or recorded as a decision with the measurement behind it.
+
 ## Why the foundation was still worth building first
 
 Three reasons, none of them "so we could say it was done":
