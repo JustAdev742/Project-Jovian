@@ -54,7 +54,38 @@ if (mode === 'count') {
   while ((m = re2.exec(wtext)) !== null) found.add(m[0]);
 
   for (const s of [...found].sort()) console.log(s);
+} else if (mode === 'enclosing') {
+  // WHY THIS MODE EXISTS. `count` answers "is this literal here", which is the wrong question for
+  // anything path-shaped. The client stores path FRAGMENTS and prepends the service base URL at
+  // runtime, so no full path is ever contiguous: `fortnite/api/game/v2` counts ZERO in 7.40, a
+  // build that calls it 229 times a session. Searching for a whole path and finding nothing is the
+  // single easiest way to produce a confident wrong answer with this tool.
+  //
+  // `enclosing` takes a SHORT distinctive needle and prints the complete string it sits inside, so
+  // you see the fragment the build actually stores — e.g. needle "/settings" yields
+  // "/api/v1/`id/settings", which is what reconciles with the observed request log.
+  const out = new Set();
+  for (const needle of args) {
+    // UTF-16LE: strings are NUL-NUL delimited on even offsets.
+    const pat = utf16le(needle);
+    for (let i = buf.indexOf(pat, 0); i !== -1; i = buf.indexOf(pat, i + 2)) {
+      let a = i, b = i;
+      while (a >= 2 && !(buf[a - 2] === 0 && buf[a - 1] === 0)) a -= 2;
+      while (b + 1 < buf.length && !(buf[b] === 0 && buf[b + 1] === 0)) b += 2;
+      out.add('utf16  ' + JSON.stringify(buf.slice(a, b).toString('utf16le')));
+    }
+    // ASCII: single-NUL delimited.
+    const apat = Buffer.from(needle, 'latin1');
+    for (let i = buf.indexOf(apat, 0); i !== -1; i = buf.indexOf(apat, i + 1)) {
+      let a = i, b = i;
+      while (a > 0 && buf[a - 1] >= 0x20 && buf[a - 1] < 0x7f) a--;
+      while (b < buf.length && buf[b] >= 0x20 && buf[b] < 0x7f) b++;
+      if (b - a >= needle.length) out.add('ascii  ' + JSON.stringify(buf.slice(a, b).toString('latin1')));
+    }
+  }
+  if (out.size === 0) console.log('  (no enclosing string found — check the needle and see the traps in README.md)');
+  for (const line of [...out].sort()) console.log('  ' + line);
 } else {
-  console.error('mode must be "count" or "regex"');
+  console.error('mode must be "count", "regex" or "enclosing"');
   process.exit(2);
 }

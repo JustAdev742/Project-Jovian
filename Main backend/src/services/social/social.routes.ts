@@ -113,10 +113,26 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
   //
   // TWO PATH FAMILIES, ONE SET OF HANDLERS.
   //
-  // Only the `/friends/api/v1/...` forms existed here, and 7.40 does not use them: a scan of
-  // FortniteClient-Win64-Shipping.exe finds `friends/api/v1` zero times, and the only
-  // friends-related literals in the whole binary are `api/public/friends/` and
-  // `api/public/blocklist/`. The mutating forms this build actually calls —
+  // Only the `/friends/api/v1/...` forms existed here, and 7.40 does not use them for CRUD.
+  //
+  // The justification here USED to be "a scan finds `friends/api/v1` zero times". That is true and
+  // it proves nothing: the client stores path FRAGMENTS and prepends the service base URL at
+  // runtime, so no full path is ever a contiguous literal. The control that shows the method is
+  // broken: `fortnite/api/game/v2` is also absent, and 7.40 calls it 229 times per session.
+  //
+  // Re-derived 2026-09-06 the right way, by enumerating fragments (UTF-16LE, backtick-prefixed
+  // placeholders). The friends service fragments this binary actually contains are, in full:
+  //
+  //     /api/public/friends/`id                      /api/public/blocklist/`id
+  //     /api/public/friends/`id/`friend              /api/public/blocklist/`id/`block
+  //     /api/public/friends/`id?includePending=true
+  //     /api/v1/`id/settings
+  //
+  // So the conclusion stands and is now actually supported: every CRUD path is a `public` form,
+  // and the ONLY v1 fragment is the settings GET — which reconciles with the 59 calls to
+  // GET /friends/api/v1/{acct}/settings in the observed surface (VERSION_COMPATIBILITY.md 2).
+  //
+  // The mutating forms this build actually calls —
   // POST/DELETE /friends/api/public/friends/:accountId/:friendId and the blocklist equivalent,
   // both documented in the endpoint corpus under FriendsService/Old — had NO route, so they fell
   // to the catch-all, which answers a POST with 204. The client saw success and nothing happened.
