@@ -131,15 +131,35 @@ Everything in this section is done and tested in source. It reaches players only
 installer is next built and released. Recorded separately because conflating the two is exactly the
 mistake that produced NOVA-AUDIT-013.
 
-| fix | reaches players via |
-|---|---|
-| NOVA-AUDIT-012 ingest redaction, and the three P1s that were stale in the payload | next installer, after `node tools/stage-backend.mjs` |
-| NOVA-AUDIT-014 self-check reads the real game log; NOVA-307 reads `nova-agent.log` | next installer (Rust) |
-| NOVA-AUDIT-015 port identity probe | next installer (Rust) |
-| NOVA-AUDIT-011 anti-cheat roster | coordinator on next deploy; players via the installer |
+| fix | reaches players via | status |
+|---|---|---|
+| NOVA-AUDIT-014 self-check reads the real game log; NOVA-307 reads `nova-agent.log` | next installer (Rust) | pending |
+| NOVA-AUDIT-015 port identity probe | next installer (Rust) | pending |
+| all backend fixes on a player's own host agent | next installer, after `node tools/stage-backend.mjs` | payload staged, **release pending** |
+| all backend fixes on the coordinator | direct deploy | **DONE 2026-09-05** |
 
-**The coordinator is a separate deployment** and runs `tsx src/`, so a `git pull` there is enough for
-the backend half. See [nova-coordinator-deploy](ARCHITECTURE.md).
+### The coordinator deploy, 2026-09-05 — and a correction
+
+`~/nova-backend` is **not a git checkout**; it was populated by file copy, so "it runs `tsx src/`"
+never meant "it is current". Checked rather than assumed on 2026-09-05: it had the 2026-08-15 work
+and **none** of the 2026-08-31 work — no `diagnostics.ts`, no `latent.routes.ts`, no URL redaction,
+and **no friends ownership guard**. Tailscale Funnel publishes `:8443 → 127.0.0.1:3551` to the open
+internet, so `unauth-route-families` was live and remotely reachable, not bounded to localhost as
+this document previously implied.
+
+Deployed and verified the same day. Probes against the live box afterwards:
+
+| probe | before | after |
+|---|---|---|
+| unauth `POST /friends/api/public/friends/{victim}/{attacker}` | wrote the friendship | **401**, nothing persisted |
+| unauth `POST /friends/api/v1/{victim}/friends/{attacker}` | wrote it | **401** |
+| unauth `POST /epic/friends/v1/{dep}/users/{victim}/blocked/{x}` | wrote it | **401** |
+| `eg1~` canary in a URL path, read back from unauthenticated `/nova/api/logs` | served raw | **`eg1~<redacted>`** |
+| same canary through `/nova/api/logs/ingest` (NOVA-AUDIT-012) | served raw | **`eg1~<redacted>`** |
+
+Unchanged controls in the same run: timeline 2 408 B, lightswitch 330 B, `versioncheck`
+`{"type":"NO_UPDATE"}`, catalog 8 630 B, `oauth/token` still mints. `/nova/api/diagnostics` answers
+for the first time on that box. Procedure and probes: [coordinator/README.md](coordinator/README.md).
 
 ---
 

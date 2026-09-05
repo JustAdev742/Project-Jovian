@@ -207,8 +207,18 @@ project, and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) now separates them.
 
 **Reachability, which bounds how much any of this matters.** `Config.HOST` is hard-coded to
 `127.0.0.1` (`config.ts:33`). Neither the host agent nor a standalone backend is reachable off the
-machine, so a defect that lives only in the payload needs code already running on that PC. The
-coordinator is the only remotely-reachable Nova, and it runs sources.
+machine, so a defect that lives only in the payload needs code already running on that PC.
+
+**The coordinator is the exception, and running sources did NOT mean it was current.** Corrected
+2026-09-05 after checking the box rather than reasoning about it: `~/nova-backend` is not a git
+checkout — it was populated by file copy — so "runs `tsx src/`" only means it runs whatever sources
+were last copied there. It had the 2026-08-15 work and **none** of the 2026-08-31 work: no
+`diagnostics.ts`, no `latent.routes.ts`, no URL redaction, and no friends ownership guard. Since
+Tailscale Funnel publishes `:8443 → 127.0.0.1:3551` to the open internet, that last one was a live
+remotely-reachable P1, not a bounded local one.
+
+Deployed and verified 2026-09-05; see [coordinator/README.md](coordinator/README.md) for the
+procedure and the probes that check it landed.
 
 ---
 
