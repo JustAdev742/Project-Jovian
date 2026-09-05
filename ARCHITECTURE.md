@@ -182,6 +182,36 @@ expressible as a backend version adapter.
 
 ---
 
+## 6a. Where the backend code actually runs — three copies, and they are not the same
+
+Added 2026-09-05, after finding that a fix could be true in all the places anyone looks and still not
+be true on a player's machine.
+
+| copy | what runs | how it updates | current? |
+|---|---|---|---|
+| coordinator (`~/nova-backend`) | `tsx src/index.ts` — **sources** | `git pull` on the box | always |
+| dev tree (`Main backend/`) | `tsx src/index.ts` via `npm run dev` | you are editing it | always |
+| **installer payload** (`Launcher/src-tauri/resources/Backend-Coordinator/dist`) | **compiled JS** | staged into the installer at build time | **only if staged** |
+
+`start_backend` (`main.rs:156-168`) prefers `dist/` over sources, so on an installed launcher the
+third copy is what runs as the local host agent. It went 35 days stale and shipped through nine
+releases missing three P1 fixes — see [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md) NOVA-AUDIT-013.
+
+```bash
+node tools/stage-backend.mjs           # compile + stage
+node tools/stage-backend.mjs --check   # exit 1 if the payload is behind the source
+```
+
+**The rule this establishes:** "fixed in source" and "fixed for players" are different claims in this
+project, and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) now separates them.
+
+**Reachability, which bounds how much any of this matters.** `Config.HOST` is hard-coded to
+`127.0.0.1` (`config.ts:33`). Neither the host agent nor a standalone backend is reachable off the
+machine, so a defect that lives only in the payload needs code already running on that PC. The
+coordinator is the only remotely-reachable Nova, and it runs sources.
+
+---
+
 ## 7. Known structural weaknesses
 
 Carried forward with their grades; none changed in this session.

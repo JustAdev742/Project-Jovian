@@ -1,7 +1,7 @@
 # VERSION_COMPATIBILITY
 
 **Target build: Fortnite 7.40 (Chapter 1 Season 7, CL-5046157).**
-Last measured: 2026-08-31. Evidence grades are per [AUDIT_PROMPT.md](AUDIT_PROMPT.md) Rule 4:
+Last measured: 2026-09-05. Evidence grades are per [AUDIT_PROMPT.md](AUDIT_PROMPT.md) Rule 4:
 CONFIRMED · STRONGLY SUPPORTED · INFERRED · SPECULATIVE · UNKNOWN.
 
 ---
@@ -273,6 +273,41 @@ client's value is an *if-none-match* hint.
 - **Not fixed here.** It is a stateful change to the one subsystem 7.40 exercises most heavily, and
   it has no observed symptom to verify a fix against. Wrong place for an unforced change.
 
+### Checked against the supplied corpus, 2026-09-05
+
+The `Full documentation/` corpus was cross-referenced against the implementation. Everything below
+was compared field by field; the result is mostly confirmation, which is worth recording as such.
+
+| endpoint | source in corpus | verdict |
+|---|---|---|
+| `GET /lightswitch/api/service/bulk/status` | `LightswitchService/Service/StatusBulk.md` | **correct** — every documented field present, same types. `catalogItemId` differs in its last character from the example (`…da8` vs `…da5`); nothing validates it, recorded not changed |
+| `GET /account/api/oauth/verify` | `AccountService/Authentication/Verify.md` | **correct** — `perms` is documented as opt-in via `?includePerms`, so omitting it by default is right. Nova adds a `device_id` the docs do not list; unknown fields are ignored by the client |
+| `GET /fortnite/api/cloudstorage/system` | `FN-Service/Game/Cloudstorage/System/List.md` | **correct** shape. `storageType` is `S3` where the modern doc shows `DSS`; era difference, nothing reads it |
+| `GET /fortnite/api/calendar/v1/timeline` | `FN-Service/Game/Calendar.md` | **correct** — channel/state/`cacheExpire` structure matches, plus `eventsTimeOffsetHrs`, `cacheIntervalMins`, `currentTime` |
+| `POST …/profile/{id}/client/{op}` | `EpicResearch/docs/mcp/profile/operation_request.md`, `FN-Service/Game/Profile/README.md` | **correct** — `?profileId=&rvn=` and the `client`/`public`/`dedicated_server` route split match. Note `rvn=-1` is documented as the DEFAULT the client sends; it is a sentinel, not a real revision |
+| `GET /fortnite/api/storefront/v2/keychain` | `Fortnite-Aes-Keys-Archive` 7.40 table | **correct, byte for byte** — see below |
+
+**Keychain — CONFIRMED against the archive.** Both entries Nova serves match 7.40's secondary-key
+table exactly once the archive's hex is base64-encoded:
+
+| chunk | GUID | key | set |
+|---|---|---|---|
+| 1003 | `91C415954BF27B6E43970FB8A75FE8BB` | matches | Deep Sea |
+| 1004 | `D776CA2A40FD9EC1F8522E9E13E99031` | matches | Brite Blimp Glider |
+
+The archive lists **five** chunks for 7.40. Chunks 1000/1001/1002 have known GUIDs and their keys
+recorded as `???`, so the cosmetics inside them cannot be decrypted. That is an evidence gap, not a
+defect — there is nothing to serve until a key surfaces. Recorded in `storefront.routes.ts` so nobody
+"corrects" the two that are right or invents the three that are missing.
+
+**What the corpus could NOT settle.** It documents no MCP response envelope — `profileChanges`,
+`profileChangesBaseRevision` and the rest appear in none of the 753 files. The only corroboration is
+the decompiled Retrofit interface (`FortnitePublicService.java`), which shows the request carries
+`?rvn=` and an `X-EpicGames-ProfileRevisions` header, confirming that revisions are tracked but not
+what the server must return. `mcp-rvn-from-client` therefore stays as it was: CONFIRMED as a
+divergence from Epic's server-authoritative model, with no observed symptom on 7.40 and no
+documentation to fix it against.
+
 ### Profile `version` string — INFERRED, harmless
 
 `athena.ts` sets `version: 'nova_lawin_ch1s7'`; `common_core.ts` sets `'nova_backend'`. Real Epic
@@ -299,6 +334,27 @@ one implying migrations this backend does not perform.
 
 `gameVersion` is now also attached to every diagnostic event, so "which version" is answerable per
 failure without adding a single conditional.
+
+---
+
+## 4a. The evidence corpus, and what each part is actually good for
+
+`Full documentation/` — indexed 2026-09-05. Graded by how much weight a claim from it can carry.
+
+| source | size | grade | good for |
+|---|---|---|---|
+| `FortniteEndpointsDocumentation` | 753 md | **STRONGLY SUPPORTED** | response shapes, query params, required permissions. Modern-era examples; shapes are stable, values are not |
+| `EpicResearch` | ~120 md | **STRONGLY SUPPORTED** | OAuth grant types, MCP operation request form, auth client ids |
+| `FortnitePublicService.java` etc. (gist) | 4 files | **CONFIRMED** for the request side | a real Retrofit client's view: exact paths, query params, headers. Oct-2019 era, so later than 7.40 |
+| `Fortnite-Aes-Keys-Archive` | 1 md | **CONFIRMED** | per-build AES keys, incl. 7.40's five chunk keys |
+| `Fortnite-Datamining` | 3 MB | reference | playlists, cosmetics, shop history |
+| `fortnite-archives` | 933 MB | reference | map imagery and per-build JSON. **Almost all of it is tiles** — 45,788 files, no backend content |
+| `Research.txt` | 32 KB | **SPECULATIVE in parts** | a general architecture overview. Self-grades Chapters 2-4 as inferred, and **it says Fortnite uses EOS** — true for modern builds, false for 7.40. Treat as orientation, never as authority |
+| `UAssetAPI` | 83 MB | not applicable | a .NET library for reading `.uasset` files; no bearing on the backend |
+
+**The trap in the corpus itself.** `Research.txt` is the most readable document in it and the least
+reliable for this project's target. Anything it says about EOS, Chapters 2-4, or live-event
+activation is inference presented in the same voice as the confirmed parts.
 
 ---
 
