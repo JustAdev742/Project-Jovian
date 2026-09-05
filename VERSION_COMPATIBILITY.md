@@ -380,6 +380,30 @@ events section says the activation mechanism "is not public".
 Building a compatibility matrix for Chapters 2–4 from that would mean inventing endpoint
 introduction/removal versions — exactly what Rule 5 forbids. **Status: UNKNOWN, deliberately.**
 
+### Amended 2026-09-06 — two boundaries that ARE established, and they came from data, not prose
+
+The paragraph above still holds for the *narrative* sources: nothing in `Research.txt` supports a
+Chapter 2–4 matrix. But two machine-readable sources in the same corpus turned out to carry real
+era boundaries, and those are now modelled.
+
+| what | evidence | grade | boundary |
+|---|---|---|---|
+| **Cosmetic introduction dates** | `Fortnite-Datamining data/items/registry.json`, field `introduction:{chapter,season}`, present on 15,025 of 23,532 records, C1S1–C7S4 | CONFIRMED | per item |
+| **`enabled_features` response** | `FortniteEndpointsDocumentation .../EnabledFeatures.md` documents `[]` **and** `["store"]` labelled `(2017)` | CONFIRMED that it differs; **INFERRED** where the cutoff sits | 2017 majors vs later |
+
+The distinction that keeps this consistent with the rule: neither was **derived** — the introduction
+dates are a field in a dataset, and the `enabled_features` pair is two responses printed side by side
+in the documentation. Nothing was interpolated between builds.
+
+Two traps in that dataset, checked and avoided. Its sibling fields `first_seen` and `added` look like
+history and are not: 22,198 of 23,532 records share a single `first_seen` of `2026-05-02`, the day the
+scraper ran, and 2,722 `added` values collapse onto one 2019-11 bulk backfill. Only `introduction` is
+a game date. And its `season` is not always a number — `"X"`, `"OG"`, `"Remix"` appear — so those
+carry a null ordinal and are never served rather than being forced into the sequence.
+
+**What this does NOT establish:** any endpoint's introduction or removal version, any Chapter 2–4
+request/response shape, or anything about live events. Those remain UNKNOWN for the reasons above.
+
 **What would change it:** per-build client binaries or logs (the `Fortnitebuilds` /
 `all-fortnite-builds` links in `Links.txt`), from which the observed-surface method in §2 could be
 re-run per build. That is a measurement task, not a writing task.

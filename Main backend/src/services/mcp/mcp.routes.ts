@@ -83,7 +83,7 @@ export async function mcpRoutes(fastify: FastifyInstance): Promise<void> {
         case 'QueryProfile':
         case 'SetMCPEnabled':
           response = profileId === 'athena'
-            ? queryAthenaProfile(accountId, rvn)
+            ? queryAthenaProfile(accountId, rvn, (request as any).gameVersion)
             : handleQueryProfile(accountId, profileId, rvn);
           break;
         case 'ClientQuestLogin':
@@ -91,7 +91,7 @@ export async function mcpRoutes(fastify: FastifyInstance): Promise<void> {
           // rvn back (rvn=-1 => profileRevision:-1, since `rvn || 1` does not filter -1), so the
           // client cached a negative revision and every later op force-resynced.
           response = profileId === 'athena'
-            ? queryAthenaProfile(accountId, rvn)
+            ? queryAthenaProfile(accountId, rvn, (request as any).gameVersion)
             : handleQueryProfile(accountId, profileId, rvn);
           break;
 

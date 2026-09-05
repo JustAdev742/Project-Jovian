@@ -1,5 +1,6 @@
 import { Config } from '../../../config';
 import { getAthenaProfileJson, saveAthenaProfileJson } from '../../../database';
+import { existsByEra } from '../../../version/cosmetics';
 
 /** All Chapter 1 Season 7/8 cosmetic IDs */
 const CHARACTERS = [
@@ -390,7 +391,44 @@ function runOp(accountId: string, queryRevision: number, mutate: (p: any) => any
   return envelope(profile, baseRevision, queryRevision, changes);
 }
 
-export function queryAthenaProfile(accountId: string, queryRevision: number): any {
+/** The era of the build that is asking. Null fields mean "not established" — see identify.ts. */
+export interface ProfileEra {
+  chapter: number | null;
+  season: number | null;
+}
+
+/**
+ * Hide cosmetics that did not exist yet in the build doing the asking.
+ *
+ * WHY. The seed grants one fixed list to every account (ALL_COSMETICS), written for Chapter 1
+ * Season 7/8. An item introduced AFTER the client-s build has no assets in that build, so the
+ * client draws it as a blank locker tile. Measured, not theorised: EID_Conga is a Chapter 1
+ * Season 8 emote and 7.40 is a Season 7 build. See version/cosmetics.ts for the era data.
+ *
+ * Filtering happens HERE, on read, rather than in buildSeedProfile, for two reasons:
+ *   - the stored profile stays complete, so nothing is destroyed and no migration is needed;
+ *   - one account can connect from more than one build, and each build gets the right view.
+ *
+ * AN UNKNOWN ERA FILTERS NOTHING. identifyVersion reports UNKNOWN when it could not read a build
+ * out of the request; taking a player-s items away on a guess is worse than one blank tile.
+ */
+function filterItemsByEra(profile: any, era?: ProfileEra | null): any {
+  const chapter = era?.chapter;
+  const season = era?.season;
+  if (typeof chapter !== 'number' || typeof season !== 'number') return profile;
+
+  const items: Record<string, any> = {};
+  let removed = 0;
+  for (const [key, item] of Object.entries(profile.items || {})) {
+    if (existsByEra(bareId(key), chapter, season)) items[key] = item;
+    else removed++;
+  }
+  // The common case: nothing to hide. Return the original so no clone is made per request.
+  if (removed === 0) return profile;
+  return { ...profile, items };
+}
+
+export function queryAthenaProfile(accountId: string, queryRevision: number, era?: ProfileEra | null): any {
   const profile = loadProfile(accountId);
   // Safety guard (LawinServer v3): if rvn ever equals commandRevision, nudge rvn so the client
   // re-syncs. After seeding they differ by 1 and each op bumps both, so this rarely fires.
@@ -400,7 +438,7 @@ export function queryAthenaProfile(accountId: string, queryRevision: number): an
     if (!a.last_applied_loadout && a.loadouts?.length) a.last_applied_loadout = a.loadouts[0];
     persist(accountId, profile);
   }
-  return envelope(profile, profile.rvn, queryRevision, []);
+  return envelope(filterItemsByEra(profile, era), profile.rvn, queryRevision, []);
 }
 
 /** Apply variantUpdates to an owned item, returning the itemAttrChanged change (or null). */

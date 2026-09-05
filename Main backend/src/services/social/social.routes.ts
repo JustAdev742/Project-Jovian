@@ -344,7 +344,26 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
   // ═══════════════════════════════════════════════
 
   /** Enabled features */
-  fastify.get('/fortnite/api/game/v2/enabled_features', async (_, reply) => reply.send([]));
+  /**
+   * enabled_features — one of the very few endpoints the corpus documents with BOTH an old and a
+   * current response, so the difference is CONFIRMED rather than reasoned:
+   *
+   *   FortniteEndpointsDocumentation EpicGames/FN-Service/Game/EnabledFeatures.md
+   *     Example Response          -> []
+   *     Example Response (2017)   -> ["store"]
+   *
+   * WHERE THE BOUNDARY GOES IS **INFERRED**, and deliberately not dressed up as more. The corpus
+   * says "2017" — a calendar year, not a build. Only two majors existed in 2017 (Chapter 1 Season 1
+   * from October, Season 2 from 14 December), so major <= 2 is the set of builds that could have
+   * seen the old response. Season 2 ran on into February 2018, so its upper edge is a judgement
+   * call, not a measurement; nothing here distinguishes December 2017 from February 2018.
+   *
+   * 7.40 is unaffected and must stay [] — see the golden baseline in version.test.ts.
+   */
+  fastify.get('/fortnite/api/game/v2/enabled_features', async (request, reply) => {
+    const major = Number((request as any).gameVersion?.major);
+    return reply.send(major >= 1 && major <= 2 ? ['store'] : []);
+  });
 
   /** Twitch linking */
   fastify.get('/fortnite/api/game/v2/twitch/:accountId', async (_, reply) => reply.send({}));

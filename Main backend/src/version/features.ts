@@ -35,7 +35,7 @@ export type Confidence = 'CONFIRMED' | 'STRONGLY_SUPPORTED' | 'INFERRED' | 'UNKN
 export type Subsystem =
   | 'auth' | 'mcp' | 'friends' | 'presence' | 'party' | 'matchmaking' | 'session'
   | 'cloudstorage' | 'content' | 'quests' | 'playlists' | 'worldstate' | 'events'
-  | 'storefront' | 'discovery' | 'telemetry';
+  | 'storefront' | 'discovery' | 'telemetry' | 'transport';
 
 export interface TimelineEntry {
   /** The major version at which this change takes effect. `null` = "true as far back as we know". */
@@ -350,7 +350,7 @@ export const FEATURES: readonly FeatureRecord[] = [
 
   {
     feature: 'transport.redirect.hookWindow',
-    subsystem: 'telemetry',
+    subsystem: 'transport',
     description: "Cobalt's curl hook has windows in which requests escape to Epic's live servers.",
     timeline: [{
       atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
@@ -385,6 +385,49 @@ export const FEATURES: readonly FeatureRecord[] = [
     implementation: 'services/compat/latent.routes.ts (stub — returns the catch-all shape)',
     failureBehaviour: 'Unknown; never exercised.',
     notes: 'Implemented as a stub, NOT supported. A literal in a shipping binary proves the build knows the name, not that any reachable path calls it.',
+  },
+  {
+    feature: 'cosmetics.locker.eraFilter',
+    subsystem: 'content',
+    description: 'Hide cosmetics that did not exist yet in the build asking for the locker.',
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: 'Fortnite-Datamining data/items/registry.json carries introduction:{chapter,season} on 15,025 of 23,532 records, C1S1-C7S4. Measured 2026-09-06: of the 335 cosmetics Nova grants unconditionally, 97 are in that corpus and all are Chapter 1; EID_Conga is C1S8 and was being granted to 7.40, a Season 7 build.',
+      detail: 'Filtered on READ, not at seed time, so the stored profile stays complete and one account can connect from several builds. An era the request does not establish filters nothing.',
+    }],
+    implementation: 'services/mcp/profiles/athena.ts - filterItemsByEra, called from queryAthenaProfile',
+    failureBehaviour: 'An item the build has no assets for renders as a blank tile in the locker.',
+    tests: [
+      'cosmetics.test.ts - does not give EID_Conga to a 7.40 client',
+      'cosmetics.test.ts - QueryProfile over HTTP serves an era-correct locker',
+    ],
+    notes: 'Removes only what provably post-dates a build; it does not expand later-era lockers. The corpus does not cover 238 of the granted ids, and those stay available rather than being dropped on a guess.',
+  },
+  {
+    feature: 'game.enabledFeatures',
+    subsystem: 'content',
+    description: 'GET /fortnite/api/game/v2/enabled_features.',
+    timeline: [{
+      atMajor: null, change: 'MODIFIED', confidence: 'CONFIRMED',
+      evidence: 'FortniteEndpointsDocumentation EpicGames/FN-Service/Game/EnabledFeatures.md gives BOTH responses: [] currently, and [store] labelled (2017). One of very few endpoints in the corpus documented with an old/new pair.',
+      detail: 'THE BOUNDARY IS INFERRED. The corpus says a calendar year, not a build. Only majors 1 and 2 existed in 2017, so major <= 2 is the set that could have seen the old response; Season 2 ran on into February 2018, so its upper edge is a judgement call.',
+    }],
+    implementation: 'services/social/social.routes.ts',
+    failureBehaviour: 'Unknown - no client in the corpus is recorded reacting to either value.',
+    tests: ['cosmetics.test.ts - enabled_features follows the calling build'],
+    notes: 'The DIFFERENCE is confirmed; the cutoff is not. 7.40 is unaffected and still gets [].',
+  },
+  {
+    feature: 'transport.eos.sdkAddressing',
+    subsystem: 'transport',
+    description: 'Whether an EOS-era client can be pointed at Nova at all.',
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: 'OnlineSubsystemMcp resolves services by URL, so a host redirect reaches them - this is how 7.40 is served today. The EOS SDK resolves by ProductId / SandboxId / DeploymentId issued by Epic, not by a base URL, so there is no URL for a redirect to rewrite.',
+      detail: 'A HARD BLOCKER, not a gap in the work. It bounds what support every version can mean: era-correct RESPONSES are implementable for any build, but an EOS-era client cannot be made to ASK Nova for them by the redirect mechanism this project uses.',
+    }],
+    failureBehaviour: 'The client talks to Epic, or to nothing. Nova never sees the request.',
+    notes: 'Nothing in the backend can lift this; it is a property of how the client addresses services. Recorded so the limit is visible rather than rediscovered.',
   },
 ];
 
