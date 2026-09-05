@@ -5,6 +5,7 @@
 
 #include "memcury.h"
 #include "settings.h"
+#include "diagnostics.h"
 
 #include "../vendor/cURL/curl.h"
 #include "url.h"
@@ -114,6 +115,30 @@ inline CURLcode CurlEasySetOptDetour(struct Curl_easy* data, CURLoption tag, ...
 					url = Uri::CreateUri(URL_PROTOCOL, URL_HOST, URL_PORT, uri.Path, uri.QueryString);
 				}
 			}
+			Nova::Diag::SetCorrelationId(Nova::Diag::NewCorrelationId());
+		}
+		else if (uri.Host.contains(XOR("epicgames")) || uri.Host.contains(XOR("epicgames.dev")))
+		{
+			// AN EPIC HOST THAT THE REDIRECT LIST DID NOT MATCH.
+			//
+			// This is the only place in the system that can see the escape AT SOURCE. By the time it
+			// shows up anywhere else it is a 401 in FortniteGame.log with Epic's error text, and
+			// working backwards from there took two sessions (KNOWN_ISSUES nova-303-request-escape).
+			//
+			// Note what this does NOT catch: a request that escapes because the hook itself was
+			// unarmed during the VEH re-arm window never reaches this function at all. That is the
+			// larger cause and it is invisible from here by construction. What this catches is the
+			// other one — a host nobody added to the list — and the two are worth telling apart.
+			// Host and Path are string_view (see url.h), so build the subject explicitly rather
+			// than relying on operator+ — which does not exist for them.
+			std::string subject;
+			subject.reserve(uri.Host.size() + uri.Path.size());
+			subject.append(uri.Host);
+			subject.append(uri.Path);
+			Nova::Diag::Report(Nova::Diag::Source::Network,
+			                   Nova::Diag::Category::UnexpectedState,
+			                   "GET", subject, 0,
+			                   "Epic host not matched by the redirect list");
 		}
 
 #endif

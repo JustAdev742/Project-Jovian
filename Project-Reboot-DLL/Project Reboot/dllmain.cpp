@@ -1,4 +1,5 @@
 #include <MinHook.h>
+#include "diagnostics.h"
 #include <Windows.h>
 #include <iostream>
 #include <fstream>
@@ -610,6 +611,10 @@ DWORD WINAPI Initialize(LPVOID)
     //
     // So: wait for it instead of assuming. Costs nothing when it is already there — which is why the
     // fast machine's behaviour is completely unchanged — and gives a slow one time to catch up.
+    // Same structured channel Cobalt uses, same schema, so the dashboard can tell a HOST failure
+    // apart from a CLIENT one instead of guessing from the wording. See diagnostics.h.
+    Nova::Diag::Init("reboot", "7.40");
+
     auto PC = Helper::GetLocalPlayerController();
 
     for (int WaitedSeconds = 0; !PC && WaitedSeconds < 120; WaitedSeconds++)
@@ -630,6 +635,15 @@ DWORD WINAPI Initialize(LPVOID)
     {
         std::cout << "Never got a local player controller - NOT travelling to " << Defines::MapName
                   << ". The gameserver will not open a lobby; restart hosting." << std::endl;
+
+        // HOST-side, and nothing else in the system can see it. From the coordinator this looks like
+        // a host that was elected and then never registered; from a player it looks like matchmaking
+        // hanging. Only this process knows the actual reason, and only at this line. NOVA-306.
+        Nova::Diag::Report(Nova::Diag::Source::Host,
+                           Nova::Diag::Category::SessionFailure,
+                           "TRAVEL", "/host/gameserver/travel", 0,
+                           "no local player controller after 120s - lobby never opened");
+        Nova::Diag::Shutdown(); // flush before the thread returns; nothing else will
         return 0; // this is the Initialize thread proc (DWORD), not a void helper
     }
 

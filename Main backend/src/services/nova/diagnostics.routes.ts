@@ -141,6 +141,53 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     return reply.send({ accepted: events.length, dropped: Math.max(0, dropped) });
   });
 
+  /**
+   * POST /nova/api/diagnostics/local
+   *
+   * The in-process components — Cobalt inside the game, Reboot inside the gameserver — report here.
+   *
+   * UNAUTHENTICATED, ON PURPOSE, AND ONLY SAFE BECAUSE OF WHERE IT LIVES. Neither DLL holds a user
+   * token, and neither should: the brief forbids transmitting credentials, and a component that
+   * harvested the player's bearer token to authenticate its own telemetry would be doing exactly
+   * that. `Config.HOST` is hard-coded to 127.0.0.1, so this endpoint is reachable only from the
+   * player's own machine — the same reasoning that already governs `/nova/api/logs/ingest`.
+   *
+   * It therefore records NO account id. These events say "something failed on this machine", and the
+   * launcher is what later attributes them to a player when it forwards them upstream with its own
+   * token. That split is deliberate: the untrusted in-game component never touches identity.
+   *
+   * Bounded the same way as the authenticated path — same parser, same caps, same clamps.
+   */
+  fastify.post('/nova/api/diagnostics/local', async (request, reply) => {
+    const body = (request.body || {}) as any;
+    const events = parseBatch(body.events);
+    if (events.length === 0) return reply.send({ accepted: 0 });
+
+    // One shared bucket for the whole machine, since there is no account to key on. A broken local
+    // component must not be able to fill the store either.
+    if (!takeTokens('__local__', events.length)) {
+      reply.header('retry-after', '30');
+      return reply.status(429).send({ accepted: 0 });
+    }
+
+    for (const ev of events) {
+      recordDiagnostic({
+        category: ev.category,
+        source: ev.source,
+        component: ev.component,
+        correlationId: ev.correlationId,
+        count: ev.count,
+        method: ev.method,
+        url: ev.url,
+        version: ev.build,
+        status: ev.status,
+        detail: ev.detail,
+        // No accountId: this endpoint has no authenticated identity and must not invent one.
+      });
+    }
+    return reply.send({ accepted: events.length });
+  });
+
   /** GET /nova/api/incidents — ranked, spiking first. Admin only. */
   fastify.get('/nova/api/incidents', async (request, reply) => {
     if (!adminOk(request)) return adminRefused(reply);

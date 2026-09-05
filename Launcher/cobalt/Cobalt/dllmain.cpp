@@ -3,6 +3,7 @@
 #include <iostream>
 #include <detours.h>
 #include "log.h"
+#include "diagnostics.h"
 #include "curlhook.h"
 #include "exithook.h"
 #include <MinHook/MinHook.h>
@@ -436,6 +437,11 @@ DWORD WINAPI Main(LPVOID)
     // else in Cobalt changes — every std::cout below still works exactly as before.
     Cobalt::Log::Init();
 
+    // The structured channel, alongside the log one. Different job: the log says what THIS machine
+    // did, in free text, at 750 ms; this says what KIND of failure happened, aggregated, every 30 s,
+    // so the coordinator can count it across every player. See diagnostics.h for the cost budget.
+    Nova::Diag::Init("cobalt", "7.40");
+
 #ifndef URL_HOST // todo staticassert?
     std::cout << "\n\n\n!!!!!!! URL_HOST IS NOT DEFINED !!!!!!!\n\n\n\n";
 #else
@@ -509,6 +515,11 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         CreateThread(0, 0, Main, 0, 0, 0);
         break;
     case DLL_PROCESS_DETACH:
+        // One best-effort flush of whatever has been aggregated but not yet sent. Neither of these
+        // joins its worker thread — joining from DLL_PROCESS_DETACH deadlocks against the loader
+        // lock, so a lost final batch is the correct trade against hanging the game on exit.
+        Nova::Diag::Shutdown();
+        Cobalt::Log::Shutdown();
         break;
     }
     return TRUE;

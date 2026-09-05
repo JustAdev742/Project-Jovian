@@ -149,10 +149,12 @@
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="log.cpp" />
+    <ClCompile Include="diagnostics.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="curlhook.h" />
     <ClInclude Include="log.h" />
+    <ClInclude Include="diagnostics.h" />
     <ClInclude Include="exithook.h" />
     <ClInclude Include="memcury.h" />
     <ClInclude Include="settings.h" />

@@ -40,3 +40,8 @@ Nova-Multiplayer-Test.zip
 # archives, SDKs). Reference material, not source — it is read, never built. Findings
 # distilled from it live in VERSION_COMPATIBILITY.md and PROJECT_MEMORY.md.
 Full documentation/
+
+# C++ test harness build output (tests/build-and-run.cmd regenerates it)
+Launcher/cobalt/Cobalt/tests/*.exe
+Launcher/cobalt/Cobalt/tests/*.obj
+Launcher/cobalt/Cobalt/tests/*.pdb

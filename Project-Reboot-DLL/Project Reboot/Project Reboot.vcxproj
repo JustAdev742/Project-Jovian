@@ -185,6 +185,7 @@
     <ClCompile Include="log.cpp" />
     <ClCompile Include="loot.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="diagnostics.cpp" />
     <ClCompile Include="gui.cpp" />
     <ClCompile Include="mem.cpp" />
     <ClCompile Include="mem.h" />
@@ -197,6 +198,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="abilities.h" />
+    <ClInclude Include="diagnostics.h" />
     <ClInclude Include="ai.h" />
     <ClInclude Include="json.hpp" />
     <ClInclude Include="moderation.h" />

@@ -34,7 +34,11 @@ const TARGET = process.env.NOVA_COORDINATOR || 'https://clientfinder.tail0a8fd0.
 const AGENT = process.env.NOVA_LOCAL_AGENT || 'http://127.0.0.1:3552';
 
 /** Paths served by the local host agent rather than the coordinator (see the header). */
-const LOCAL_PREFIXES = ['/nova/api/host/', '/nova/api/logs', '/nova/api/components'];
+// `/nova/api/diagnostics/local` is in this list for a SECURITY reason, not a routing one. It is
+// deliberately unauthenticated — Cobalt and Reboot hold no credential and must not — which is
+// only safe while it is reachable from this machine alone. Forwarding it upstream would put an
+// open ingest endpoint on the coordinator, which Tailscale Funnel publishes to the internet.
+const LOCAL_PREFIXES = ['/nova/api/host/', '/nova/api/logs', '/nova/api/components', '/nova/api/diagnostics/local'];
 
 function isLocal(url) {
   const path = (url || '/').split('?')[0].toLowerCase();
