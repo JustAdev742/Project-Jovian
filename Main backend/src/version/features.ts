@@ -110,6 +110,34 @@ export const FEATURES: readonly FeatureRecord[] = [
     notes: 'Recorded because it is the one hard fact the escape produced. Do not add `kid` on this basis alone; nothing in Nova needs it.',
   },
 
+  {
+    feature: 'auth.clientId.eraSignal',
+    subsystem: 'auth',
+    description: 'What the OAuth client id in the Basic auth header tells you about the caller.',
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: "EpicResearch docs/auth/auth_clients.md lists 112 clients with ids and secrets, 17 of them Fortnite game clients. The table is partitioned by PLATFORM and storefront region, never by game version — there is one PC game client id for everything, and the words 'chapter' and 'season' do not occur anywhere in that corpus.",
+      detail: "So the id gives the platform and NOT the era. The only era signal is a floor inferred from hardware names: a PS5 or Series X client cannot be a 2019 build. That is INFERRED, rules eras out rather than in, and is used only to raise a diagnostic — never to reject a request.",
+    }],
+    implementation: 'services/version/clients.ts — clientById(), eraConflict()',
+    failureBehaviour: 'An unrecognised client id is simply unknown; the request proceeds on the User-Agent alone.',
+    tests: ['version.test.ts — client registry and era-floor conflicts'],
+    notes: "The useful half of this row is the NEGATIVE result. Era cannot be derived from the client id, so the User-Agent stays the primary signal and no amount of client-id work will change that.",
+  },
+  {
+    feature: 'mcp.envelope.undocumented',
+    subsystem: 'mcp',
+    description: 'Whether the MCP profile RESPONSE envelope is documented anywhere in the supplied corpus.',
+    timeline: [{
+      atMajor: null, change: 'UNKNOWN', confidence: 'CONFIRMED',
+      evidence: "Definitively not. A full sweep of EpicResearch (160 files) for profileChanges, profileRevision, profileCommandRevision, responseVersion, profileChangesBaseRevision and multiUpdate returns ZERO hits, and there is not one `## Response` heading in the whole docs/mcp tree — the headings are Payload (80), Attributes (79), Parameters (63). It is a request-only reference.",
+      detail: "The 753-file FortniteEndpointsDocumentation corpus is the same: it documents request bodies, not envelopes. So the envelope Nova sends is reconstructed from the 7.40 CLIENT BINARY (which fields it reads) and from reference implementations — not from any specification.",
+    }],
+    implementation: 'services/mcp/mcp.routes.ts',
+    failureBehaviour: 'Undefined; 7.40 accepts what is currently sent.',
+    notes: "Recorded as a CONFIRMED absence so nobody spends another session looking. What would settle it: a captured response from a live Epic MCP, or a client binary's parser. This is why mcp.rvn.serverAuthoritative stays unfixed — there is nothing authoritative to fix it against.",
+  },
+
   // ── mcp ────────────────────────────────────────────────────────────────────────────────────────
   {
     feature: 'mcp.profile.operation',

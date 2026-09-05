@@ -13,6 +13,7 @@
  * major it has no evidence for.
  */
 import { eraForMajor, NEWEST_KNOWN_MAJOR } from './builds';
+import { clientById, eraConflict } from './clients';
 
 /** How much weight the identification carries. Mirrors the project-wide evidence grades. */
 export type VersionConfidence =
@@ -39,6 +40,14 @@ export interface GameVersion {
   signals: string[];
   /** Stable id for keying compatibility profiles and diagnostics, e.g. "7.40" or "unknown". */
   id: string;
+  /** Platform, when the OAuth client id identifies one. CONFIRMED from the client registry. */
+  platform?: string;
+  /**
+   * Set when the client id and the parsed build cannot both be true — a PS5 client claiming a 2019
+   * build. Advisory only: the underlying floor is INFERRED, so this raises a diagnostic and never
+   * rejects a request.
+   */
+  eraConflict?: string;
 }
 
 /**
@@ -49,6 +58,23 @@ export interface GameVersion {
  */
 const RELEASE_RE = /Release-(\d+)\.(\d+)/;
 const CL_RE = /CL-(\d+)/;
+
+/**
+ * Pull the client id out of `Authorization: basic base64(clientId:secret)`.
+ *
+ * Case-insensitive on the scheme because Fortnite sends a lowercase `basic`, which is legal and has
+ * caught this project out before in auth.routes.ts.
+ */
+function basicAuthClientId(headers: Record<string, unknown>): string {
+  const raw = String(headers['authorization'] ?? '');
+  if (!/^basic\s+/i.test(raw)) return '';
+  try {
+    const decoded = Buffer.from(raw.replace(/^basic\s+/i, ''), 'base64').toString('utf-8');
+    return decoded.split(':')[0] ?? '';
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Identify the client version from a request's headers.
@@ -67,6 +93,14 @@ export function identifyVersion(
   const release = RELEASE_RE.exec(ua);
   const cl = CL_RE.exec(ua);
 
+  // SECOND SIGNAL: the OAuth client id, from the Basic auth header the client sends on its very
+  // first request. It does not depend on the User-Agent being parseable, which is the point.
+  //
+  // It identifies the PLATFORM, not the era — Epic's client table is partitioned by platform and
+  // region, and one PC id covers every Fortnite version there has ever been. See clients.ts. So it
+  // corroborates and annotates; it never decides the build.
+  const client = clientById(basicAuthClientId(headers));
+
   if (!release) {
     // No version in the request at all: the launcher, tooling, or proxied traffic. Answer with the
     // configured target and be honest that it is a default. Note season/chapter still come from the
@@ -79,8 +113,9 @@ export function identifyVersion(
       chapter: era?.chapter ?? null,
       buildString: ua || 'unknown',
       confidence: 'UNKNOWN',
-      signals: ['fallback:configured-target'],
+      signals: client ? ['fallback:configured-target', 'client-id:platform'] : ['fallback:configured-target'],
       id: 'unknown',
+      platform: client?.platform,
     };
   }
 
@@ -93,6 +128,10 @@ export function identifyVersion(
 
   const changelist = cl ? parseInt(cl[1], 10) : undefined;
   if (changelist !== undefined) signals.push('user-agent:CL');
+  if (client) signals.push('client-id:platform');
+
+  const conflict = eraConflict(client?.clientId ?? '', major);
+  if (conflict) signals.push('client-id:era-conflict');
 
   return {
     major,
@@ -106,6 +145,8 @@ export function identifyVersion(
     confidence: era ? 'CONFIRMED' : 'STRONGLY_SUPPORTED',
     signals,
     id: `${major}.${String(minor).padStart(2, '0')}`,
+    platform: client?.platform,
+    eraConflict: conflict ?? undefined,
   };
 }
 

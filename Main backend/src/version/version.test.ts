@@ -27,6 +27,7 @@ import { BUILD_ERAS, eraForMajor, NEWEST_KNOWN_MAJOR } from './builds';
 import { identifyVersion, atOrAfter, before as beforeVersion, isBeyondKnownBuilds } from './identify';
 import { FEATURES, stateAt, supportLevel, supportReport, getFeature } from './features';
 import { KEYCHAINS, keychainForBuild, buildString } from './keychain';
+import { FORTNITE_CLIENTS, clientById, eraConflict, DEFAULT_PC_CLIENT_ID } from './clients';
 
 /** The exact User-Agent 7.40 sends. Taken from a real session, not composed. */
 const UA_740 = 'Fortnite/++Fortnite+Release-7.40-CL-5046157 Windows/10.0.17763.1.256.64bit';
@@ -124,6 +125,80 @@ describe('version identification', () => {
     assert.ok(!atOrAfter(v, 7, 41));
     assert.ok(beforeVersion(v, 8));
     assert.ok(!beforeVersion(v, 7, 40));
+  });
+});
+
+describe('client id — a second signal, and an honest one about its limits', () => {
+  const basic = (clientId: string) =>
+    'basic ' + Buffer.from(`${clientId}:secret`).toString('base64');
+
+  test('the registry matches the corpus', () => {
+    assert.equal(FORTNITE_CLIENTS.length, 17, 'the corpus lists 17 Fortnite game clients');
+    const ids = FORTNITE_CLIENTS.map((c) => c.clientId);
+    assert.equal(new Set(ids).size, ids.length, 'duplicate client id');
+    for (const c of FORTNITE_CLIENTS) {
+      assert.match(c.clientId, /^[0-9a-f]{32}$/, `${c.name} has a malformed id`);
+    }
+    assert.equal(clientById(DEFAULT_PC_CLIENT_ID)!.name, 'fortnitePCGameClient');
+  });
+
+  test('the client id yields a PLATFORM, never an era', () => {
+    // The important negative result. Epic's table is partitioned by platform and region; one PC id
+    // covers every Fortnite version there has ever been.
+    const pc = clientById(DEFAULT_PC_CLIENT_ID)!;
+    assert.equal(pc.platform, 'PC');
+    assert.equal(pc.eraSignal, 'NONE');
+    assert.equal(pc.notBeforeMajor, undefined, 'a PC client must never imply an era');
+  });
+
+  test('platform is attached to the identified version', () => {
+    const v = identifyVersion(
+      { 'user-agent': UA_740, authorization: basic(DEFAULT_PC_CLIENT_ID) },
+      7,
+    );
+    assert.equal(v.platform, 'PC');
+    assert.ok(v.signals.includes('client-id:platform'));
+    assert.equal(v.major, 7, 'the client id must not disturb the parsed build');
+  });
+
+  test('a lowercase `basic` scheme is accepted', () => {
+    // Fortnite sends lowercase, which is legal and has caught this project out before.
+    const v = identifyVersion({ 'user-agent': UA_740, authorization: basic(DEFAULT_PC_CLIENT_ID) }, 7);
+    assert.equal(v.platform, 'PC');
+    const upper = identifyVersion(
+      { 'user-agent': UA_740, authorization: 'Basic ' + Buffer.from(`${DEFAULT_PC_CLIENT_ID}:x`).toString('base64') },
+      7,
+    );
+    assert.equal(upper.platform, 'PC');
+  });
+
+  test('a PS5 client claiming a 2019 build is flagged, not rejected', () => {
+    // Hardware floors rule eras OUT, never in — and the floor is INFERRED, so it may only raise a
+    // diagnostic. Refusing service on an inference would be a Rule 5 violation with a 403 attached.
+    const ps5 = FORTNITE_CLIENTS.find((c) => c.name === 'fortnitePS5EUGameClient')!;
+    const v = identifyVersion(
+      { 'user-agent': UA_740, authorization: basic(ps5.clientId) },
+      7,
+    );
+    assert.ok(v.eraConflict, 'a PS5 client on a 7.40 build is impossible and should say so');
+    assert.match(v.eraConflict!, /post-dates/);
+    assert.equal(v.major, 7, 'the request is still identified and served');
+    assert.equal(v.confidence, 'CONFIRMED', 'the conflict must not downgrade a parsed version');
+  });
+
+  test('the same PS5 client on a plausible build raises nothing', () => {
+    const ps5 = FORTNITE_CLIENTS.find((c) => c.name === 'fortnitePS5EUGameClient')!;
+    assert.equal(eraConflict(ps5.clientId, 20), null, 'major 20 is after the PS5 floor');
+    assert.equal(eraConflict(DEFAULT_PC_CLIENT_ID, 7), null, 'a PC client can be any era');
+    assert.equal(eraConflict('not-a-client', 7), null, 'an unknown id says nothing');
+  });
+
+  test('a malformed Authorization header is ignored, not fatal', () => {
+    for (const h of ['basic !!!not-base64!!!', 'bearer eg1~x', 'basic ', '']) {
+      const v = identifyVersion({ 'user-agent': UA_740, authorization: h }, 7);
+      assert.equal(v.major, 7, `header ${JSON.stringify(h)} broke identification`);
+      assert.equal(v.platform, undefined);
+    }
   });
 });
 
