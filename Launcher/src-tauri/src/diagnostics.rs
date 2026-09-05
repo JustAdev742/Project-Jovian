@@ -141,15 +141,81 @@ fn scan_game_logs(dirs: &[PathBuf]) -> Vec<PathBuf> {
     found.into_iter().map(|(_, p)| p).collect()
 }
 
-/// Is anything listening? Used for the two local ports the game depends on.
-fn port_open(port: u16) -> bool {
+/// What a port identity probe found.
+#[derive(PartialEq, Debug)]
+enum PortIdentity {
+    /// Nothing accepted a connection.
+    Closed,
+    /// Something is listening, but it did not answer as Nova. **This is the interesting one** — it
+    /// is indistinguishable from healthy under a bare connect test, and it is exactly what a stale
+    /// backend from a previous run, or an unrelated program holding the port, looks like.
+    Foreign,
+    /// Nova answered.
+    Nova,
+}
+
+/// Ask the port who it is, instead of only whether it is there.
+///
+/// `port_open()` alone passes on any TCP accept, so NOVA-201/202 reported "listening" for a hung
+/// backend left over from a previous launch or for an unrelated program that happened to grab 3551
+/// — the precise failure the NOVA-201 advice text tells the player to look for. A green tick there
+/// is worse than no check, because it sends the search somewhere else.
+///
+/// `/nova/api/components` is the right thing to ask for. nova-proxy keeps it LOCAL (proxy.js
+/// LOCAL_PREFIXES), so on 3551 a good answer proves the proxy is up AND routing to the host agent,
+/// and it does not depend on the coordinator being reachable — which is a different question with
+/// its own code (NOVA-203/204) and must not be conflated with this one.
+///
+/// Written against a raw socket rather than reqwest because `run_diagnostics` is synchronous and
+/// this needs to stay well under a second.
+fn probe_nova(port: u16) -> PortIdentity {
+    use std::io::Write;
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::time::Duration;
-    TcpStream::connect_timeout(
+
+    let Ok(mut s) = TcpStream::connect_timeout(
         &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         Duration::from_millis(400),
-    )
-    .is_ok()
+    ) else {
+        return PortIdentity::Closed;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
+    let _ = s.set_write_timeout(Some(Duration::from_millis(400)));
+
+    let req = format!(
+        "GET /nova/api/components HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    if s.write_all(req.as_bytes()).is_err() {
+        return PortIdentity::Foreign;
+    }
+
+    // Bounded read: a foreign server could stream forever, and this must not become the slow part
+    // of a diagnostic nobody then runs.
+    let mut buf = [0u8; 4096];
+    let mut got = Vec::new();
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                got.extend_from_slice(&buf[..n]);
+                if got.len() >= 8192 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let text = String::from_utf8_lossy(&got);
+    // Nova answers 200 with {"components": …}. Both halves are required: a foreign server that 200s
+    // on every path is common, and a body check alone would be fooled by an error page quoting the
+    // requested URL back.
+    let ok_status = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
+    if ok_status && text.contains("\"components\"") {
+        PortIdentity::Nova
+    } else {
+        PortIdentity::Foreign
+    }
 }
 
 /// Resolve a host through the OS resolver, on a worker thread with a hard timeout.
@@ -340,25 +406,42 @@ fn check_services(out: &mut Vec<Finding>) {
     // 3551 is the local address every Epic request gets rewritten to. If nothing is listening there,
     // the game's requests fail outright — this was the first laptop failure of the night, and from
     // the game's side it just looks like the internet is broken.
-    if port_open(3551) {
-        out.push(Finding::new("NOVA-201", Level::Ok, "Nova's game connection is listening", "", ""));
-    } else {
-        out.push(Finding::new(
+    match probe_nova(3551) {
+        PortIdentity::Nova => out.push(Finding::new(
+            "NOVA-201", Level::Ok, "Nova's game connection is listening", "", "",
+        )),
+        PortIdentity::Foreign => out.push(Finding::new(
+            "NOVA-201", Level::Error, "Something else is using Nova's game port (3551)",
+            "Everything the game asks for is redirected to port 3551, and something is listening there — \
+             but it isn't Nova. That is usually a leftover copy of Nova from an earlier launch that never \
+             shut down, or another program that took the port first. The game will sign in to nothing and \
+             sit on the loading screen.",
+            "Close the launcher fully, check Task Manager for a leftover node.exe, and reopen it.",
+        )),
+        PortIdentity::Closed => out.push(Finding::new(
             "NOVA-201", Level::Error, "Nothing is listening on Nova's game port (3551)",
             "Everything the game asks for is redirected to this port. With nothing there, the game can't \
              sign in or reach a match — it will usually sit on the loading screen.",
             "Close the launcher fully and reopen it. If it persists, another program may be using port 3551.",
-        ));
+        )),
     }
 
-    if port_open(3552) {
-        out.push(Finding::new("NOVA-202", Level::Ok, "Nova's local service is running", "", ""));
-    } else {
-        out.push(Finding::new(
+    match probe_nova(3552) {
+        PortIdentity::Nova => out.push(Finding::new(
+            "NOVA-202", Level::Ok, "Nova's local service is running", "", "",
+        )),
+        PortIdentity::Foreign => out.push(Finding::new(
+            "NOVA-202", Level::Error, "Something else is using Nova's local port (3552)",
+            "Nova's own service should be on port 3552, but whatever is answering there isn't it. A \
+             leftover copy from an earlier launch is the usual cause — and it will also still be holding \
+             Nova's database open.",
+            "Close the launcher fully, end any leftover node.exe in Task Manager, then reopen it.",
+        )),
+        PortIdentity::Closed => out.push(Finding::new(
             "NOVA-202", Level::Warn, "Nova's local service isn't responding (3552)",
             "This is the part of Nova that runs on your own PC. It may still be starting.",
             "Give it a few seconds. If it stays down, restart the launcher.",
-        ));
+        )),
     }
 }
 
@@ -666,6 +749,92 @@ mod tests {
     const REAL_ESCAPE: &str = r#"[2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: PARSE: HttpResult: 401 Code: 1014 Error: Failure ErrorCode=errors.com.epicgames.common.oauth.invalid_token, Message=Token is missing key ID value, Raw={"errorCode":"errors.com.epicgames.common.oauth.invalid_token","errorMessage":"Token is missing key ID value","messageVars":[],"numericErrorCode":1014,"originatingService":"friends","intent":"prod"}
 [2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: Invalid response. CorrId=FN-Yb8rP6eIXEqknl12zZj8vQ code=401 error=Failure
 [2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: QueryFriendSettings request failed. (wasUpdate: 0) Token is missing key ID value"#;
+
+
+    /// Spawn a one-shot localhost server that replies with `response`, and return its port.
+    /// `None` means accept the connection and say nothing — a hung server, which is the case a
+    /// connect-only check most obviously gets wrong.
+    fn serve_once(response: Option<&'static str>) -> u16 {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                // Drain the request so the client's write completes.
+                let mut scratch = [0u8; 1024];
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                let _ = sock.read(&mut scratch);
+                if let Some(body) = response {
+                    let _ = sock.write_all(body.as_bytes());
+                } else {
+                    // Hold the connection open briefly, then drop it without answering.
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_real_nova_answer_is_recognised() {
+        let body = "{\"components\":[]}";
+        let resp: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .into_boxed_str(),
+        );
+        assert_eq!(probe_nova(serve_once(Some(resp))), PortIdentity::Nova);
+    }
+
+    #[test]
+    fn a_closed_port_is_closed() {
+        // Bind then drop, so the port is known to have been free and is now unbound.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        assert_eq!(probe_nova(port), PortIdentity::Closed);
+    }
+
+    #[test]
+    fn another_program_on_the_port_is_not_mistaken_for_nova() {
+        // THE REGRESSION. Under the old connect-only check this passed as healthy, and the player
+        // was told Nova was listening while the game talked to something else entirely.
+        let resp: &'static str =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>hello</html>";
+        assert_eq!(probe_nova(serve_once(Some(resp))), PortIdentity::Foreign);
+    }
+
+    #[test]
+    fn a_server_that_200s_on_everything_is_still_not_nova() {
+        // A catch-all that echoes the path back would fool a body-only check.
+        let resp: &'static str =
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nnot found: /nova/api/components";
+        assert_eq!(probe_nova(serve_once(Some(resp))), PortIdentity::Foreign);
+    }
+
+    #[test]
+    fn an_error_status_is_not_nova_even_with_the_right_word_in_the_body() {
+        let resp: &'static str =
+            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n{\"components\":[]}";
+        assert_eq!(probe_nova(serve_once(Some(resp))), PortIdentity::Foreign);
+    }
+
+    #[test]
+    fn a_hung_server_is_foreign_not_nova_and_does_not_block() {
+        // A stale backend that accepts connections but never answers is the exact thing the old
+        // check called healthy. It must also not hang the self-check.
+        let port = serve_once(None);
+        let started = std::time::Instant::now();
+        let verdict = probe_nova(port);
+        assert_eq!(verdict, PortIdentity::Foreign);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the probe must stay fast enough that people actually run the self-check",
+        );
+    }
 
     #[test]
     fn detects_the_real_observed_escape() {
