@@ -235,5 +235,10 @@ Carried forward with their grades; none changed in this session.
   exception. CONFIRMED.
 - **`backend-eaddrinuse-zombie`** (`index.ts`) — a backend that loses the port race logs the error
   and keeps running with no HTTP surface. CONFIRMED.
-- **Version adapters do not exist.** Adequate for a single-target deployment; a prerequisite for a
-  second one.
+- ~~**Version adapters do not exist.**~~ **Addressed 2026-09-05.** `src/version/` now holds a
+  corpus-derived build registry, confidence-carrying version identification, and a compatibility
+  table that computes SUPPORTED vs IMPLEMENTED rather than asserting it. See
+  [CROSS_VERSION_ARCHITECTURE.md](CROSS_VERSION_ARCHITECTURE.md). What remains is not
+  architecture but **evidence**: most non-Chapter-1 rows are UNKNOWN because the corpus grades
+  its own Chapter 2-4 material as inference. And the native components stay 7.40-only — Cobalt
+  and Reboot resolve offsets by signature scan, which no backend adapter can address.

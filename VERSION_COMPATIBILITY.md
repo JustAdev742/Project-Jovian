@@ -320,11 +320,24 @@ one implying migrations this backend does not perform.
 
 ## 4. Version handling in the code
 
-`middleware/version-router.ts` parses `Release-(\d+)\.(\d+)` and `CL-(\d+)` from the User-Agent onto
-`request.gameVersion`, falling back to `Config.SEASON_NUMBER` (7) when unparseable.
+**Rebuilt 2026-09-05 — see [CROSS_VERSION_ARCHITECTURE.md](CROSS_VERSION_ARCHITECTURE.md).**
 
-**This is the whole of the version model.** There are no version adapters, and `season` is set to
-`major`, which is only true in Chapter 1. Beyond Chapter 1 that field is wrong by construction.
+`middleware/version-router.ts` is now glue only; the model lives in `src/version/`:
+
+| module | role |
+|---|---|
+| `version/builds.ts` | major → (chapter, season). 42 majors, Chapters 1-7, derived from the corpus. CONFIRMED |
+| `version/identify.ts` | request → `GameVersion` with an explicit confidence and the signals used |
+| `version/features.ts` | the compatibility table, and `supportLevel()` |
+
+`season` is no longer `major`. It is the season WITHIN the chapter, and it is `null` for a build the
+registry has never seen rather than a guess.
+
+**The trap that correction exposed, and which is now encoded:** Epic's timeline uses the CONTINUOUS
+major for `seasonNumber` / `athenaseason<n>` — `Calendar.md` shows `seasonNumber: 24` for what the
+registry independently places at Chapter 4 Season 2. Wire formats therefore read `major`;
+`chapter`/`season` are for human-facing reasoning. In Chapter 1 the two coincide, which is why 7.40
+could never have revealed this.
 
 - For a 7.40-only deployment: **adequate**, and the fallback is correct.
 - Before any second target build is added: `gameVersion` is the right hook, but the compatibility
