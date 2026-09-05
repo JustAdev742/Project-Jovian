@@ -281,6 +281,19 @@ export const FEATURES: readonly FeatureRecord[] = [
     tests: ['version.test.ts — the playlists offered are ones the 7.40 client actually knows'],
   },
   {
+    feature: 'playlists.perEra',
+    subsystem: 'playlists',
+    description: 'Serving each build era the playlist set that era actually had.',
+    timeline: [{
+      atMajor: null, change: 'UNKNOWN', confidence: 'UNKNOWN',
+      evidence: "Investigated 2026-09-05 and rejected on evidence. The only playlist data in the corpus is Fortnite-Datamining data/playlists/current.json — a SNAPSHOT taken at build 42.00, whose earliest `added` date is 2020-09-25. It therefore contains no Chapter 1 playlists at all, and serving it to a Chapter 1 or 2 client would advertise modes that build has never heard of.",
+      detail: "The per-playlist `added` dates are real introduction evidence for the modern era, but converting a date to a build needs a date→build table this project does not have, and none of it reaches back before Chapter 2 Season 4.",
+    }],
+    implementation: 'services/social/social.routes.ts serves a fixed Chapter 1 set (evidenced from the 7.40 binary)',
+    failureBehaviour: 'A build offered an unknown playlist simply shows no matchmaking option for it.',
+    notes: "Deliberately NOT implemented per-era. What would settle it: a client binary per era, which yields that build's playlist literals directly — the same scan that produced the 7.40 set.",
+  },
+  {
     feature: 'worldstate.poi.perBuild',
     subsystem: 'worldstate',
     description: 'Which named locations exist on the map for a given build.',
