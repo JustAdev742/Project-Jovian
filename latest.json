@@ -1,10 +1,10 @@
 {
   "version": "1.6.0",
   "notes": "- Cross-version: the backend now serves each build its own season, lobby background and cosmetic keys instead of Chapter 1 Season 7 to everyone. Covers Chapters 1-4 for the data the evidence supports.\n- Per-build cosmetic keys from the AES archive - 75 builds, 634 keys. A build the archive does not cover gets none rather than another build’s.\n- Distributed diagnostics: the game and the match server report structured failures, aggregated locally and forwarded by the launcher, with a ranked incident dashboard on the coordinator.\n- Self-check: four codes could never fire. NOVA-300/301/303/305 read the game log from a folder it is not in, and NOVA-307 grepped the wrong file entirely. All now work.\n- Port checks ask what is listening, not just whether something is, so a leftover process no longer reads as healthy.\n- A backend that cannot claim its port exits loudly instead of running on with no HTTP surface.\n- Session tokens forwarded by in-game components are redacted before they are stored or served.",
-  "pub_date": "2026-09-05T12:18:48Z",
+  "pub_date": "2026-09-05T12:23:37Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVlsVEFLaGtCd0ZTWGxTWExRYzVJRjlCZGNDQi8ya2FnSiszK1YzVEhMQ3dOZmkrdDhheWYwU2duV2UxYUZqdHJpZlBKS1pFa0NBMjVaemR6MnRHWlFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NjEwNzEzCWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjYuMF94NjQtc2V0dXAubnNpcy56aXAKdTFibHplZjhjYS81THRjRnJBWHNOem1yQ0VxcjJ2N0cyeUhOZWtUdHJJNUlhem1DS2ZyQUUzMFliQkxnZ1ZFSnJIQXIrL3VEZklUSnk2SnpUdEt0QWc9PQo=",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bWRFZ25reS9EazVwZTJ3ZzZweTJZV0x6bWUwZDlhemRML2ZjMktJZFN4UjJQc3piTWIwUFRaSU5MZTVRVVRYbHJiU3plcEJtTlNMVnFzb0g4TkZGUFFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NjExMDE3CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjYuMF94NjQtc2V0dXAubnNpcy56aXAKT0hEdmE0UHowSVlVQ0M4Q3BWc3AzQ0lmTjZYWVFXUHZyd3FwYnpKZEI2ZDV6bDBOZ2YrcjlzTEpOdmhYYjlpY1Z3S0hLNkpNWTZUeDZaYjZkTldPQ2c9PQo=",
       "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.6.0/Project.Launcher_1.6.0_x64-setup.nsis.zip"
     }
   }
