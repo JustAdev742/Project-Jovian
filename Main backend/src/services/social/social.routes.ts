@@ -443,7 +443,10 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
   // ═══════════════════════════════════════════════
 
   /** Content pages (news, etc.) */
-  fastify.get('/content/api/pages/fortnite-game', async (_, reply) => {
+  fastify.get('/content/api/pages/fortnite-game', async (request, reply) => {
+    // Same source as the timeline, so the lobby stage and the advertised season never disagree.
+    const lobbySeason = Number((request as any).gameVersion?.major) || Config.SEASON_NUMBER;
+
     const now = new Date().toISOString();
     return reply.send({
       _title: 'Fortnite Game',
@@ -486,10 +489,15 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
         backgrounds: {
           backgrounds: [
             { stage: 'defaultnotifications', _type: 'DynamicBackground', key: 'lobby' },
-            // Season-driven so the lobby background matches the season the timeline advertises (and
-            // the build the client is on). Hardcoding season 8 gave a 7.40 (S7) client a stage it has
-            // no assets for → blank lobby background.
-            { stage: `lobbyseason${Config.SEASON_NUMBER}`, _type: 'DynamicBackground', key: 'lobby' },
+            // Driven by the REQUESTING BUILD, not by Config. Hardcoding season 8 once gave a 7.40
+            // client a stage it has no assets for and a blank lobby; using Config.SEASON_NUMBER
+            // fixed that for 7.40 and reintroduced the same fault for every other build, since a
+            // Chapter 2 client was still told `lobbyseason7`. Found by diffing this endpoint across
+            // four builds after the version model landed — it reported as version-varying because
+            // OTHER fields varied, while this one silently did not.
+            //
+            // The MAJOR, matching the timeline's seasonNumber. See calendar.seasonNumber.isMajor.
+            { stage: `lobbyseason${lobbySeason}`, _type: 'DynamicBackground', key: 'lobby' },
           ],
         },
       },

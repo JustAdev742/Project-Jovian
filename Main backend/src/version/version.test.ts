@@ -293,6 +293,79 @@ before(async () => {
 const as740 = (url: string) =>
   app.inject({ method: 'GET', url, headers: { 'user-agent': UA_740 } });
 
+describe('the backend actually serves different builds differently', () => {
+  // The claim "cross-version" is empty unless responses differ. This drives the REAL handlers with
+  // real User-Agents across four chapters and asserts each gets its own era's content — and, just as
+  // importantly, that the things which SHOULD be identical still are.
+  const asBuild = (build: string, url: string) =>
+    app.inject({
+      method: 'GET', url,
+      headers: { 'user-agent': `Fortnite/++Fortnite+Release-${build}-CL-9999999 Windows/10.0.17763` },
+    });
+
+  const CASES = [
+    { build: '7.40',  chapter: 1, season: 7,  major: 7 },
+    { build: '8.30',  chapter: 1, season: 8,  major: 8 },
+    { build: '11.31', chapter: 2, season: 1,  major: 11 },
+    { build: '19.01', chapter: 3, season: 1,  major: 19 },
+    { build: '23.10', chapter: 4, season: 1,  major: 23 },
+  ];
+
+  test("the timeline advertises each build's own season", async () => {
+    for (const c of CASES) {
+      const body = (await asBuild(c.build, '/fortnite/api/calendar/v1/timeline')).json();
+      const state = body.channels['client-events'].states[0];
+      assert.equal(state.state.seasonNumber, c.major, `${c.build} got the wrong seasonNumber`);
+      assert.equal(state.state.seasonTemplateId, `AthenaSeason:athenaseason${c.major}`);
+      const flags = state.activeEvents.map((e: any) => e.eventType);
+      assert.ok(flags.includes(`EventFlag.Season${c.major}`), `${c.build} missing its season flag`);
+    }
+  });
+
+  test('the lobby background follows the build, not a config constant', async () => {
+    // This was version-blind until 2026-09-05: every build got lobbyseason7 because the handler read
+    // Config.SEASON_NUMBER. The endpoint still reported as "varying by build" because OTHER fields
+    // varied, which is why this is asserted per field rather than by diffing whole responses.
+    for (const c of CASES) {
+      const body = (await asBuild(c.build, '/content/api/pages/fortnite-game')).json();
+      const stages = body.dynamicbackgrounds.backgrounds.backgrounds.map((b: any) => b.stage);
+      assert.ok(stages.includes(`lobbyseason${c.major}`), `${c.build} got ${JSON.stringify(stages)}`);
+    }
+  });
+
+  test('each build gets its own cosmetic chunk keys, or none', async () => {
+    const counts = new Map<string, number>();
+    for (const c of CASES) {
+      const keys = (await asBuild(c.build, '/fortnite/api/storefront/v2/keychain')).json();
+      assert.ok(Array.isArray(keys));
+      counts.set(c.build, keys.length);
+    }
+    assert.equal(counts.get('7.40'), 2, "7.40's two verified keys must not change");
+    // At least two builds must differ, or the per-build lookup is doing nothing.
+    assert.ok(new Set(counts.values()).size > 1, `all builds returned the same key count: ${[...counts]}`);
+    // A build the archive does not cover gets nothing rather than someone else's keys.
+    assert.equal(counts.get('23.10'), 0, '23.10 is not in the archive and must get an empty keychain');
+  });
+
+  test('the things that SHOULD be identical still are', async () => {
+    // A cross-version model that changes what does not need changing is a liability, not a feature.
+    for (const c of CASES) {
+      assert.deepEqual((await asBuild(c.build, '/fortnite/api/v2/versioncheck/Windows')).json(), { type: 'NO_UPDATE' });
+      assert.deepEqual((await asBuild(c.build, '/fortnite/api/game/v2/enabled_features')).json(), []);
+      const ls = (await asBuild(c.build, '/lightswitch/api/service/bulk/status')).json();
+      assert.equal(ls[0].status, 'UP');
+    }
+  });
+
+  test('no S7-specific content leaks into a later build', async () => {
+    const body = (await asBuild('11.31', '/fortnite/api/calendar/v1/timeline')).json();
+    const flags = body.channels['client-events'].states[0].activeEvents.map((e: any) => e.eventType);
+    // The Chapter 1 LTM flags are era-specific and evidenced only for seasons 7 and 8.
+    assert.ok(!flags.some((f: string) => /Frostnite|14DaysOfFortnite|Festivus|Spring2019/.test(f)),
+      `Chapter 1 event flags leaked into a Chapter 2 build: ${flags.join(', ')}`);
+  });
+});
+
 describe('7.40 baseline — the cross-version work must be built AROUND this, not over it', () => {
   test('the timeline still advertises season 7 and its Chapter 1 flags', async () => {
     const res = await as740('/fortnite/api/calendar/v1/timeline');

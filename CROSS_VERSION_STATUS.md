@@ -1,34 +1,59 @@
 # CROSS_VERSION_STATUS
 
-**Short answer: no, cross-version compatibility is not finished. The foundation is; the
-compatibility is not.**
+**Updated 2026-09-05, second pass.** The first version of this document said zero behaviour varied
+by build. That is no longer true, and the numbers below are re-measured rather than re-argued.
 
-Written 2026-09-05 because "we built a version architecture" and "the backend supports Chapter 2"
-are very different claims, and only the first one is true.
+**Where it stands: the backend now serves Chapters 1-4 differently, on confirmed evidence, for the
+things the evidence covers. It is not "done", and the remaining gap is evidence, not effort.**
 
 ---
 
-## The number that settles it
+## Measured, by driving the real handlers with real User-Agents
 
-```
-features that resolve DIFFERENTLY at major 11 (Ch2 S1) than at major 7 (Ch2 S1's Chapter-1 twin): 0
-```
+| build | chapter/season | seasonNumber | lobby stage | chunk keys |
+|---|---|---|---|---|
+| 7.40 | Ch1 S7 | 7 | `lobbyseason7` | 2 |
+| 8.30 | Ch1 S8 | 8 | `lobbyseason8` | 4 |
+| 11.31 | Ch2 S1 | 11 | `lobbyseason11` | 14 |
+| 19.01 | Ch3 S1 | 19 | `lobbyseason19` | 5 |
+| 23.10 | Ch4 S1 | 23 | `lobbyseason23` | 0 — not in the archive, so nothing rather than someone else's |
 
-Every feature in the compatibility table returns the identical state for a Chapter 2 client and a
-7.40 client. **A Chapter 2 client connecting today would be served exactly what 7.40 is served.**
-That is not cross-version compatibility; it is one version with a version-shaped frame around it.
+Three endpoints vary by build; the three sampled that do not (`versioncheck`, `enabled_features`,
+`lightswitch`) are **correct** not to, and a test asserts they stay identical. A model that changes
+what does not need changing is a liability.
 
-Supporting counts, from `supportReport()`:
+### What changed to get here
 
 | | |
 |---|---|
-| features in the table | 20 |
-| `SUPPORTED` | 7 — **all seven are Chapter 1 facts** |
-| `IMPLEMENTED` (code exists, criteria missing) | 10 |
-| `KNOWN` (understood, unimplemented) | 2 |
-| `UNKNOWN` | 1 |
-| rows whose evidence is a Chapter-1 observation | 19 of 20 |
-| rows carrying evidence about any later chapter | **1** |
+| **Per-build cosmetic keys** | `version/keychain.ts`, generated from the AES archive — 75 builds, 634 keys, CONFIRMED, Chapters 1-3. The keychain served 7.40's two keys to everyone; it now serves the requesting build's own, exact-match only |
+| **Lobby background** | was reading `Config.SEASON_NUMBER`, so every build got `lobbyseason7`. **Found by the measurement, not by the tests** — the endpoint reported as version-varying because other fields varied while this one silently did not |
+| **Timeline** | already season-driven, and now correct across chapters via the `seasonNumber = major` finding |
+
+Pinned by a five-case matrix test across four chapters, including that Chapter 1's era-specific event
+flags do not leak into a Chapter 2 build.
+
+---
+
+## What is still NOT finished
+
+**1. Coverage is only as wide as the evidence.** The AES archive stops at 19.01, so Chapter 4 builds
+get an empty keychain — correct, and not the same as supported. Beyond the season number, the lobby
+stage and the keys, a Chapter 2 client is still served Chapter 1's answers for everything else:
+playlists, storefront, MCP profile contents, quests.
+
+**2. Most of the compatibility table is still `UNKNOWN` outside Chapter 1.** The corpus grades its own
+Chapter 2-4 material as inference with no authoritative citations. Filling it in would be fabrication
+with a schema around it.
+
+**3. The native components are still locked to 7.40, and this is the binding constraint.** Cobalt and
+Reboot resolve their targets by byte-signature scan. No amount of backend work lets anyone actually
+*play* another build: the client would never be redirected, and nothing could host. **The backend is
+now ahead of what the rest of the stack can use.**
+
+**4. No second build has ever been run.** Every claim still rests on one client binary. The table
+above proves the backend *responds* per build; it does not prove any of those responses are what
+that build wants, because none has ever connected.
 
 ---
 
@@ -47,36 +72,6 @@ These are real, tested, and were not there this morning.
 The last row is the honest measure of what the foundation is worth so far: it caught a defect that
 would have broken Chapter 2 silently and could not have been found from 7.40, because in Chapter 1
 the two numbers coincide.
-
----
-
-## What is NOT finished, and why
-
-### 1. There is nothing evidenced to vary *to*
-
-The supplied corpus grades its own Chapter 2–4 material as inference with "no authoritative
-citations", and states that the live-event activation mechanism "is not public". Populating a
-compatibility matrix from that means inventing endpoint introduction and removal versions — the thing
-[AUDIT_PROMPT.md](AUDIT_PROMPT.md) Rule 5 forbids and this brief restates as "never silently upgrade
-an INFERRED behavior into CONFIRMED".
-
-So the table is mostly `UNKNOWN` outside Chapter 1 **by choice**. Filling it in would not be progress;
-it would be fabrication with a schema around it.
-
-### 2. The native components are locked to 7.40, and no backend work changes that
-
-`Cobalt.dll` finds `curl_easy_setopt` by **byte-signature scan**. `Project Reboot.dll` resolves engine
-offsets the same way. A different build compiles differently, the scan point moves, and neither DLL
-functions.
-
-**This is the binding constraint, not the backend.** Even a perfect Chapter 2 backend would not let
-anyone play Chapter 2: the client would never be redirected to it, and nothing could host. Any plan
-that starts with backend work has the order wrong.
-
-### 3. No second build has ever been run
-
-Every claim in this project rests on one client binary and six captured sessions, all 7.40. There is
-no second data point to be compatible *with*.
 
 ---
 
@@ -103,13 +98,15 @@ Three reasons, none of them "so we could say it was done":
 
 - It **found and fixed a real defect** (`seasonNumber`) that was latent and undiscoverable from the
   only build we have.
-- It makes the gap **countable**. "0 features vary by build" is a fact anyone can re-derive; "we have
-  a version architecture" is a feeling.
+- It makes the gap **countable**. The table at the top of this document is a measurement anyone can
+  re-run; "we have a version architecture" is a feeling. The first pass of this document reported
+  "0 features vary by build", which was true when written and is the reason the second pass exists.
 - It makes step 3 above cheap. When a second binary arrives the work is adding table rows, not
   designing a system while also learning a new build.
 
-**What it does not do is make the project cross-version compatible.** It makes it ready to become so,
-and honest about the distance.
+**What it does not do is make the project cross-version compatible.** It makes the backend serve
+per-build content where evidence exists, and leaves the rest honest about the distance — including
+the part no backend change can close, which is that the two native DLLs only work on 7.40.
 
 See [CROSS_VERSION_ARCHITECTURE.md](CROSS_VERSION_ARCHITECTURE.md) for the design and
 [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) for the 7.40 evidence base.
