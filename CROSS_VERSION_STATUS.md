@@ -22,6 +22,20 @@ Three endpoints vary by build; the three sampled that do not (`versioncheck`, `e
 `lightswitch`) are **correct** not to, and a test asserts they stay identical. A model that changes
 what does not need changing is a liability.
 
+### Two different numbers, and they measure different things
+
+Worth stating plainly, because the first pass of this document led with one of them:
+
+| metric | value | what it means |
+|---|---|---|
+| endpoints whose **response** differs by build | **3 of 6 sampled** | the backend genuinely serves Chapters 1-4 differently |
+| features whose **table entry** differs at major 11 vs 7 | **still 0** | we hold no version-differentiated *knowledge* — every row is either universal or Chapter-1-derived |
+
+Both are true. The behaviour varies because the *data* varies (season number, chunk keys) while the
+*rules* do not: nothing in the compatibility table yet says "this works differently after build N",
+because no evidence in the corpus establishes such a boundary. That second number is the one that
+only a second client binary can move, and it is the honest measure of how far this is from finished.
+
 ### What changed to get here
 
 | | |
