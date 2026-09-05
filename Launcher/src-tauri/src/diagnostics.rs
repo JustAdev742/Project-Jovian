@@ -90,6 +90,57 @@ fn local_appdata() -> Option<PathBuf> {
     std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
 }
 
+/// Every `FortniteGame*.log` UE4 has written, newest first.
+///
+/// WHERE THE LOG ACTUALLY IS. This used to look under the build folder
+/// (`<build>\FortniteGame\Saved\Logs\`), which does not exist for an installed client: UE4 writes a
+/// packaged build's logs to `%LOCALAPPDATA%\FortniteGame\Saved\Logs\`. So `tail()` returned None
+/// every time, `check_last_run` short-circuited to "No record of a previous game launch", and
+/// NOVA-301 / NOVA-303 / NOVA-305 — three of the most valuable codes in this file, and the ones the
+/// module header says cost two sessions to identify — had never once evaluated against real data.
+/// Verified 2026-09-05: the real file was 580 KB and a month old while the self-check reported no
+/// log at all.
+///
+/// WHY MORE THAN ONE FILE. When this PC hosts, TWO Fortnite processes run — the player's client and
+/// the gameserver — and UE4 gives the second one `FortniteGame_2.log`. Whichever is "newest" depends
+/// on which exited last, so looking at only one file silently drops half the evidence on exactly the
+/// machines that have the most interesting problems. Rotated `FortniteGame-backup-*.log` files are
+/// included too; they are how a previous run survives.
+///
+/// The build folder is still searched as a fallback, so a portable or dev layout that really does
+/// write there keeps working.
+fn game_log_candidates(build_path: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(mut p) = local_appdata() {
+        p.push("FortniteGame\\Saved\\Logs");
+        dirs.push(p);
+    }
+    if !build_path.trim().is_empty() {
+        dirs.push(PathBuf::from(build_path).join("FortniteGame\\Saved\\Logs"));
+    }
+    scan_game_logs(&dirs)
+}
+
+/// The half of `game_log_candidates` that does not depend on the environment, so it can be tested.
+/// Returns every `FortniteGame*.log` across `dirs`, newest first.
+fn scan_game_logs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if !name.starts_with("fortnitegame") || !name.ends_with(".log") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let when = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            found.push((when, entry.path()));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
 /// Is anything listening? Used for the two local ports the game depends on.
 fn port_open(port: u16) -> bool {
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -313,18 +364,45 @@ fn check_services(out: &mut Vec<Finding>) {
 
 // ── 3xx — what actually happened last run ─────────────────────────────────────────────────────────
 
-fn check_last_run(build_path: &str, out: &mut Vec<Finding>) {
-    let game_log = PathBuf::from(build_path).join("FortniteGame\\Saved\\Logs\\FortniteGame.log");
-    let log = tail(&game_log, 900_000);
+/// Every `originatingService` in the log that is NOT one Nova stamps on its own errors.
+///
+/// Nova writes exactly two: `nova-backend` (index.ts setErrorHandler) and
+/// `com.epicgames.account.public` (utils/error-handler.ts sendEpicError). An error envelope naming
+/// anything else was written by a server that is not Nova — which, for a client whose every request
+/// is supposed to be redirected to localhost, is the escape itself.
+///
+/// Returns one entry per occurrence, so the caller can report how many escaped as well as where to.
+fn foreign_services(log: &str) -> Vec<String> {
+    const NOVA_SERVICES: [&str; 2] = ["nova-backend", "com.epicgames.account.public"];
+    const KEY: &str = "\"originatingService\":\"";
+    log.match_indices(KEY)
+        .filter_map(|(i, _)| {
+            let rest = &log[i + KEY.len()..];
+            rest.find('"').map(|end| rest[..end].to_string())
+        })
+        .filter(|svc| !NOVA_SERVICES.contains(&svc.as_str()))
+        .collect()
+}
 
-    let Some(log) = log else {
+fn check_last_run(build_path: &str, out: &mut Vec<Finding>) {
+    // Read the two most recent logs, not just one: on a hosting PC those are the client and the
+    // gameserver, and the interesting line can be in either. See game_log_candidates().
+    let candidates = game_log_candidates(build_path);
+    let log: String = candidates
+        .iter()
+        .take(2)
+        .filter_map(|p| tail(p, 900_000))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if log.is_empty() {
         out.push(Finding::new(
             "NOVA-300", Level::Unknown, "No record of a previous game launch",
             "Nova couldn't find Fortnite's own log, so it can't tell you what happened last time.",
             "Launch the game once, then run this check again.",
         ));
         return;
-    };
+    }
 
     // THE ONE THAT KEEPS WINNING. -nobe and -noeac switch off BattlEye and EAC. Neither touches UAC,
     // which is Epic's own anti-cheat compiled into the client, and which kicks roughly 45 seconds in.
@@ -350,15 +428,44 @@ fn check_last_run(build_path: &str, out: &mut Vec<Finding>) {
         ));
     }
 
-    // Epic answers with a correlation id; Nova never does. So one of these in the log is proof a
-    // request slipped past the redirect and reached Epic's real servers.
-    if log.contains("CorrId=FN-") {
+    // A request that escaped the redirect and reached Epic — identified by WHO ANSWERED.
+    //
+    // This used to trigger on `CorrId=FN-`, on the theory that "Epic answers with a correlation id;
+    // Nova never does". That theory is unverified and probably wrong: the client itself carries
+    // `X-Epic-Correlation-ID` (confirmed present in the 7.40 binary), so the id may well be one the
+    // client generated and logged back, in which case it says nothing about who responded. Across
+    // every log on the reference machine there is exactly ONE HTTP error, so there is no negative
+    // control available and the rule cannot be tested either way.
+    //
+    // The response BODY settles it without any theory. Nova stamps every error envelope with
+    // `originatingService` = `nova-backend` (index.ts) or `com.epicgames.account.public`
+    // (error-handler.ts). Anything else came from a server that is not Nova. That is what was
+    // actually observed on 2026-08-15:
+    //
+    //   HttpResult: 401 … "originatingService":"friends" … "Token is missing key ID value"
+    //   QueryFriendSettings request failed
+    //
+    // — Epic's live friends service rejecting a Nova-issued JWT for having no `kid` header. Nova
+    // writes neither that message nor that service name, so the escape is proven from the body alone.
+    //
+    // Deliberately conservative: an escape to Epic's *account* service would report
+    // `com.epicgames.account.public`, which this treats as ours and misses. A false negative is the
+    // right direction to fail in for a check that shows the player a red Error.
+    let foreign = foreign_services(&log);
+    if !foreign.is_empty() {
+        let mut names: Vec<&str> = foreign.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
         out.push(Finding::new(
             "NOVA-303", Level::Error, "Some requests reached Epic's real servers",
-            "A few of the game's requests escaped Nova and went to Epic instead, which rejected them. When \
-             that happens Fortnite throws away the settings telling it where your server is, so you get \
-             stuck in matchmaking or kicked to the login screen. It's intermittent, which is why it can \
-             work one launch and not the next.",
+            &format!(
+                "A few of the game's requests escaped Nova and went to Epic instead, which rejected them \
+                 ({} of them, from Epic's {} service). When that happens Fortnite throws away the settings \
+                 telling it where your server is, so you get stuck in matchmaking or kicked to the login \
+                 screen. It's intermittent, which is why it can work one launch and not the next.",
+                foreign.len(),
+                names.join(", "),
+            ),
             "Try again — it often succeeds on a second attempt. Quote NOVA-303.",
         ));
     }
@@ -404,13 +511,66 @@ fn check_server_run(out: &mut Vec<Finding>) {
         ));
     }
 
-    if log.contains("code=3221225477") {
-        out.push(Finding::new(
-            "NOVA-307", Level::Error, "The match server crashed",
-            "The server this PC was running stopped unexpectedly, which ends the match for everyone in it.",
-            "Quote NOVA-307 — the crash details are saved automatically.",
-        ));
+    // NOVA-307 is NOT checked here — it reads nova-agent.log, a different file, and is called
+    // separately from run_diagnostics(). Putting it at the end of this function would have hidden it
+    // behind the `cobalt.log` early return above: a PC with no cobalt.log would silently skip the
+    // crash check too, which is the same shape of mistake as the bug being fixed.
+}
+
+/// NOVA-307 — did the gameserver this PC was running die on its own?
+///
+/// `[HostRunner] Gameserver exited (code=…)` comes from the BACKEND's stdout, which `start_backend`
+/// in main.rs points at `nova-agent.log` beside the launcher executable. The previous version looked
+/// for it in `cobalt.log`, which is written by the redirect shim inside the game and never contains
+/// it — so this check was structurally incapable of firing.
+///
+/// Any non-zero exit is reported, not just 0xC0000005. Pinning it to one status code meant a
+/// gameserver that died of anything else read as a clean run. The code is quoted in the detail so
+/// it is still identifiable at a glance.
+///
+/// Caveat worth knowing: `nova-agent.log` is truncated every time the launcher starts
+/// (`launcher-evidence-is-self-erasing`), so this answers "during this launcher session", which is
+/// the question a player running the check right after a failure is actually asking.
+fn check_server_crash(out: &mut Vec<Finding>) {
+    let Some(agent_log) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("nova-agent.log")))
+    else {
+        return;
+    };
+    let Some(log) = tail(&agent_log, 400_000) else { return };
+
+    // Last exit line wins — earlier ones may be from a server that was deliberately stopped.
+    let last_exit = log
+        .lines()
+        .filter(|l| l.contains("Gameserver exited"))
+        .last();
+
+    let Some(line) = last_exit else { return };
+    // `…(code=3221225477 signal=null)` → "3221225477". A clean stop is code=0.
+    let code = line
+        .split("code=")
+        .nth(1)
+        .map(|s| s.trim_start().split(|c: char| !c.is_ascii_digit()).next().unwrap_or(""))
+        .unwrap_or("");
+
+    if code.is_empty() || code == "0" {
+        return;
     }
+
+    let known = match code {
+        "3221225477" => " (0xC0000005 — an access violation, the usual one)",
+        "3221225786" => " (0xC000013A — it was interrupted, usually a manual stop)",
+        _ => "",
+    };
+    out.push(Finding::new(
+        "NOVA-307", Level::Error, "The match server crashed",
+        &format!(
+            "The server this PC was running stopped unexpectedly with code {code}{known}, which ends the \
+             match for everyone in it."
+        ),
+        "Quote NOVA-307 — the crash details are saved automatically.",
+    ));
 }
 
 // ── 4xx — this machine ────────────────────────────────────────────────────────────────────────────
@@ -456,6 +616,9 @@ pub fn run_diagnostics(build_path: String, coordinator: Option<String>) -> Repor
     check_can_reach_nova(&coord, &mut findings);
     check_last_run(&build_path, &mut findings);
     check_server_run(&mut findings);
+    // Separate call: NOVA-307 reads nova-agent.log, not cobalt.log, so it must not sit behind
+    // check_server_run's early return for a missing cobalt.log.
+    check_server_crash(&mut findings);
     let machine = check_capability(&mut findings);
 
     // Errors first, then warnings — someone scanning this wants the blocker, not a checklist.
@@ -483,4 +646,132 @@ pub fn run_diagnostics(build_path: String, coordinator: Option<String>) -> Repor
     };
 
     Report { findings, machine, summary }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────────────────────────
+//
+// The launcher had no tests at all before this. These pin the two rules that decide whether a player
+// is shown a red Error, because both were wrong in ways nothing outside could see: NOVA-303 keyed on
+// evidence that does not prove what it claimed, and the whole 3xx family read a path that does not
+// exist for a packaged client.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real line from FortniteGame.log, 2026-08-15 07:48:55 — Epic's live friends service
+    /// rejecting a Nova-issued JWT for having no `kid`. This is the only HTTP error in any log on
+    /// the reference machine, which is why the detector could not be validated statistically and
+    /// had to be reasoned about from the body instead.
+    const REAL_ESCAPE: &str = r#"[2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: PARSE: HttpResult: 401 Code: 1014 Error: Failure ErrorCode=errors.com.epicgames.common.oauth.invalid_token, Message=Token is missing key ID value, Raw={"errorCode":"errors.com.epicgames.common.oauth.invalid_token","errorMessage":"Token is missing key ID value","messageVars":[],"numericErrorCode":1014,"originatingService":"friends","intent":"prod"}
+[2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: Invalid response. CorrId=FN-Yb8rP6eIXEqknl12zZj8vQ code=401 error=Failure
+[2026.08.15-07.48.55:436][964]LogOnline: Warning: OSS: QueryFriendSettings request failed. (wasUpdate: 0) Token is missing key ID value"#;
+
+    #[test]
+    fn detects_the_real_observed_escape() {
+        assert_eq!(
+            foreign_services(REAL_ESCAPE),
+            vec!["friends".to_string()],
+            "the 2026-08-15 escape must be detected",
+        );
+    }
+
+    #[test]
+    fn novas_own_errors_are_not_reported_as_escapes() {
+        // Both envelopes Nova can produce. Reporting either would show a red "requests reached Epic"
+        // to a player whose setup is working perfectly.
+        let nova = r#"Raw={"errorCode":"errors.com.epicgames.common.server_error","originatingService":"nova-backend","intent":"prod"}
+Raw={"errorCode":"errors.com.epicgames.common.oauth.invalid_token","originatingService":"com.epicgames.account.public","intent":"prod"}"#;
+        assert!(
+            foreign_services(nova).is_empty(),
+            "Nova's own two service names must never count as an escape",
+        );
+    }
+
+    #[test]
+    fn a_correlation_id_alone_is_not_evidence() {
+        // The previous rule fired on exactly this. The client carries X-Epic-Correlation-ID itself
+        // (confirmed present in the 7.40 binary), so a CorrId does not establish who answered.
+        let corr_only =
+            "LogOnline: Warning: OSS: Invalid response. CorrId=FN-Yb8rP6eIXEqknl12zZj8vQ code=401";
+        assert!(
+            foreign_services(corr_only).is_empty(),
+            "a bare correlation id must not be treated as proof of an escape",
+        );
+    }
+
+    #[test]
+    fn counts_occurrences_but_names_each_service_once() {
+        let two = r#"{"originatingService":"friends"} x {"originatingService":"friends"} x {"originatingService":"fortnite"}"#;
+        let found = foreign_services(two);
+        assert_eq!(found.len(), 3, "the count is per occurrence, so the player is told how many escaped");
+        let mut names: Vec<&str> = found.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names, vec!["fortnite", "friends"]);
+    }
+
+    #[test]
+    fn a_clean_log_produces_nothing() {
+        let clean = "LogInit: Fortnite 7.40 CL-5046157\nLogOnline: OSS: login complete";
+        assert!(foreign_services(clean).is_empty());
+    }
+
+    #[test]
+    fn a_truncated_envelope_does_not_panic_or_match() {
+        // tail() cuts the log mid-line by construction, so a half-written JSON body is normal input.
+        let cut = r#"…{"numericErrorCode":1014,"originatingService":"frien"#;
+        assert!(foreign_services(cut).is_empty(), "an unterminated value must be ignored, not guessed at");
+    }
+
+    #[test]
+    fn game_logs_are_found_across_directories_newest_first() {
+        // The real defect was WHICH directory was searched, so this asserts the scan itself:
+        // both directories contribute, rotated and _2 logs are included, unrelated files are not,
+        // and the order is newest-first because that is what check_last_run relies on.
+        let root = std::env::temp_dir().join(format!("nova-diag-test-{}", std::process::id()));
+        let appdata_like = root.join("appdata").join("FortniteGame").join("Saved").join("Logs");
+        let build_like = root.join("build").join("FortniteGame").join("Saved").join("Logs");
+        std::fs::create_dir_all(&appdata_like).unwrap();
+        std::fs::create_dir_all(&build_like).unwrap();
+
+        // Written oldest → newest so mtimes order the way the names say.
+        for (dir, name) in [
+            (&appdata_like, "FortniteGame-backup-2026.08.15-06.30.33.log"),
+            (&build_like, "FortniteGame_2.log"),
+            (&appdata_like, "FortniteGame.log"),
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        // Must be ignored: right directory, wrong file.
+        std::fs::write(appdata_like.join("FortniteLauncher.log"), b"x").unwrap();
+        std::fs::write(appdata_like.join("DedicatedServer.log"), b"x").unwrap();
+
+        let found = scan_game_logs(&[appdata_like.clone(), build_like.clone()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "FortniteGame.log".to_string(),
+                "FortniteGame_2.log".to_string(),
+                "FortniteGame-backup-2026.08.15-06.30.33.log".to_string(),
+            ],
+            "newest first, both directories, FortniteLauncher.log and DedicatedServer.log excluded",
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_directory_is_not_an_error() {
+        // A machine that has never run the game. This must return nothing rather than panicking —
+        // NOVA-300 then reports "no record of a previous launch", which is the honest answer.
+        let nowhere = std::env::temp_dir().join("nova-diag-does-not-exist-9f3a");
+        assert!(scan_game_logs(&[nowhere]).is_empty());
+    }
 }
