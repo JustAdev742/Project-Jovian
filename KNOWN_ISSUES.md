@@ -55,38 +55,69 @@ request.
 expired." Neither matches. This does not depend on the `CorrId` reasoning, which is unreliable — see
 NOVA-AUDIT-014.
 
-**What is known:** the endpoint IS routed by Nova (`social.routes.ts`, 59 calls in the retained
-sessions), so this is not a coverage gap — the request never arrived. The hotfix Nova serves
-(`data/cloudstorage/DefaultEngine.ini`) overrides **no service base URLs at all**, only XMPP and the
-party system, so every HTTP service URL comes from the client's compiled-in defaults and Cobalt's
-hook is the only thing redirecting them.
+**THE MECHANISM IS CONFIRMED — and was already written down.** Corrected 2026-09-05: the previous
+entry here said the mechanism was unknown. It is not, and has not been since 2026-08-01. It is
+documented at length in Cobalt's own source (`Launcher/cobalt/Cobalt/dllmain.cpp`, the block above
+`Hook(CurlEasySetOpt, …)`), which I had not read when I wrote that.
 
-**A lead, and how far it was taken (2026-09-05).** If service URLs are *configurable*, a hotfix
-could point them at Nova directly and the redirect would no longer depend on Cobalt's hook at all —
-for every service, not just this one. That would retire a whole class of failure without a DLL
-release. What the binary says:
+Cobalt hooks `curl_easy_setopt` with a **VEH page-guard** hook, and `PAGE_GUARD` is a **one-shot**
+alarm:
+
+1. The kernel clears the guard bit the instant it fires — so from that moment the function is
+   unhooked **for every thread in the process**, because the bit lives in the page table, not the
+   thread.
+2. Re-arming is deferred to a second exception (`STATUS_SINGLE_STEP`) on the faulting thread. If that
+   thread is descheduled in between, the hole stays open for a scheduler quantum.
+3. The guard covers a whole 4 KB page, so a call to any neighbouring libcurl function knocks it down
+   too.
+4. UE4 issues ~25–30 `curl_easy_setopt` calls per request across several threads, and Fortnite fetches
+   its four hotfix files back to back in the same millisecond.
+
+Any call landing in one of those holes runs the **real** function, its URL is never rewritten, and it
+leaves for Epic. Ten distinct `FN-` correlation ids appear across the captured logs, and the captured
+sequence shows the damage mechanism exactly:
+
+```
+04:56:48:489  Hotfix file (DefaultEngine.ini) downloaded. Size was (456)   <- ours
+04:56:48:775  Invalid response. CorrId=FN-… code=401 "Token is missing key ID value"  <- ESCAPED
+04:56:48:775  Hotfix file (DefaultGame.ini) failed to download
+04:56:48:775  OnHotfixCheckComplete 0                                      <- WHOLE BATCH DISCARDED
+```
+
+UE4's hotfix batch is **all-or-nothing**, so one escaped file throws away every file in it —
+including `DefaultEngine.ini`, which is what tells the client where the server is. That is the
+"Fortnite was not started correctly" / stuck-in-matchmaking class of failure, and it is why it looks
+random. The `QueryFriendSettings` escape found in the 2026-08-15 log is the same fault, later in the
+session.
+
+**The known fix is blocked, not unknown.** An inline hook has no unprotect window at all. 1.4.3
+shipped one and hard-crashed the game loading the Frontend map; the 1.4.8 byte dump then established
+that the scan point IS the function entry, which *removed* the explanation for that crash rather than
+confirming it. Cobalt's own comment is right that shipping the same hook again on the theory "the
+address must have been wrong" would repeat a known failure on an untested hypothesis.
+
+**The config route now looks like the better fix, and this reframes it.** If the client's service
+URLs already pointed at Nova, an *unhooked* `curl_easy_setopt` would set a URL that already goes to
+Nova — the request would arrive anyway and the hook would stop being load-bearing. The evidence for
+that route:
 
 | question | answer | grade |
 |---|---|---|
 | Are there per-service config sections? | **Yes** — `OnlineSubsystemMcp.BaseServiceMcp` ×1, `…OnlineIdentityMcp` ×2, `…OnlineFriendsMcp` ×1 (UTF-16) | CONFIRMED |
-| Are service URLs compiled in? | **Almost none.** Only three `*.ol.epicgames.com` literals exist in the whole 106 MB binary: `datarouter`, `metric-public-service-prod`, `fnreplay-public-service-prod11`. Everything else comes from config | CONFIRMED |
-| Does the `[Section Env]` convention work on this build? | **Yes** — Nova's own hotfix already uses `[OnlineSubsystemMcp.Xmpp Prod]` and XMPP works | CONFIRMED |
-| Is the key called `Domain`? | **Unresolved.** `Domain` occurs 78× in UTF-16 but **not** within 4 KB of any of the three section names | UNKNOWN |
-| What keys ARE near them? | Per-operation absolute-URL keys: `QueryOffersUrl`, `QueryItemsUrl`, `QueryCategoriesUrl`, `QueryEndpointsUrl`, `CheckAffiliateNameUrl` (BaseServiceMcp); `EnumerateUserFilesUrl`, `UserFileUrl`, `WriteUserFileUrl`, `RequestUsageInfoUrl`, `ReceiptRoute` (OnlineIdentityMcp). **None for OnlineFriendsMcp** | STRONGLY SUPPORTED |
+| Are service URLs compiled in? | **Almost none** — only three `*.ol.epicgames.com` literals in 106 MB: `datarouter`, `metric-public-service-prod`, `fnreplay-public-service-prod11`. The rest come from config | CONFIRMED |
+| Does the `[Section Env]` convention work on this build? | **Yes** — Nova's own hotfix uses `[OnlineSubsystemMcp.Xmpp Prod]` and XMPP works | CONFIRMED |
+| Is the key called `Domain`? | **Unresolved** — `Domain` occurs 78× in UTF-16 but not within 4 KB of any of the three sections | UNKNOWN |
+| What keys ARE near them? | Per-operation absolute-URL keys: `QueryOffersUrl`, `QueryItemsUrl`, `QueryCategoriesUrl`, `QueryEndpointsUrl`, `CheckAffiliateNameUrl`, `EnumerateUserFilesUrl`, `UserFileUrl`, `WriteUserFileUrl`, `ReceiptRoute`. **None for OnlineFriendsMcp** | STRONGLY SUPPORTED |
 
-So the model is probably per-operation URL keys rather than one base `Domain` — but string pooling
-means proximity is weak evidence in both directions, and the friends section yielded no keys at all.
+**Put it in the LOCAL `DefaultEngine.ini`, not the hotfix.** The hotfix is itself fetched over HTTP,
+so it cannot protect the fetch of the hotfix — the bootstrap the batch failure destroys. The build's
+own config file is read from disk before any network I/O, so an override there would apply from
+startup and would cover the hotfix batch as well.
 
-**Not guessed, deliberately.** A wrong INI key is merely ignored by UE4, so trying one is *cheap* —
-but it is untestable from here, and shipping an unverified config change to a live deployment is
-precisely what produced 1.5.2 and 1.5.6. **What would settle it:** a 7.40-era `DefaultEngine.ini`
-from any source that used these sections, or one test launch with a candidate key and a check of
-whether the request lands on Nova.
-
-Note `QueryEndpointsUrl` alongside the client's `%s/api/endpoints` fragment — that looks like service
-discovery, which would be a cleaner lever than overriding each service. It is routed by Nova only as
-a Tier-2 stub (`200 {}`), has never been observed being called, and **nothing in the corpus documents
-its shape.**
+**Still not guessed.** A wrong INI key is merely ignored by UE4, so trying one is cheap — but it is
+untestable from here, and shipping an unverified config change to a live deployment is what produced
+1.5.2 and 1.5.6. **What would settle it:** a 7.40-era `DefaultEngine.ini` that uses these sections,
+or one test launch with a candidate key and a check of whether the request lands on Nova.
 
 ---
 
@@ -239,13 +270,12 @@ See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md).
    of them a bug today. Also self-answering at runtime via
    `GET /nova/api/diagnostics?category=MISSING`.
 
-7. **Why the escaped request escapes.** NOVA-303 now has a named endpoint and proof of who answered,
-   but not a mechanism. The request is `QueryFriendSettings` at XMPP-login time; Cobalt's hook covers
-   `*.ol.epicgames.com` and the endpoint is routed by Nova, so "the hook missed this one call" is a
-   description, not a cause. **What would settle it:** a `cobalt.log` and a `FortniteGame.log` from
-   the SAME launch — the escaped call is by definition absent from `cobalt.log`, so the pair of files
-   localises it to the exact request the hook did not see, and the surrounding lines say what was
-   different about it.
+7. ~~**Why the escaped request escapes.**~~ **ANSWERED — and it always was.** The mechanism is
+   documented in Cobalt's own source and has been since 2026-08-01: the VEH page-guard hook has a
+   one-shot guard bit and a deferred re-arm, so there is a window in which the function is unhooked
+   for every thread. See `nova-303-request-escape` above. **The lesson is about method, not about
+   curl:** this sat recorded as "cannot be answered" for a day because the investigation searched
+   logs and binaries and did not read the source of the component being investigated.
 
 8. **The per-service config key names.** The 7.40 binary has `OnlineSubsystemMcp.OnlineFriendsMcp`
    and friends, so service base URLs are configurable — which would make the redirect independent of

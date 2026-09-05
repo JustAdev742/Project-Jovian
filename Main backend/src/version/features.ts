@@ -307,6 +307,20 @@ export const FEATURES: readonly FeatureRecord[] = [
     notes: 'Per-build keys exist for the whole Chapter 1-4 range — this is directly extendable once a second build is targeted.',
   },
 
+  {
+    feature: 'transport.redirect.hookWindow',
+    subsystem: 'telemetry',
+    description: "Cobalt's curl hook has windows in which requests escape to Epic's live servers.",
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: "Cobalt/dllmain.cpp documents it: VEH PAGE_GUARD is a one-shot alarm cleared for ALL threads when it fires, re-armed only by a deferred STATUS_SINGLE_STEP. UE4 issues ~25-30 curl_easy_setopt calls per request across threads. Ten distinct FN- correlation ids across captured logs; the 2026-08-15 QueryFriendSettings 401 is one of them.",
+      detail: "Version-specific because the hook is found by byte-signature scan against 7.40. A different build needs a different signature, so this failure mode does not transfer - a DIFFERENT one would.",
+    }],
+    implementation: 'Launcher/cobalt/Cobalt/dllmain.cpp',
+    failureBehaviour: "UE4's hotfix batch is all-or-nothing: one escaped file discards DefaultEngine.ini, so the client never learns the server address. Presents as \"Fortnite was not started correctly\" or stuck matchmaking.",
+    notes: "KNOWN_ISSUES nova-303-request-escape. The structural fix is to make the redirect not depend on the hook at all, by configuring service URLs in the build's own DefaultEngine.ini — which is read before any network I/O, unlike the hotfix.",
+  },
+
   // ── matchmaking ────────────────────────────────────────────────────────────────────────────────
   {
     feature: 'matchmaking.ticket.player',
