@@ -238,6 +238,69 @@ See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md).
 
 ---
 
+
+---
+
+## Audit — MCP operation coverage vs the 7.40 client
+
+Measured 2026-09-06 by scanning the shipping client for all 149 operation names the endpoint corpus
+documents, with controls in both directions (`QueryProfile`, `ClientQuestLogin`, `CreateNewIsland`
+PRESENT; `ProtoJuno_CreateWorld` ABSENT). Reproduce with:
+
+```bash
+node tools/binscan.js <exe> count $(ls <corpus>/FN-Service/Game/Profile/Operations | sed 's/\.md$//')
+```
+
+**84 of 149 exist in 7.40. Nova handles 34.** The two-way diff is the useful part.
+
+### Nova handles it, but 7.40 does not have it — 7 operations · CONFIRMED · not a defect
+
+`AthenaPinQuest` · `CompletePlayerSurvey` · `CopyCosmeticLoadout` · `DeleteCosmeticLoadout` ·
+`SetCosmeticLockerBanner` · `SetCosmeticLockerSlot` · `SetHardcoreModifier`
+
+Mostly *correct* and worth stating as such: `SetCosmeticLockerSlot` / `SetCosmeticLockerBanner` are
+the later-era locker path, and Nova also implements 7.40's own `EquipBattleRoyaleCustomization` /
+`SetBattleRoyaleBanner`. That is real cross-version support that already existed and was undocumented.
+
+One genuine oddity: **`AthenaPinQuest` is handled and is absent from 7.40**, while
+`AthenaTrackQuests` — which the corpus says replaced it — is *not* handled. So the quest-pinning
+handler covers a middle era and neither end of the range. Harmless today (nothing calls it), recorded
+because it looks like support and is not.
+
+### 7.40 has it, Nova does not handle it — 63 operations · CONFIRMED · mostly correct
+
+These fall to the `default:` branch, which returns an empty-success envelope rather than a 404. That
+is the deliberate and right answer for almost all of them: **the large majority are Save the World**
+(expeditions, homebase, squads, collection book, crafting, research, world items) **or Creative**
+(islands, plot permissions), and Nova is a Battle Royale backend. A 404 would be worse.
+
+The ones that are *not* obviously out of scope, listed so the decision is explicit rather than
+implicit:
+
+| operation | note |
+|---|---|
+| `QueryPublicProfile` | other players' profiles — BR-relevant |
+| `ClaimQuestReward` · `UpdateQuests` · `UpdateQuestClientObjectives` | BR challenges. Compare `clientquestlogin-grants-nothing` in P3: quest state is never created, so there is nothing for these to act on either. Same root cause. |
+| `EndBattleRoyaleGame` | match-end stats. Corpus marks it **`DedicatedServer ONLY`**, and Nova's `dedicated_server` route deliberately refuses unauthenticated mutations, so this is gated by an existing security decision rather than missing. `EndBattleRoyaleGameV2` is ABSENT from 7.40 — this build is on the V1 side of that boundary. |
+| `LockProfileForWrite` · `UnlockProfileForWrite` | also **`DedicatedServer ONLY`**. Empty success is defensible for a backend with no concurrent profile writers. |
+| `SetGameplayStats` · `ServerQuestLogin` · `SetMtxPlatform` · `SkipTutorial` | never observed in a session; no evidence any of them is needed. |
+
+### The corpus itself is modern-biased — worth knowing before trusting it on Chapter 1
+
+Scanning the 34 operations Nova handles directly against the client (rather than deriving them by
+set arithmetic against the corpus) turned up two that are **in 7.40 and not documented in the corpus
+at all**: `EquipBattleRoyaleCustomization` and `SetBattleRoyaleBanner` — which are precisely 7.40's
+own locker and banner paths, the ones this deployment depends on every session.
+
+So the 149-operation list is not a superset of what old builds use, and absence from it is not
+evidence of anything. Of Nova's 34 handlers, **22 are present in 7.40 and 12 are absent**;
+`operations.test.ts` pins both sets and fails if a handler is added or removed without the audit
+moving with it.
+
+**Nothing here is being implemented on this evidence.** A literal in a shipping binary proves the
+build knows the name, not that any reachable path calls it — and none of these appear in the observed
+request log. Recorded so that "Nova handles 34 MCP operations" is not mistaken for coverage.
+
 ## Cannot be answered from current evidence
 
 > **Updated 2026-09-05.** Two long-standing items below moved, and one new limit appeared.

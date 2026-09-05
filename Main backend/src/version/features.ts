@@ -429,6 +429,24 @@ export const FEATURES: readonly FeatureRecord[] = [
     failureBehaviour: 'The client talks to Epic, or to nothing. Nova never sees the request.',
     notes: 'Nothing in the backend can lift this; it is a property of how the client addresses services. Recorded so the limit is visible rather than rediscovered.',
   },
+  {
+    feature: 'mcp.operations.eraSet',
+    subsystem: 'mcp',
+    description: 'Which MCP profile operations exist in a given build.',
+    timeline: [{
+      atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
+      evidence: 'All 149 operation names in the endpoint corpus scanned against the 7.40 shipping client 2026-09-06, with controls both ways (QueryProfile / ClientQuestLogin / CreateNewIsland PRESENT; ProtoJuno_CreateWorld ABSENT). 84 present, 65 absent. Operation names are verbatim symbols, so count is a valid probe for them - unlike paths, see tools/README.md trap 3.',
+      detail: 'Three boundaries this pins for 7.40: EndBattleRoyaleGame PRESENT and EndBattleRoyaleGameV2 ABSENT, so this build is on the V1 side; AthenaPinQuest AND its stated replacement AthenaTrackQuests are BOTH absent; SetIntroGamePlayed absent. Nova handles 34 operations, 7 of which 7.40 does not have.',
+    }],
+    implementation: 'services/mcp/mcp.routes.ts - 34 handled, the rest fall to an empty-success default',
+    tests: [
+      'operations.test.ts - the handler switch matches the audited set',
+      'operations.test.ts - both eras of the locker path stay handled',
+      'operations.test.ts - every operation Nova handles was checked against the client',
+    ],
+    failureBehaviour: 'An unhandled operation returns an empty-success envelope, never a 404. The client believes it succeeded and nothing happens.',
+    notes: 'The 63 operations 7.40 has and Nova does not handle are overwhelmingly Save the World and Creative, where empty success is the right answer for a Battle Royale backend. Audited in KNOWN_ISSUES.md; deliberately NOT implemented, because a literal in a shipping binary proves the build knows the name and none of them appear in the observed request log.',
+  },
 ];
 
 const BY_ID = new Map<string, FeatureRecord>(FEATURES.map((f) => [f.feature, f]));
