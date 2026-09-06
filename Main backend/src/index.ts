@@ -199,6 +199,44 @@ async function main() {
         originatingService: 'nova-backend',
         intent: 'prod',
       });
+      (request as any).__diagRecorded = true;
+    });
+
+    // ── EVERY OTHER FAILURE RESPONSE ─────────────────────────────────────────────────────────────
+    //
+    // setErrorHandler only fires for THROWN errors. Most of this backend does not throw — it sends:
+    //
+    //     Errors.unauthorized(reply, '...')   ->  sendEpicError(reply, 401, ...)
+    //     return reply.status(403).send({ ... })
+    //
+    // 51 such sites in `services/` at the time of writing. None of them reached the error handler,
+    // so none of them appeared in diagnostics: the dashboard showed unrouted paths and crashes while
+    // being blind to every deliberate rejection — 401s from expired tokens, 403s from the admin and
+    // ownership guards, 400s from malformed payloads. Those are the failures a player actually hits.
+    //
+    // onResponse sees the FINAL status whatever produced it, so it catches all three shapes at once.
+    // The `__diagRecorded` flag stops the thrown ones being counted twice; their handler above has
+    // richer detail (the exception message), so it wins where both would fire.
+    //
+    // Deliberately not rate-limited here: recordDiagnostic already aggregates by normalised route
+    // and increments a counter for repeats, so a client retrying a bad token 200 times is one row
+    // with count=200 rather than 200 rows.
+    app.addHook('onResponse', async (request, reply) => {
+      if ((request as any).__diagRecorded) return;
+      const status = reply.statusCode;
+      if (status < 400) return;
+
+      recordDiagnostic({
+        category: status === 401 || status === 403 ? 'AUTH_FAILURE'
+          : status >= 500 ? 'INTERNAL_ERROR'
+          : 'FAILED',
+        method: request.method,
+        url: request.url,
+        version: (request as any).gameVersion?.id,
+        accountId: (request as any).accountId,
+        status,
+        detail: 'sent by a route handler (not thrown)',
+      });
     });
 
     return app;
