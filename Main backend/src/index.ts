@@ -303,4 +303,85 @@ async function main() {
   startXmppServer();
 }
 
-main().catch(console.error);
+// ── PROCESS-LEVEL FAILURE CAPTURE ────────────────────────────────────────────────────────────────
+//
+// Nothing here existed before. An uncaught exception or an unhandled rejection killed the backend
+// with NOTHING recorded anywhere: the diagnostics store is in-memory, so it died with the process,
+// and the launcher's agent log was truncated on the next start (fixed separately). The single worst
+// class of failure — the one that takes the whole service down — was the one class that left no
+// trace at all.
+//
+// THREE RULES THIS CODE FOLLOWS, because a diagnostic handler that misbehaves is worse than none:
+//
+//   1. It never swallows a fatal. `uncaughtException` still exits; Node's own guidance is that the
+//      process is in an undefined state afterwards, and pretending otherwise trades a visible crash
+//      for silent corruption. We record, flush, and let it die.
+//   2. It never throws. Every body is wrapped, because an exception raised inside an
+//      `uncaughtException` handler is unrecoverable and takes the process down without the record.
+//   3. It bounds its own work. No network calls, no awaits that could hang — just an in-memory
+//      record and a synchronous console write.
+
+/** Record and print, defensively. Used by every handler below. */
+function recordProcessFailure(category: 'INTERNAL_ERROR' | 'CRASH', detail: string, err?: unknown) {
+  try {
+    const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err ?? '');
+    // redactSecrets because a stack trace can carry a URL, and this build puts eg1~ tokens in paths.
+    const safe = redactSecrets(`${detail} ${message}`.trim()).slice(0, 2000);
+    console.error(`[FATAL] ${safe}`);
+    recordDiagnostic({
+      category,
+      method: 'PROCESS',
+      url: '/process/uncaught',
+      status: 0,
+      detail: safe,
+    });
+  } catch {
+    // Deliberately empty and the ONE place that is acceptable: we are already inside a fatal
+    // handler, and a failure to record must not replace the crash we were trying to describe.
+  }
+}
+
+process.on('uncaughtException', (err) => {
+  recordProcessFailure('CRASH', 'uncaughtException —', err);
+
+  // Exit non-zero so the supervisor restarts us and a wrapper can tell a crash from a clean stop.
+  //
+  // NOTE THE ABSENT `.unref()`. The first version of this line was
+  // `setTimeout(() => process.exit(1), 100).unref?.()`, and unref means the timer does NOT hold the
+  // event loop open — so once the handler returned there was nothing left to run, the process
+  // exited NATURALLY WITH CODE 0, and the exit(1) never happened. A crashed backend reported success.
+  // Caught by the spawned-process test asserting on the exit code; the console line was there the
+  // whole time, which is exactly how it would have gone unnoticed.
+  //
+  // Keeping the timer referenced holds the loop just long enough for stderr to drain, then exits 1.
+  setTimeout(() => process.exit(1), 100);
+});
+
+process.on('unhandledRejection', (reason) => {
+  // NOT fatal. An unhandled rejection is usually a forgotten `await` on a non-critical path, and
+  // killing a live match server over one would be a worse outcome than the bug. Recorded loudly
+  // instead — Node's default is to print and (in newer versions) throw, and neither leaves a record.
+  recordProcessFailure('INTERNAL_ERROR', 'unhandledRejection —', reason);
+});
+
+process.on('exit', (code) => {
+  // Last line in the log, so "the process is gone" and "the process stopped cleanly" stop looking
+  // identical after the fact. Only synchronous work is permitted in an exit handler.
+  if (code !== 0) console.error(`[FATAL] process exiting with code ${code}`);
+});
+
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(sig, () => {
+    // A signalled stop is NOT a crash and must not be recorded as one, or every ordinary restart
+    // would show up as an incident and the dashboard would cry wolf.
+    console.log(`[Server] ${sig} received — shutting down`);
+    process.exit(0);
+  });
+}
+
+main().catch((err) => {
+  // main()'s own rejection was previously `console.error` and nothing else, so a startup failure —
+  // the failure most likely to leave a player with a dead backend — was invisible to diagnostics.
+  recordProcessFailure('CRASH', 'startup failed —', err);
+  process.exit(1);
+});
