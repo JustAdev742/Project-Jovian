@@ -196,7 +196,7 @@ or one test launch with a candidate key and a check of whether the request lands
 | ~~`minhook-null-aliases-all-hooks`~~ | **FIXED 2026-09-06** | `dllmain.cpp:304-312` | Now refuses a null target and checks both MinHook status codes. Was unreachable in the shipped build — `USE_MINHOOK` is commented out — which the original grade never stated. See the detail below. |
 | ~~`cobalt-reports-success-unverified`~~ | **FIXED 2026-09-06** | `Cobalt/dllmain.cpp:468-483` | `Hook()` returns a result, `InitializeCurlHook()` no longer returns an unconditional `true`, and the caller's existing failure path is now reachable. |
 | ~~`cobalt-logs-bearer-tokens`~~ | **FIXED 2026-09-06** | `curlhook.h:80`, `log.cpp:73-88` | **Both halves closed.** `WriteLine` redacts every line through the existing tested `Nova::Diag::Redact`, covering the file *and* the upload at one choke point. |
-| `trap8-systemic-unguarded-offsets` | CONFIRMED | `structs.cpp:414-422` | Offset-0-means-failure unchecked at most assignment sites (257 of 299 with no in-file zero-check). |
+| `trap8-systemic-unguarded-offsets` | CONFIRMED | `structs.cpp` | **Instrumented 2026-09-06, still open.** Every failed lookup is now recorded and reported after startup, and `GetOffsetChecked()` exists for migration. The ~306 remaining call sites are unchanged — deliberately. See the detail below. |
 | `mcp-rvn-from-client` | CONFIRMED | `mcp.routes.ts:20-31` | Revisions computed from the client's `rvn` query param rather than stored state. Latent on 7.40, and **narrower than it looks**: a binary scan shows this build reads only `profileChangesBaseRevision` and `profileChanges` — `profileRevision`, `profileCommandRevision` and `responseVersion` are absent from it entirely, so those three are ignored. See [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §2b. |
 | `common-core-stateless-rvn` | CONFIRMED | `common_core.ts:80,122` | `rvn`/`commandRevision` hard-coded to 1, never persisted. |
 | `ws-root-path-fabricates-matchmaking` | CONFIRMED, **narrower than first stated** | `xmpp.server.ts` | A WS upgrade that is neither XMPP nor an EOS path registers a matchmaking waiter the instant it opens, and in P2P mode a waiter is demand — enough of it elects a host and starts a gameserver for nobody. **But it is not separable by path or subprotocol:** the real MMS client also connects to the *root* path with no usable subprotocol (39 coordinator upgrades recorded `"ws"` 15, `"wss"` 11, `""` 11, `"xmpp"` 2 — the first two are URL schemes, not subprotocols). EOS paths are already excluded upstream. **Do not invert the routing default on a guess** — the code says so too. Since 2026-08-31 the one unambiguous case, a *non-root* path, is recorded as an `UNEXPECTED_STATE` diagnostic instead of silently counting as a player. |
@@ -281,6 +281,38 @@ if the module path cannot be read.
 This matters more than a P3 usually would: this project's recurring failure is a component being
 older than everyone assumes, and the banner is the one place that should have said so.
 
+
+
+### `trap8-systemic-unguarded-offsets` · CONFIRMED · **INSTRUMENTED 2026-09-06 · still open**
+307 lookup sites (re-counted; the register said 299) treat `GetOffset`'s return of **0** as a usable
+offset. It means both *"this member does not exist on this build"* and *"it exists and it is the
+first one"*, and the caller cannot tell which — so the standard pattern silently reads the start of
+the struct and then dereferences it.
+
+**Not theoretical:** `harvesting-wrong-property-name` was exactly this shape, and cars could never
+yield materials because of it.
+
+**Why this is not "fixed" by editing 307 call sites.** That is a mechanical change across a
+gameserver that cannot be tested in this environment, where a wrong offset is a crash on a player's
+machine. The change would be far more dangerous than the bug. So the work done is the part that
+makes fixing them *possible*, and none of it alters a single decision the code makes:
+
+| | |
+|---|---|
+| **All failures are now recorded** | `GetProperty` and `GetPropertySlow` call `Offsets::NoteMissing()` on every miss — **including when the caller suppressed the warning**, which is how probes hid theirs. Deduplicated by (owner, member), thread-safe. |
+| **And reported, once, after startup** | `Offsets::Report()` runs from `dllmain.cpp` right after `"Initialized"` and prints every distinct miss with the owning class named. |
+| **The owner is resolved LATE, on purpose** | `NoteMissing` stores the `UObject*`, not its name. `GetName()` is a `ProcessEvent` into `KismetSystemLibrary`, and the record path runs from `static auto` initialisers whose timing is arbitrary — possibly before the engine can service that call. Doing engine work on an error path, to describe the error, is how a diagnostic becomes the outage. |
+| **A safe accessor exists for migration** | `UObject::GetOffsetChecked()` returns **-1** for an absent member (not 0, which is valid), asks `GetProperty` rather than inferring from a returned 0, and returns -1 rather than crashing on a null `this` — `FindObject` returns null for a class a build lacks, and calling straight through it is the easiest mistake here. |
+| **One site migrated** | `harvesting.cpp`'s `ParamOffset` now uses it, so there is one implementation of the pattern rather than two. |
+
+The old warning text was `"Failed to find3 <member>"` — no owner, a tag nobody can grep, and one
+line in a log full of them. Now `"Failed to find property 'X' (see the offset report)"`, with the
+owner in the report where naming it is safe.
+
+**What is still open:** the other ~306 sites. **The next step is not to edit them blindly** — it is
+to run a match, read the report, and migrate the ones that actually fail on 7.40. That list has never
+existed before; now it does. Note that not every entry will be a defect: a lookup on a class that
+legitimately lacks an optional member appears too.
 
 ### `harvesting-wrong-property-name` · CONFIRMED · **FIXED 2026-09-06** · *consequence upgraded from PLAUSIBLE to certain*
 All six Car parameter lookups in `harvesting.cpp` asked for `"InstigatedBy"`. The commented-out

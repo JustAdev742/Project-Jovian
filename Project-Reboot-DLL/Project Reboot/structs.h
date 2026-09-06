@@ -212,6 +212,33 @@ struct UObject
 	int GetOffset(const std::string& MemberName, bool bIsSuperStruct = false, bool bPrint = false, bool bWarnIfNotFound = true);
 	int GetOffsetSlow(const std::string& MemberName, bool bPrint = false, bool bWarnIfNotFound = true);
 
+	/**
+	 * Resolve a member's offset, distinguishing "not present" from "present at offset 0".
+	 *
+	 * ── USE THIS, NOT GetOffset, FOR ANYTHING THAT WILL BE DEREFERENCED ─────────────────────────
+	 *
+	 * `GetOffset` returns **0** for both "this member does not exist on this build" and "it exists
+	 * and it is the first one". Those are completely different facts and the caller cannot tell them
+	 * apart, so the overwhelmingly common pattern —
+	 *
+	 *     static auto Off = Obj->GetOffset("Name");
+	 *     auto Thing = *(UObject**)(__int64(Params) + Off);
+	 *
+	 * — silently reads whatever happens to be at the START of the struct when the member is missing,
+	 * and then dereferences it. That is `trap8-systemic-unguarded-offsets` in KNOWN_ISSUES, and it
+	 * is not theoretical: `harvesting.cpp` shipped exactly that shape and cars could never yield
+	 * materials because of it.
+	 *
+	 * `GetOffsetChecked` returns **-1** when the member is absent, which is not a usable offset and
+	 * therefore cannot be mistaken for one. It asks `GetProperty` rather than inferring from a
+	 * returned 0, so it is right even when the member genuinely sits at offset 0. A null `this` is
+	 * also -1 rather than a crash — `FindObject` returns null on builds without a given class, and
+	 * calling this on that result is a very easy mistake to make.
+	 *
+	 * Every caller must check for a negative result before using it.
+	 */
+	int GetOffsetChecked(const std::string& MemberName, bool bIsSuperStruct = false);
+
 	bool IsA(UObject* otherClass);
 };
 
@@ -1197,3 +1224,51 @@ public:
 		return (uint8_t*)(__int64(this) + StateTypeOffset);
 	}
 };
+/**
+ * Which offset lookups failed, so 307 silent landmines become one list.
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────────────────────
+ *
+ * `GetOffset` returns 0 for a member that does not exist, and the caller almost never checks — there
+ * are ~307 lookup sites in this project and the register grades the unguarded ones as
+ * `trap8-systemic-unguarded-offsets`. Fixing all 307 by hand in a gameserver that cannot be tested
+ * here would be far more dangerous than the bug.
+ *
+ * So the leverage is at the source instead. `GetProperty` and `GetPropertySlow` already print
+ * "Failed to find3 <member>" — which names the member but NOT what it was looked up on, uses a tag
+ * nobody can search for, and is one line in a log full of them. Nothing counts them, so there is no
+ * way to answer "did any offset fail on this build?" — which is the only question that matters when
+ * a build misbehaves.
+ *
+ * This records each DISTINCT (owner, member) failure once and can print the lot. **It changes no
+ * behaviour whatsoever** — nothing here is consulted by any decision. That is deliberate: this ships
+ * to players and the whole point is to see the problem before attempting to fix 307 call sites.
+ */
+namespace Offsets
+{
+	/**
+	 * Record a lookup that found nothing. Deduplicated; safe from any thread.
+	 *
+	 * Takes the OWNER OBJECT, not its name, and resolves the name later in Report(). That is not a
+	 * convenience: UObject::GetName() does a full ProcessEvent into
+	 * /Script/Engine.KismetSystemLibrary.GetObjectName, and this runs inside a failed property lookup
+	 * — which happens from `static auto` initialisers whose timing is whenever their call site first
+	 * runs, potentially before the engine is in a state to service that call. Doing engine work on an
+	 * error path, to describe the error, is how a diagnostic becomes the outage.
+	 *
+	 * Report() runs after startup, when resolving names is safe.
+	 */
+	void NoteMissing(struct UObject* Owner, const std::string& Member);
+
+	/// How many DISTINCT lookups have failed so far.
+	int MissingCount();
+
+	/**
+	 * Print every failed lookup, once per distinct entry.
+	 *
+	 * Call it after startup, when the bulk of the `static auto ... = GetOffset(...)` initialisers
+	 * have run. Cheap and safe to call repeatedly — entries already printed are not repeated, so a
+	 * later failure still shows up rather than being swallowed by an earlier report.
+	 */
+	void Report();
+}

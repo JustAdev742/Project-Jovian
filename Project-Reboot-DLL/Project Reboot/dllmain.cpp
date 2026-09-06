@@ -427,6 +427,20 @@ DWORD WINAPI Initialize(LPVOID)
 
     std::cout << "Initialized\n";
     // LOG(LogInit, All, L"Initialized");
+
+    // Which offset lookups came back empty. Printed HERE because the engine is up by now, so naming
+    // the owning class is safe — the failures themselves were recorded much earlier, without touching
+    // the engine, precisely so this could be deferred to a moment like this one.
+    //
+    // Purely informational: nothing reads it. ~307 lookup sites in this project treat GetOffset's 0
+    // as a usable offset (KNOWN_ISSUES trap8-systemic-unguarded-offsets), and fixing all of them by
+    // hand in a gameserver that cannot be tested here would be far more dangerous than the bug. Being
+    // able to SEE which ones failed on a given build is the prerequisite for fixing any of them.
+    //
+    // Not every entry is a defect: a lookup on a class that legitimately lacks a member — an optional
+    // field, or a probe — shows up here too. The list is a starting point, not a bug count.
+    Offsets::Report();
+
     std::cout << "Fortnite_Season: " << Fortnite_Season << '\n';
     std::cout << "GiveAbilityS14ABOVE: " << Defines::GiveAbilityS14ABOVE << '\n';
     std::cout << "GiveAbilityAddress: " << GiveAbilityAddress << '\n';

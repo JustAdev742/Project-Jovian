@@ -1,6 +1,8 @@
 #include "structs.h"
 #include <iostream> // TODO REMOVE
 #include <format>
+#include <mutex>
+#include <set>
 #include "definitions.h"
 
 std::string FName::ToString()
@@ -362,8 +364,17 @@ void* UObject::GetProperty(const std::string& MemberName, bool bIsSuperStruct, b
 
 	if (!Property) // Didn't find property
 	{
+		// Record it even when the caller asked not to warn. A probe that deliberately suppresses the
+		// warning (GetOffsetChecked does exactly that) still wants the miss counted — the report is
+		// the whole point, and a silent probe is how 307 of these stayed invisible.
+		Offsets::NoteMissing(this, MemberName);
+
+		// Deliberately does NOT name the owner here — GetName() is a ProcessEvent into the engine and
+		// this is an error path that can run before the engine is ready. Offsets::Report() prints the
+		// owner, resolved later when that is safe. (The original text was "Failed to find3", which
+		// named neither the owner nor anything greppable.)
 		if (bWarnIfNotFound)
-			std::cout << "Failed to find3 " << MemberName << '\n';
+			std::cout << "Failed to find property '" << MemberName << "' (see the offset report)\n";
 
 		return 0;
 	}
@@ -405,8 +416,12 @@ void* UObject::GetPropertySlow(const std::string& MemberName, bool bPrint, bool 
 		}
 	}
 
+	// Same as the fast path above: count it regardless of whether the caller wanted it printed.
+	Offsets::NoteMissing(this, MemberName);
+
+	// Same reasoning as the fast path: no GetName() on an error path.
 	if (bWarnIfNotFound)
-		std::cout << "Failed to find0 " << MemberName << '\n';
+		std::cout << "Failed to find property '" << MemberName << "' (slow path, see the offset report)\n";
 
 	return nullptr;
 }
@@ -444,4 +459,95 @@ bool UObject::IsA(UObject* otherClass)
 	}
 
 	return false;
+}
+// ── Offset failure tracking ──────────────────────────────────────────────────────────────────────
+//
+// See the comment on `namespace Offsets` in structs.h for why this exists. In short: ~307 lookup
+// sites treat GetOffset's 0 as a usable offset, the two failure paths print a line nobody can search
+// for and that does not say what was being searched, and nothing counts them. This makes the failures
+// enumerable without changing a single decision the code makes.
+
+
+namespace Offsets
+{
+	namespace
+	{
+		std::mutex g_mutex;
+		// Keyed on (owner pointer, member) so two different classes missing the same member name stay
+		// distinct — and deduplicated, which matters because a non-static call site re-runs its lookup
+		// on every call and would otherwise flood this.
+		//
+		// Holding the owner as a raw pointer is safe for what actually lands here: these are UClass
+		// and UFunction objects, which live for the process. It is NOT dereferenced until Report().
+		std::set<std::pair<UObject*, std::string>> g_missing;
+		std::set<std::pair<UObject*, std::string>> g_reported;
+	}
+
+	void NoteMissing(UObject* Owner, const std::string& Member)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_missing.insert({ Owner, Member });
+	}
+
+	int MissingCount()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		return static_cast<int>(g_missing.size());
+	}
+
+	void Report()
+	{
+		std::vector<std::pair<UObject*, std::string>> fresh;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			for (const auto& m : g_missing)
+			{
+				if (g_reported.insert(m).second)
+					fresh.push_back(m);
+			}
+		}
+
+		if (fresh.empty())
+			return;
+
+		std::cout << "\n-- OFFSETS NOT FOUND ON THIS BUILD -----------------------------\n";
+		for (const auto& [owner, member] : fresh)
+		{
+			// Resolve the owner's name HERE, not at record time — GetName() calls into the engine,
+			// and the point of deferring it is that by now the engine is up. IsPlausibleName is the
+			// same guard FName::ToString needs elsewhere in this file: a ComparisonIndex that did not
+			// come from a real name field walks GNames out of bounds and kills the process.
+			std::string ownerName = "<unnamed>";
+			if (owner && IsPlausibleName(owner->NamePrivate))
+				ownerName = owner->GetName();
+
+			std::cout << "  " << ownerName << " :: " << member << '\n';
+		}
+		std::cout << "  " << fresh.size() << " new, " << MissingCount() << " total.\n";
+		std::cout << "  Each of these gave offset 0 at its call site, which is\n";
+		std::cout << "  indistinguishable from a real first-member offset. Anything that\n";
+		std::cout << "  dereferences one is reading the start of the struct instead.\n";
+		std::cout << "  See KNOWN_ISSUES trap8-systemic-unguarded-offsets.\n";
+		std::cout << "---------------------------------------------------------------\n\n";
+	}
+}
+
+int UObject::GetOffsetChecked(const std::string& MemberName, bool bIsSuperStruct)
+{
+	// A null `this` is a real case, not paranoia: FindObject returns null for a class a build does
+	// not have, and calling straight through that result is the easiest mistake here to make.
+	if (!this)
+		return -1;
+
+	// Ask for the PROPERTY, not the offset. GetOffset cannot distinguish "absent" from "offset 0";
+	// GetProperty is null only when genuinely absent. bWarnIfNotFound is false because this function
+	// reports the miss itself, with the owner's name attached — which the built-in warning lacks.
+	auto Property = GetProperty(MemberName, bIsSuperStruct, false, false);
+	if (!Property)
+	{
+		Offsets::NoteMissing(this, MemberName);
+		return -1;
+	}
+
+	return *(int*)(__int64(Property) + Offset_InternalOffset);
 }

@@ -125,15 +125,23 @@ static int ParamOffset(UObject* Fn, const char* Name, const char* Fallback, cons
 		return -1;
 	}
 
-	// bWarnIfNotFound = false: this is a probe, and a miss here is handled rather than notable.
-	if (Fn->GetProperty(Name, true, false, false))
-		return Fn->GetOffset(Name, true, false, false);
+	// GetOffsetChecked, not GetOffset: it returns -1 for an absent member rather than 0, which is
+	// also a legitimate offset. It records the miss for Offsets::Report() too, so a build missing one
+	// of these appears in the startup summary alongside every other failed lookup instead of only in
+	// this handler's own output. See structs.h.
+	const int direct = Fn->GetOffsetChecked(Name, true);
+	if (direct >= 0)
+		return direct;
 
-	if (Fallback && Fn->GetProperty(Fallback, true, false, false))
+	if (Fallback)
 	{
-		std::cout << "[Harvest] " << Label << ": no '" << Name << "' on this build, falling back to '"
-		          << Fallback << "' (behaviour unchanged from before this fix)\n";
-		return Fn->GetOffset(Fallback, true, false, false);
+		const int fell = Fn->GetOffsetChecked(Fallback, true);
+		if (fell >= 0)
+		{
+			std::cout << "[Harvest] " << Label << ": no '" << Name << "' on this build, falling back to '"
+			          << Fallback << "' (behaviour unchanged from before this fix)\n";
+			return fell;
+		}
 	}
 
 	std::cout << "[Harvest] " << Label << ": neither '" << Name << "' nor '"
