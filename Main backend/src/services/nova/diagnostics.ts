@@ -175,6 +175,22 @@ export function normaliseRoute(url: string): string {
  */
 export function subsystemFor(route: string): string {
   const p = route.toLowerCase();
+  // UE4 log events are not HTTP, so there is no path to infer a subsystem from. The launcher, which
+  // is the component that knows what a UE4 log category means, states it in the second segment:
+  // `/ue4/<subsystem>/<LogCategory>/<message>`.
+  //
+  // The claimed value is checked against the weight table rather than trusted, so an emitter cannot
+  // invent a subsystem or push a row into a bucket that does not exist. It CAN claim an existing
+  // high-weight one — but so can any client, by reporting a `/matchmakingservice/` URL, so this adds
+  // no exposure that the schema did not already have.
+  if (p.startsWith('/ue4/')) {
+    const claimed = p.split('/')[2] || '';
+    // hasOwnProperty, NOT `in`. `'__proto__' in SUBSYSTEM_WEIGHT` and `'constructor' in
+    // SUBSYSTEM_WEIGHT` are both TRUE — every object literal inherits them — so `in` would have let
+    // a reported route named `/ue4/__proto__/…` through as a real subsystem and into the rollups.
+    // Found by writing the test for the fallback, not by reading the line.
+    return Object.prototype.hasOwnProperty.call(SUBSYSTEM_WEIGHT, claimed) ? claimed : 'other';
+  }
   if (p.startsWith('/account/') || p.startsWith('/auth/') || p.startsWith('/epic/oauth')) return 'auth';
   if (p.includes('/matchmaking') || p.includes('/matchmakingservice')) return 'matchmaking';
   if (p.includes('/profile/') || p.startsWith('/fortnite/api/game/v2/profile')) return 'mcp';

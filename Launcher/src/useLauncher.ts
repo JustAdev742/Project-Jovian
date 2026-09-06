@@ -349,6 +349,25 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     });
   }, [user?.token]);
 
+  /* Read FortniteGame.log and turn its errors into diagnostics.
+   *
+   * The engine knows things no HTTP layer can see — the MCP profile that would not load, the party
+   * update that never sent, the chat rooms the backend refused — and it writes all of it to a file
+   * on this machine that nothing was reading. This feeds the same local-agent pipe as Cobalt and
+   * Reboot, so it inherits the same attribution and forwarding.
+   *
+   * NOT gated on a token: the log is worth reading whether or not anyone is signed in, and the
+   * local agent is anonymous by design. Forwarding upstream still waits for a token, above.
+   * Idempotent on the Rust side, so a re-render cannot start a second watcher. */
+  useEffect(() => {
+    invoke("ue4_log_start_watching", {
+      agent: AGENT,
+      buildPath: localStorage.getItem("buildPath") ?? "",
+    }).catch(() => {
+      /* a missing log is the normal case before the game has ever run */
+    });
+  }, []);
+
   /* ── becoming a gameserver ─────────────────────────────────────────────────────────────────── */
 
   /**

@@ -88,6 +88,22 @@ describe('subsystemFor — severity weighting depends on this being right', () =
     assert.equal(subsystemFor('/fortnite/api/game/v2/profile/{accountId}/client/QueryProfile'), 'mcp');
     assert.equal(subsystemFor('/datarouter/api/v1/public/data'), 'telemetry');
   });
+
+  test('a UE4 log event states its subsystem, because there is no path to infer one from', () => {
+    // UE4 events are not HTTP. The launcher knows what `LogOnlineParty` means; the backend does not,
+    // and should not have to.
+    assert.equal(subsystemFor('/ue4/social/LogOnlineParty/UpdateParty request failure'), 'social');
+    assert.equal(subsystemFor('/ue4/mcp/LogFort/could not load AthenaProfile'), 'mcp');
+  });
+
+  test('a claimed subsystem that does not exist falls back rather than creating a bucket', () => {
+    // The claim arrives over HTTP from a player's machine. It may name an existing subsystem — so
+    // can any client, by reporting a matchmaking URL — but it must not be able to invent one, or the
+    // rollups grow a column per typo.
+    assert.equal(subsystemFor('/ue4/nonsense/LogFort/x'), 'other');
+    assert.equal(subsystemFor('/ue4/__proto__/LogFort/x'), 'other');
+    assert.equal(subsystemFor('/ue4/'), 'other');
+  });
 });
 
 describe('recordDiagnostic — aggregation, counting and bounds', () => {

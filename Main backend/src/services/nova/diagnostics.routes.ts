@@ -9,6 +9,26 @@ import {
 import { parseBatch, LIMITS } from './diagnostics.schema';
 import { buildIncidents, incidentId } from './incidents';
 import { renderDashboard } from './dashboard';
+import { identifyVersion } from '../../version/identify';
+
+/**
+ * Collapse a reported build string to the short id the backend uses for its own requests.
+ *
+ * WHY THIS IS NOT COSMETIC. `version` is part of the aggregation key. Cobalt, Reboot and the UE4 log
+ * reader all report the full build header — `++Fortnite+Release-7.40-CL-5046157` — while the backend
+ * records its own failures as `7.40`. Without this, the same build produces two rows for the same
+ * problem depending on which component noticed it, and the version-aware view the cross-version work
+ * exists to support quietly stops working.
+ *
+ * `identifyVersion` is the parser that already does this for User-Agent headers; a build header has
+ * the same shape, so it is reused rather than re-implemented. A build string it cannot parse comes
+ * back as `unknown`, which is the honest answer and the same one an unparseable UA gets.
+ */
+function shortBuild(build: string | undefined): string | undefined {
+  if (!build) return undefined;
+  const id = identifyVersion({ 'user-agent': build }, Config.SEASON_NUMBER).id;
+  return id === 'unknown' ? build.slice(0, 40) : id;
+}
 
 /**
  * The distributed diagnostics surface: where player and host machines report failures, and where an
@@ -160,7 +180,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
         count: ev.count,
         method: ev.method,
         url: ev.url,
-        version: ev.build,
+        version: shortBuild(ev.build),
         accountId,
         status: ev.status,
         detail: ev.detail,
@@ -209,7 +229,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
         count: ev.count,
         method: ev.method,
         url: ev.url,
-        version: ev.build,
+        version: shortBuild(ev.build),
         status: ev.status,
         detail: ev.detail,
         // No accountId: this endpoint has no authenticated identity and must not invent one.

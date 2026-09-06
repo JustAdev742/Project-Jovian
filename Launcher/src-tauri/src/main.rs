@@ -12,6 +12,7 @@ mod carter;
 mod discord;
 mod host;
 mod tailscale;
+mod ue4log;
 
 // Removed 2026-09-06: `pub struct MyError` with `impl warp::reject::Reject` and a Display impl.
 // Nothing constructed or returned it — grep found the declaration and its two impls and nothing
@@ -373,6 +374,8 @@ async fn main() {
             host::p2p_should_i_host,
             diagreport::diagnostics_forward_now,
             diagreport::diagnostics_start_forwarding,
+            ue4log::ue4_log_start_watching,
+            ue4log::ue4_log_ingest_now,
             host::p2p_fetch_register_secret,
             host::p2p_register_host,
             host::p2p_unregister_host,

@@ -19,7 +19,9 @@ FORTNITE CLIENT ──┐
                   ↓
               cobalt.log ──► POST /nova/api/diagnostics/local   (local agent, unauthenticated,
                   │                                              localhost-only)
-REBOOT / HOST ────┘
+REBOOT / HOST ────┤
+                  │
+FortniteGame*.log ┘  ue4log.rs: positional verbosity, Nova-owned warnings only, drops counted
                   ↓
             forward queue (bounded 500, oldest dropped, drop count forwarded)
                   ↓
@@ -49,7 +51,7 @@ memory. Two things close it where it matters — `flushDiagnosticsNow()` runs in
 handlers flush before the process goes away.
 
 Call sites feeding it, counted rather than estimated: **9 backend**, **6 Cobalt**, **1 Reboot**,
-**14 launcher**.
+**14 launcher**, plus the UE4 log reader, which is a classifier over a file rather than a call site.
 
 ---
 
@@ -152,16 +154,33 @@ history is a separate act.
 
 | Failure surface | Captured | Source | Transport | Dashboard | Tested |
 |---|---|---|---|---|---|
-| UE4 `Error:` / `Warning:` / `Fatal` lines | ❌ | `FortniteGame.log` is read by the launcher for self-checks but **not turned into diagnostics** | — | — | — |
-| Engine init / module load failure | ❌ | same log, same gap | — | — | — |
-| Assertions, ensures | ❌ | same | — | — | — |
+| UE4 `Error:` and `Fatal` lines | ✅ | `ue4log.rs`, all log categories | local → launcher → ingest | ✅ | **T** |
+| UE4 `Warning:` lines | ⚠️ | same, but only from categories Nova owns — see below | same | ✅ | **T** |
+| Which process wrote the log (client vs gameserver) | ✅ | `-nullrhi` in the command-line header | same | ✅ | **T** |
+| The build that produced the errors | ✅ | `LogInit: Build:`, collapsed to `7.40` at ingest | same | ✅ | **T** |
+| Engine init / module load failure | ✅ | any `LogInit`/`LogModuleManager` Error reaches it | same | ✅ | — |
+| Assertions, ensures | ⚠️ | a `Fatal` line is ingested; the callstack that follows it is not parsed as one unit | same | ✅ | — |
 | Crash dumps (`UE4CC-*`) | ❌ | directories exist on disk; not read | — | — | — |
 
-**This is the largest unbuilt area, and it is genuinely observable.** `FortniteGame.log` is a real
-UE4 error surface sitting on disk that the launcher already opens for other reasons — 36 `Error:` and
-411 `Warning:` lines in the session inspected on 2026-09-06. Turning those into diagnostics is
-tractable work that has not been done. It is listed here as ❌ rather than described as partial,
-because nothing currently ingests it.
+**Two things about this that are worth stating precisely.**
+
+> **Matching on the text `Error:` would be wrong, and measurably so.** In the session inspected on
+> 2026-09-06 (two logs, 12,822 lines) **27 lines contain `Error:` or `Warning:` without being an
+> error or a warning** — the worst being a `LogFortChat` line that reports `Result Succeded: 1,
+> Error: ,`, i.e. a success. So verbosity is read positionally out of UE4's `[stamp][frame]Category:
+> Verbosity: message` grammar, and a line at the default `Log` level is never an error however its
+> text reads. Six tests pin this against lines copied verbatim from the real logs.
+
+> **Warnings are filtered, and the filtering is counted.** That session has 447 error/warning lines
+> which would become 193 rows in an aggregate capped at 400 — mostly AI pathing and particle
+> warnings, burying the 36 real errors. `Fatal` and `Error` are always ingested; `Warning` only from
+> the 14 UE4 log categories Nova is actually responsible for. Measured result on the real logs: **70
+> rows, 241 lines dropped** — and the drop count is itself reported as one row
+> (`/ue4/nova/ingest/below-threshold`), so the filter is visible rather than silent.
+
+The subsystem mapping is by UE4 log category, which is **coarser than the failure**: `LogFortQuest`
+covers both a quest that did not grant and a POI volume that failed to initialise. The normalised
+message is always carried alongside so an operator reads the text rather than trusting the bucket.
 
 ### Transport / network
 
@@ -191,7 +210,8 @@ Cobalt per-request status/latency .... 0% — architecturally unavailable, and d
 Cobalt VEH-window escapes ............ 0% — unobservable by construction
 Reboot host/session failures ......... ~minimal: 1 report site
 Reboot offset failures ............... console only, not ingested
-UE4 log errors ....................... 0% — observable, not yet built
+UE4 Error/Fatal lines ................ 100% of lines the grammar recognises, all categories
+UE4 Warning lines .................... 14 Nova-owned log categories; the rest counted, not sent
 Native crash dumps ................... 0% — files exist, not read
 WebSocket anomalies .................. partial (one class)
 DNS / TLS / timeout .................. 0%
@@ -220,19 +240,23 @@ Not claimed — driven and observed:
 | Recording stays off the disk | 20,000 events wrote 0 rows until flushed; measured 4.7 us/record, 0.7 ms to write 50 rows |
 | No database is survivable | With `initDatabase()` never called, the store reports itself non-durable, recording still works, exit 0 |
 | A rejected write does not poison the store | A binding SQLite refuses returns 0, rolls back, and the next flush succeeds |
+| UE4 lines become dashboard rows | This machine's real logs POSTed to a running backend: 72 rows accepted, `mcp`/`auth`/`social` subsystems, build `7.40`, host and client told apart |
+| A success line is not read as a failure | 6 tests on lines copied verbatim, incl. `Result Succeded: 1, Error: ,` |
+| A hitch stack dump does not become 8 rows | Normalisation collapses addresses; 4 frames aggregate to 1 row |
+| A UE4 log cannot forge a subsystem | `/ue4/__proto__/…` falls back to `other` — `in` would have accepted it, `hasOwnProperty` does not |
 | Nothing secret reaches the file | Account ids and `eg1~` tokens absent from the serialised table |
 
 ---
 
 ## Known blind spots, ranked by what they cost
 
-1. **UE4 errors are not ingested.** A real, readable surface on disk, unused.
-2. **Reboot is barely instrumented.** One report site. Host and session failures are invisible.
-3. **Native crashes are not collected.** `crash.log`/`crash.dmp` are written and never read.
-4. **No timeout/DNS/TLS instrumentation.** Categories exist; nothing emits them.
-5. **Correlation is per-event, not per-incident chain.** `correlationId` is carried and stored, but
+1. **Reboot is barely instrumented.** One report site. Host and session failures are invisible.
+2. **Native crashes are not collected.** `crash.log`/`crash.dmp` and the `UE4CC-*` directories are
+   written and never read. UE4 *log* lines are now ingested; UE4 *crash reports* are not.
+3. **No timeout/DNS/TLS instrumentation.** Categories exist; nothing emits them.
+4. **Correlation is per-event, not per-incident chain.** `correlationId` is carried and stored, but
    nothing walks a chain to identify the *first* failure — Phase 8's central goal is unbuilt.
-6. **Up to 5 seconds of diagnostics can still be lost.** The write-behind window. Bounded, measured,
+5. **Up to 5 seconds of diagnostics can still be lost.** The write-behind window. Bounded, measured,
    and closed for the crash path specifically — but a power cut or a `SIGKILL` between flushes drops
    whatever landed since the last one. Stated rather than rounded down to zero.
 

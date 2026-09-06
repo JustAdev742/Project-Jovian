@@ -109,7 +109,7 @@ fn local_appdata() -> Option<PathBuf> {
 ///
 /// The build folder is still searched as a fallback, so a portable or dev layout that really does
 /// write there keeps working.
-fn game_log_candidates(build_path: &str) -> Vec<PathBuf> {
+pub(crate) fn game_log_candidates(build_path: &str) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(mut p) = local_appdata() {
         p.push("FortniteGame\\Saved\\Logs");
