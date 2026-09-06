@@ -85,6 +85,11 @@ before(async () => {
   // A success, which must record nothing.
   app.get('/fine', async (_req, reply) => reply.send({ ok: true }));
 
+  // The real Errors.* helper — sendEpicError records internally AND sets __diagRecorded, so this
+  // route is what proves those two do not overlap.
+  const { Errors } = (await import('../../utils/error-handler')) as any;
+  app.get('/via-errors-helper', async (_req, reply) => Errors.unauthorized(reply, 'nope'));
+
   await app.ready();
 });
 
@@ -126,6 +131,21 @@ describe('a failure response is recorded however it was produced', () => {
     await app.inject({ method: 'GET', url: '/thrown' });
     const after = rowsFor('/thrown').reduce((n, r) => n + (r.count || 1), 0);
     assert.equal(after - before, 1, `one request added ${after - before} to the count`);
+  });
+
+  test('an Errors.* rejection is recorded ONCE, not twice', async () => {
+    // THE CASE THE FIRST VERSION OF THIS TEST MISSED, and it was live for an hour before the audit
+    // caught it. sendEpicError() in utils/error-handler.ts already records — it is the original
+    // "sent, not thrown" capture — so the onResponse hook overlapped it and every Errors.* rejection
+    // counted twice. `__diagRecorded` is now set there too.
+    //
+    // Covered separately from the thrown case because they are different code paths that happen to
+    // need the same flag, and testing one proved nothing about the other.
+    const count = () =>
+      rowsFor('/via-errors-helper').reduce((n, r) => n + (r.count || 1), 0);
+    const before = count();
+    await app.inject({ method: 'GET', url: '/via-errors-helper' });
+    assert.equal(count() - before, 1, `one Errors.* rejection produced ${count() - before} diagnostics`);
   });
 
   test('an unrouted path is captured as MISSING even though it answers 200', async () => {

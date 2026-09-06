@@ -38,6 +38,20 @@ export function sendEpicError(
   // place. Wrapped because a diagnostics problem must never stop an error response being sent.
   try {
     const request: any = (reply as any).request;
+
+    // CLAIM THE REQUEST so index.ts's onResponse hook does not record it a second time.
+    //
+    // That hook exists because most rejections are SENT rather than thrown and so never reach
+    // setErrorHandler. This function is the other half of that same story — it is where the sent
+    // ones already get recorded — so without this flag the two overlap and every Errors.* rejection
+    // is counted TWICE. Measured, not assumed: one request to a route calling Errors.unauthorized
+    // produced 2 diagnostics before this line and 1 after.
+    //
+    // Double counting is worse than under-counting. It inflates every occurrence total, every
+    // affected-client figure and every trend percentage on the dashboard, and it does so in a way
+    // that looks like real signal rather than like a bug.
+    if (request) request.__diagRecorded = true;
+
     recordDiagnostic({
       category: statusCode === 401 || statusCode === 403 ? 'AUTH_FAILURE'
         : statusCode >= 500 ? 'INTERNAL_ERROR'
