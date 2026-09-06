@@ -94,6 +94,53 @@ void Harvest(UObject* Controller, UObject* BuildingActor, float Damage)
 	Inventory::GiveItem(Controller, ItemDef, EFortQuickBars::Secondary, -1, AmountToGive);
 }
 
+/**
+ * Resolve one parameter's offset on an OnDamageServer function, safely.
+ *
+ * ── WHY A HELPER RATHER THAN THREE MORE GetOffset CALLS ──────────────────────────────────────────
+ *
+ * Three separate hazards, and the naive call site had all three:
+ *
+ *  1. `Fn` can be null. `FindObject` returns null when a build does not have that blueprint, and the
+ *     old code called `Fn->GetOffset(...)` unconditionally. GetOffset reads ClassPrivate, so that is
+ *     a null dereference inside the gameserver — it only survives because 7.40 happens to have both
+ *     Car blueprints.
+ *
+ *  2. `GetOffset` returns 0 for BOTH "not found" and "found, and it is the first member". Zero is a
+ *     perfectly legitimate offset, so a caller cannot tell success from failure — this is
+ *     `trap8-systemic-unguarded-offsets` in KNOWN_ISSUES. `GetProperty` returns a pointer and is
+ *     null only when genuinely absent, so asking it first is what makes a real guard possible.
+ *
+ *  3. A name may be absent on one build and present on another. Hence the fallback: if the correct
+ *     name is missing, use whatever the code used before rather than failing outright.
+ *
+ * Returns -1 — not 0 — when nothing usable was found, precisely because 0 is a valid offset. Every
+ * caller must check for it before using the result as an offset.
+ */
+static int ParamOffset(UObject* Fn, const char* Name, const char* Fallback, const char* Label)
+{
+	if (!Fn)
+	{
+		std::cout << "[Harvest] " << Label << ": function not present in this build\n";
+		return -1;
+	}
+
+	// bWarnIfNotFound = false: this is a probe, and a miss here is handled rather than notable.
+	if (Fn->GetProperty(Name, true, false, false))
+		return Fn->GetOffset(Name, true, false, false);
+
+	if (Fallback && Fn->GetProperty(Fallback, true, false, false))
+	{
+		std::cout << "[Harvest] " << Label << ": no '" << Name << "' on this build, falling back to '"
+		          << Fallback << "' (behaviour unchanged from before this fix)\n";
+		return Fn->GetOffset(Fallback, true, false, false);
+	}
+
+	std::cout << "[Harvest] " << Label << ": neither '" << Name << "' nor '"
+	          << (Fallback ? Fallback : "(none)") << "' found - harvesting disabled for it\n";
+	return -1;
+}
+
 bool Harvesting::OnDamageServer(UObject* BuildingActor, UFunction* Function, void* Parameters)
 {
 	if (!Parameters) // possible??
@@ -103,19 +150,47 @@ bool Harvesting::OnDamageServer(UObject* BuildingActor, UFunction* Function, voi
 	static auto CarCopper_OnDamageServer_Function = FindObject("/Game/Building/ActorBlueprints/Prop/Car_Copper.Car_Copper_C.OnDamageServer");
 	static auto BuildingActor_OnDamageServerFunction = FindObject("/Script/FortniteGame.BuildingActor.OnDamageServer");
 
-	// UGH
+	// ── CARS NEVER YIELDED MATERIALS, AND THIS IS WHY ────────────────────────────────────────────
+	//
+	// All six Car lookups asked for "InstigatedBy". The commented-out originals beside them named
+	// DamageCauser and Damage, so the intent was never in doubt — the three-line block for
+	// BuildingActor immediately below does it correctly, which is what makes the Car block look like
+	// copy-paste that was never finished. (`harvesting-wrong-property-name` in KNOWN_ISSUES, which
+	// graded the consequence PLAUSIBLE. It is not: the mechanism is exact.)
+	//
+	// DamageCauserOffset therefore equalled InstigatedByOffset, so this ran:
+	//
+	//     auto InstigatedBy  = *(UObject**)(Parameters + InstigatedByOffset);   // the controller
+	//     auto DamageCauser  = *(UObject**)(Parameters + DamageCauserOffset);   // the SAME controller
+	//     ...
+	//     if (!DamageCauser->IsA(FortWeaponPickaxeAthenaClass) && !DamageCauser->IsA(MeleeClass))
+	//         return false;
+	//
+	// `InstigatedBy` has just passed `Helper::IsPlayerController`, and a PlayerController is never a
+	// pickaxe or a melee weapon. So that early return fired on EVERY car hit and `Harvest` was
+	// unreachable for Car_DEFAULT and Car_Copper. Not intermittent — unconditional.
+	//
+	// `Damage` was aimed at the same slot too, making a `float*` out of half a UObject pointer. It is
+	// never dereferenced only because the function returns above it, which is luck rather than
+	// design and would have become a real problem the moment the check above was fixed alone.
+	//
+	// SELF-GUARDING, because none of this can be tested here — a match cannot be run in this
+	// environment, and a wrong offset in the gameserver is a crash on a player's machine. So each
+	// lookup asks for the correct name and falls back to "InstigatedBy" if a build does not have it,
+	// which reproduces exactly today's behaviour rather than risking something new. See ParamOffset.
+	static auto CarDefault_InstigatedByOffset = ParamOffset(CarDefault_OnDamageServer_Function, "InstigatedBy",  nullptr,        "Car_DEFAULT.InstigatedBy");
+	static auto CarDefault_DamageCauserOffset = ParamOffset(CarDefault_OnDamageServer_Function, "DamageCauser",  "InstigatedBy", "Car_DEFAULT.DamageCauser");
+	static auto CarDefault_DamageOffset       = ParamOffset(CarDefault_OnDamageServer_Function, "Damage",        "InstigatedBy", "Car_DEFAULT.Damage");
 
-	static auto CarDefault_InstigatedByOffset = CarDefault_OnDamageServer_Function->GetOffset("InstigatedBy", true); // CarDefault_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_DEFAULT.Car_DEFAULT_C.OnDamageServer", "InstigatedBy") : 0;
-	static auto CarDefault_DamageCauserOffset = CarDefault_OnDamageServer_Function->GetOffset("InstigatedBy", true);// CarDefault_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_DEFAULT.Car_DEFAULT_C.OnDamageServer", "DamageCauser") : 0;
-	static auto CarDefault_DamageOffset = CarDefault_OnDamageServer_Function->GetOffset("InstigatedBy", true); // CarDefault_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_DEFAULT.Car_DEFAULT_C.OnDamageServer", "Damage") : 0;
+	static auto CarCopper_InstigatedByOffset  = ParamOffset(CarCopper_OnDamageServer_Function,  "InstigatedBy",  nullptr,        "Car_Copper.InstigatedBy");
+	static auto CarCopper_DamageCauserOffset  = ParamOffset(CarCopper_OnDamageServer_Function,  "DamageCauser",  "InstigatedBy", "Car_Copper.DamageCauser");
+	static auto CarCopper_DamageOffset        = ParamOffset(CarCopper_OnDamageServer_Function,  "Damage",        "InstigatedBy", "Car_Copper.Damage");
 
-	static auto CarCopper_InstigatedByOffset = CarCopper_OnDamageServer_Function->GetOffset("InstigatedBy", true); // CarCopper_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_Copper.Car_Copper_C.OnDamageServer", "InstigatedBy") : 0;
-	static auto CarCopper_DamageCauserOffset = CarCopper_OnDamageServer_Function->GetOffset("InstigatedBy", true); // CarCopper_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_Copper.Car_Copper_C.OnDamageServer", "DamageCauser") : 0;
-	static auto CarCopper_DamageOffset = CarCopper_OnDamageServer_Function->GetOffset("InstigatedBy", true); // CarCopper_OnDamageServer_Function ? FindOffsetStruct("Function /Game/Building/ActorBlueprints/Prop/Car_Copper.Car_Copper_C.OnDamageServer", "Damage") : 0;
-
-	static auto BuildingActor_InstigatedByOffset = BuildingActor_OnDamageServerFunction->GetOffset("InstigatedBy", true); // FindOffsetStruct("Function /Script/FortniteGame.BuildingActor.OnDamageServer", "InstigatedBy");
-	static auto BuildingActor_DamageCauserOffset = BuildingActor_OnDamageServerFunction->GetOffset("DamageCauser", true); // FindOffsetStruct("Function /Script/FortniteGame.BuildingActor.OnDamageServer", "DamageCauser");
-	static auto BuildingActor_DamageOffset = BuildingActor_OnDamageServerFunction->GetOffset("Damage", true); // FindOffsetStruct("Function /Script/FortniteGame.BuildingActor.OnDamageServer", "Damage");
+	// These three were already correct. Routed through the same helper for the null-function guard,
+	// and so that all nine report themselves the same way.
+	static auto BuildingActor_InstigatedByOffset = ParamOffset(BuildingActor_OnDamageServerFunction, "InstigatedBy", nullptr, "BuildingActor.InstigatedBy");
+	static auto BuildingActor_DamageCauserOffset = ParamOffset(BuildingActor_OnDamageServerFunction, "DamageCauser", nullptr, "BuildingActor.DamageCauser");
+	static auto BuildingActor_DamageOffset       = ParamOffset(BuildingActor_OnDamageServerFunction, "Damage",       nullptr, "BuildingActor.Damage");
 
 	static auto BuildingSMActorClass = FindObject(("/Script/FortniteGame.BuildingSMActor"));
 
@@ -140,6 +215,18 @@ bool Harvesting::OnDamageServer(UObject* BuildingActor, UFunction* Function, voi
 			FindObject("/Game/Weapons/FORT_Melee/Blueprints/B_Athena_Pickaxe_Generic.B_Athena_Pickaxe_Generic_C");
 
 		static auto FortWeaponPickaxeAthenaClass = FindObject("/Script/FortniteGame.FortWeaponPickaxeAthena");
+
+		// THE GUARD. ParamOffset returns -1 for "no usable offset", and -1 is not a sentinel that can
+		// be quietly tolerated here: these three lines take it as a byte offset into the parameter
+		// block, so a negative value reads BEFORE the struct and a garbage pointer gets dereferenced
+		// two lines later. Refuse instead. Losing harvesting on one actor type is a bad afternoon;
+		// reading wild memory inside the gameserver takes the whole match down.
+		//
+		// Checked here rather than at resolution because these are per-actor: BuildingActor can
+		// resolve cleanly while a Car blueprint absent from some build does not, and that case should
+		// cost only the cars.
+		if (InstigatedByOffset < 0 || DamageCauserOffset < 0 || DamageOffset < 0)
+			return false;
 
 		auto InstigatedBy = *(UObject**)(__int64(Parameters) + InstigatedByOffset);
 		auto DamageCauser = *(UObject**)(__int64(Parameters) + DamageCauserOffset);

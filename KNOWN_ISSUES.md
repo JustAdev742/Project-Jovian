@@ -170,7 +170,7 @@ or one test launch with a candidate key and a check of whether the request lands
 
 | id | grade | location | issue |
 |---|---|---|---|
-| `harvesting-wrong-property-name` | CONFIRMED | `harvesting.cpp:109-114` | Four offset lookups ask for `"InstigatedBy"` where the variable names say `DamageCauser`/`Damage`. Cars likely yield no materials (PLAUSIBLE, not observed). |
+| ~~`harvesting-wrong-property-name`~~ | **FIXED 2026-09-06** | `harvesting.cpp:109-114` | Cars could never yield materials — the consequence was graded PLAUSIBLE and is in fact unconditional. Fixed self-guardingly; see the detail below. |
 | `clientquestlogin-grants-nothing` | CONFIRMED | `mcp.routes.ts:57-64` | Aliased to QueryProfile, so quest state is never created. 57 calls per session. |
 | `stale-dist-preferred` | CONFIRMED | `main.rs:156-168` | `start_backend` prefers `dist/` over sources. |
 | ~~`launcher-evidence-is-self-erasing`~~ | **FIXED 2026-09-06** | `main.rs:174-188` | `nova-agent.log` is opened **append** rather than `File::create`, with a session separator and 5MB rotation to one `.1` file. A crash-restart no longer destroys the log of the crash it is recovering from. |
@@ -243,6 +243,46 @@ if the module path cannot be read.
 
 This matters more than a P3 usually would: this project's recurring failure is a component being
 older than everyone assumes, and the banner is the one place that should have said so.
+
+
+### `harvesting-wrong-property-name` · CONFIRMED · **FIXED 2026-09-06** · *consequence upgraded from PLAUSIBLE to certain*
+All six Car parameter lookups in `harvesting.cpp` asked for `"InstigatedBy"`. The commented-out
+originals beside them named `DamageCauser` and `Damage`, and the `BuildingActor` block immediately
+below does it correctly — so the intent was never in doubt.
+
+**The consequence is not "likely no materials", it is unconditional.** `DamageCauserOffset` equalled
+`InstigatedByOffset`, so:
+
+```cpp
+auto InstigatedBy = *(UObject**)(Parameters + InstigatedByOffset);   // the controller
+auto DamageCauser = *(UObject**)(Parameters + DamageCauserOffset);   // the SAME controller
+...
+if (!DamageCauser->IsA(FortWeaponPickaxeAthenaClass) && !DamageCauser->IsA(MeleeClass))
+    return false;
+```
+
+`InstigatedBy` has just passed `Helper::IsPlayerController` on the line above, and a PlayerController
+is never a pickaxe or a melee weapon — so that early return fired on **every** car hit and `Harvest`
+was unreachable for `Car_DEFAULT` and `Car_Copper`. `Damage` pointed at the same slot too, making a
+`float*` out of half a UObject pointer; it escaped being dereferenced only because the function
+returned above it, which would have become a live crash the moment the class check alone was fixed.
+
+Independently confirmed against the shipped binary: it contains the string `DamageCauser` exactly
+**once** — the single correct `BuildingActor` lookup. The rebuilt DLL contains it four times.
+
+**SELF-GUARDING, because none of this can be tested here.** A match cannot be run in this
+environment and a wrong offset in the gameserver is a crash on a player's machine, so the fix is
+built to be safe when it is wrong. New `ParamOffset()` helper:
+
+| hazard | old code | now |
+|---|---|---|
+| `FindObject` returns null on a build without that blueprint | `Fn->GetOffset(...)` — null dereference | returns -1, logs |
+| `GetOffset` returns 0 for both *absent* and *first member* (`trap8-systemic-unguarded-offsets`) | indistinguishable | asks `GetProperty` first, which is null only when genuinely absent |
+| the correct name may not exist on some build | n/a | falls back to `"InstigatedBy"` — **exactly today's behaviour**, so a build without the field is no worse off |
+| an unusable offset reaching the read | would index before the struct and dereference garbage | `-1` sentinel (not 0, which is a valid offset) checked at the point of use |
+
+So on a build that has `DamageCauser`/`Damage`, cars harvest. On one that does not, behaviour is
+byte-for-byte what it was. Neither path can read wild memory.
 
 ### `cobalt-sigscan-hangs-forever` · CONFIRMED · **FIXED 2026-09-06**
 `dllmain.cpp` `InitializeCurlHook()` retried the `curl_easy_setopt` signature in

@@ -51,6 +51,26 @@ const COMPONENT = process.argv.find((a) => a === 'reboot') ? 'reboot' : 'cobalt'
  */
 const T = (...seg) => path.join(ROOT, 'Launcher', 'src-tauri', ...seg);
 
+/**
+ * Pick the most recently written of several candidate build outputs, and report when they disagree.
+ *
+ * Returns the first path when none exist, so the "no build output" message names something sensible.
+ */
+function newestOf(candidates) {
+  const found = candidates
+    .filter((p) => fs.existsSync(p))
+    .map((p) => ({ p, t: fs.statSync(p).mtimeMs }))
+    .sort((a, b) => b.t - a.t);
+  if (found.length === 0) return candidates[0];
+  if (found.length > 1) {
+    console.log(`[stage] NOTE: ${found.length} build outputs exist for this component; using the newest.`);
+    for (const f of found) {
+      console.log(`[stage]   ${new Date(f.t).toISOString().slice(0, 16)}  ${path.relative(ROOT, f.p).split(String.fromCharCode(92)).join('/')}`);
+    }
+  }
+  return found[0].p;
+}
+
 const COMPONENTS = {
   cobalt: {
     source: path.join(ROOT, 'Launcher', 'cobalt', 'x64', 'Release', 'Cobalt.dll'),
@@ -67,7 +87,18 @@ const COMPONENTS = {
     // The authoritative tree is IN THIS REPO. There are four other Project Reboot checkouts under
     // Documents/backends/ and none of them is what ships — a fact that cost real time to establish,
     // and which host.rs's DEFAULT_REBOOT_DLL still pointed at.
-    source: path.join(ROOT, 'Project-Reboot-DLL', 'Project Reboot', 'x64', 'Release', 'Project Reboot.dll'),
+    // TWO OUTPUT PATHS IN ONE TREE, and they disagree. A solution-level build
+    // (`msbuild "Project Reboot.sln"`) writes to `Project-Reboot-DLL/x64/Release/`, while a
+    // project-level build writes to `Project-Reboot-DLL/Project Reboot/x64/Release/`. Whoever cut
+    // the 5 September build used the second; the documented command produces the first. Hardcoding
+    // either one silently stages a stale DLL depending on how it was built — which is this project's
+    // signature failure, now for the fourth time.
+    //
+    // Take the NEWEST of the two and say so when they differ, rather than pretending there is one.
+    source: newestOf([
+      path.join(ROOT, 'Project-Reboot-DLL', 'x64', 'Release', 'Project Reboot.dll'),
+      path.join(ROOT, 'Project-Reboot-DLL', 'Project Reboot', 'x64', 'Release', 'Project Reboot.dll'),
+    ]),
     build: 'msbuild "Project-Reboot-DLL/Project Reboot.sln" /p:Configuration=Release /p:Platform=x64',
     targets: [
       { p: T('resources', 'Project Reboot.dll'),                      required: true,  why: 'bundled by tauri.conf.json — what an INSTALLED launcher injects' },
