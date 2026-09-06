@@ -93,15 +93,37 @@ export async function getAccountSummary(accountId: string, token: string, fallba
  * by the coordinator (through nova-proxy on 3551), and the backend runs on AGENT_PORT purely to
  * spawn a gameserver here when the coordinator elects this machine. Omit it for a standalone backend
  * that serves the game itself on 3551.
+ *
+ * `registerSecret` is the coordinator's gameserver-registration secret, fetched by an authenticated
+ * launcher. It is passed through to the agent's environment, where hostRunner.ts already knows to
+ * send it. Optional, and omitting it is exactly what every launcher in the field does today — see
+ * `gameserver-register-unauthenticated` in KNOWN_ISSUES.md for why that has to keep working.
  */
-export async function startBackend(agentFor?: string): Promise<string> {
+export async function startBackend(agentFor?: string, registerSecret?: string): Promise<string> {
   try {
-    await invoke("start_backend", agentFor
+    const args: Record<string, unknown> = agentFor
       ? { port: AGENT_PORT, coordinator: agentFor }
-      : {});
+      : {};
+    if (registerSecret) args.registerSecret = registerSecret;
+    await invoke("start_backend", args);
     return "starting";
   } catch (e) {
     return `error: ${String(e)}`;
+  }
+}
+
+/**
+ * Fetch the gameserver-registration secret from the coordinator.
+ *
+ * Returns null when the coordinator has none configured, which is the live case today — that is not
+ * an error and must not be surfaced as one. Hosting still works without it.
+ */
+export async function fetchRegisterSecret(coordinator: string, token: string): Promise<string | null> {
+  try {
+    const s = await invoke<string | null>("p2p_fetch_register_secret", { coordinator, token });
+    return s ?? null;
+  } catch {
+    return null;
   }
 }
 

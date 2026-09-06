@@ -12,6 +12,7 @@ import { readBinaryFile, exists } from "@tauri-apps/api/fs";
 import { join } from "@tauri-apps/api/path";
 import {
   startBackend,
+  fetchRegisterSecret,
   AGENT,
   AGENT_PORT,
   COORDINATOR,
@@ -116,8 +117,11 @@ export function hostVerdictText(verdict: string): string {
  * and heartbeats its own server, because it is the only thing that knows for certain whether that
  * process is still alive.
  */
-async function registerHostEverywhere(address: string, port: number, name: string) {
-  await invoke("p2p_register_host", { coordinator: COORDINATOR, address, port, name });
+async function registerHostEverywhere(address: string, port: number, name: string, token?: string) {
+  // The secret is the COORDINATOR's, so it goes only to the coordinator. The local agent is a
+  // different service on loopback and has no business holding another service's credential.
+  const secret = token ? await fetchRegisterSecret(COORDINATOR, token) : null;
+  await invoke("p2p_register_host", { coordinator: COORDINATOR, address, port, name, secret: secret || undefined });
   // The local backend reaches its own gameserver on loopback regardless of the mesh address.
   invoke("p2p_register_host", { coordinator: AGENT, address: "127.0.0.1", port, name }).catch(() => {});
 }
@@ -572,7 +576,10 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       let agentUp = agentState === "ok";
       if (!agentUp) {
         setStatus("Starting the local host service…");
-        const started = await startBackend(COORDINATOR);
+        // Fetch the registration secret first. Null is the normal case today (the coordinator has
+        // none configured) and must not block hosting - see gameserver-register-unauthenticated.
+        const regSecret = await fetchRegisterSecret(COORDINATOR, user?.token || "");
+        const started = await startBackend(COORDINATOR, regSecret || undefined);
         // The database load takes a few seconds; the spec handover below is pointless until it
         // answers. 30s because a cold first run is slower than any later one.
         for (let i = 0; i < 30 && !agentUp; i++) {
@@ -739,11 +746,11 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       return;
     }
     try {
-      await registerHostEverywhere(address, port, user?.displayName || "Nova host");
+      await registerHostEverywhere(address, port, user?.displayName || "Nova host", user?.token);
       // Keep it registered — the coordinator drops a dynamic server after 60s of silence.
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
       heartbeatRef.current = setInterval(() => {
-        registerHostEverywhere(address, port, user?.displayName || "Nova host").catch(() => {});
+        registerHostEverywhere(address, port, user?.displayName || "Nova host", user?.token).catch(() => {});
       }, 30000);
       setStatus(`Registered ${address}:${port} — heartbeat on.`);
       notify({ kind: "success", title: "Your match is published", body: `Friends can join at ${address}:${port}.` });

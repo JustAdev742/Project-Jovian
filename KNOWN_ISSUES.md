@@ -33,6 +33,34 @@ credential at all — no bearer token, no secret — and it is live, called from
 So there is nothing already in the request to authenticate against, and closing the gate really does
 break every launcher in the field. The prerequisite is a launcher release, not a backend change.
 
+**2026-09-06 — STEP ONE IS DONE. The gate is still open, deliberately.**
+
+The plan above said the clean fix was to have the coordinator serve the secret to authenticated
+launchers, *then* flip the gate. The first half now exists end to end:
+
+| piece | where |
+|---|---|
+| `GET /nova/api/register-secret`, behind `requireAuth` | `matchmaking.routes.ts` |
+| launcher fetches it with the player's bearer token | `host.rs` `p2p_fetch_register_secret` |
+| launcher passes it into the agent's environment at spawn | `main.rs` `start_backend` → `NOVA_REGISTER_SECRET` |
+| agent sends it when registering | `hostRunner.ts` — **unchanged**, it always did |
+
+That last row is why this was small: `hostRunner.ts` has always sent
+`secret: Config.REGISTER_SECRET || undefined`. The secret was simply never populated on a player's
+machine, because nothing could tell the agent what it was. The manual playit path passes it too.
+
+Six tests in `register-secret.test.ts`, including the two that matter: the secret it serves is
+accepted by the register gate, and a wrong one is still refused — the second guards the first, which
+would otherwise pass just as well against a gate that accepted everything.
+
+**Why the gate is STILL open, and why that is correct.** Nothing observable changes yet. Flipping it
+now would lock out every launcher already installed, because none of them send a credential. The
+field has to be running this build first. **Step two — deleting the `Config.REGISTER_SECRET &&`
+short-circuit so an unset secret no longer skips the gate — belongs in a release AFTER this one has
+had time to propagate**, and it is a two-line change when that day comes.
+
+The secret is passed by environment, not argv: command lines are world-readable on Windows.
+
 ---
 
 ### `nova-303-request-escape` · CONFIRMED · **now has a named endpoint** · open

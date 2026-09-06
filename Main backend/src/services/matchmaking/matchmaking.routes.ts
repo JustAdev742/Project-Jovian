@@ -1372,6 +1372,39 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
     return reply.send({ authKey: Config.TS_AUTHKEY, minted: false });
   });
 
+  /**
+   * GET /nova/api/register-secret
+   *
+   * Hands the gameserver-registration secret to an AUTHENTICATED launcher, exactly as
+   * `/nova/api/tailnet-authkey` above hands over the tailnet key.
+   *
+   * WHY THIS EXISTS — see `gameserver-register-unauthenticated` in KNOWN_ISSUES.md. The gate on
+   * `POST /nova/api/gameserver/register` is `if (Config.REGISTER_SECRET && b.secret !== ...)`, and
+   * the secret defaults to `''`, so an unset secret skips the gate entirely. That endpoint sets the
+   * address every player is routed to, and the coordinator is publicly reachable through the
+   * Tailscale Funnel. It has stayed open for one reason only: no launcher in the field sends a
+   * credential, so closing the gate would break hosting for everyone until every launcher updated.
+   *
+   * THIS IS STEP ONE OF TWO, AND THE ORDER IS NOT OPTIONAL:
+   *
+   *   1. (this release)  ship a launcher that fetches this secret and sends it. Harmless on its own
+   *      — the gate still lets unsigned registrations through, so nothing in the field breaks.
+   *   2. (a LATER release, once the field has updated) make the gate fail closed.
+   *
+   * Doing both at once would lock every existing player out of hosting, which is why the issue was
+   * left open rather than "fixed" in a way that shipped an outage.
+   *
+   * The value is never logged, and 503 is deliberate when it is unset: a launcher that gets no
+   * secret must keep registering without one, because that is still the live behaviour.
+   */
+  fastify.get('/nova/api/register-secret', { preHandler: requireAuth }, async (_request, reply) => {
+    if (!Config.REGISTER_SECRET) {
+      return reply.status(503).send({
+        error: 'no registration secret configured — set NOVA_REGISTER_SECRET on the coordinator',
+      });
+    }
+    return reply.send({ secret: Config.REGISTER_SECRET });
+  });
   // Back-compat: a listen-server that reports readiness maps onto a dynamic registration.
   fastify.post('/nova/api/session/:sessionId/host-ready', async (request, reply) => {
     const b = (request.body || {}) as any;

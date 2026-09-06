@@ -140,24 +140,76 @@ pub async fn p2p_should_i_host(
         .map_err(|e| format!("should-i-host parse failed: {}", e))
 }
 
+/// Fetch the gameserver-registration secret from the coordinator (requires the player's bearer
+/// token). Returns None when the coordinator has none configured, which is the current live case.
+///
+/// See `gameserver-register-unauthenticated` in KNOWN_ISSUES.md. The register endpoint sets the
+/// address every player is routed to and its gate is open, because no launcher in the field sends a
+/// credential. This is step one of two: ship a launcher that CAN send one. Step two — making the
+/// gate fail closed — only becomes safe once enough of the field has this build, and doing both at
+/// once would lock every existing player out of hosting.
+///
+/// A missing secret is deliberately NOT an error. Registration must keep working without one until
+/// step two lands.
+#[tauri::command]
+pub async fn p2p_fetch_register_secret(
+    coordinator: String,
+    token: String,
+) -> Result<Option<String>, String> {
+    let base = coordinator.trim_end_matches('/');
+    let url = format!("{}/nova/api/register-secret", base);
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&url)
+        .header("Authorization", format!("bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("register-secret request failed: {}", e))?;
+
+    // 503 means "none configured" and 404 means "coordinator predates this endpoint". Both are the
+    // normal case today, and neither should surface as an error the player sees.
+    if !res.status().is_success() {
+        crate::dbg_log(&format!(
+            "register-secret: coordinator returned HTTP {} - registering without a secret",
+            res.status()
+        ));
+        return Ok(None);
+    }
+
+    let v: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("register-secret parse failed: {}", e))?;
+    Ok(v.get("secret").and_then(|s| s.as_str()).map(|s| s.to_string()))
+}
+
 /// Register this host's public (playit) address with the coordinator so joiners are routed to it.
 /// Call this once the playit tunnel is up. Re-call every ~30s to heartbeat (the coordinator drops
 /// a dynamic server after 60s of silence).
+///
+/// `secret` is optional on purpose — see p2p_fetch_register_secret. Omitting it is what every
+/// launcher in the field does today and must keep working.
 #[tauri::command]
 pub async fn p2p_register_host(
     coordinator: String,
     address: String,
     port: u16,
     name: Option<String>,
+    secret: Option<String>,
 ) -> Result<bool, String> {
     let base = coordinator.trim_end_matches('/');
     let url = format!("{}/nova/api/gameserver/register", base);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "address": address,
         "port": port,
         "playlist": "*",
         "name": name.unwrap_or_else(|| "Nova host".to_string()),
     });
+    if let Some(s) = secret {
+        if !s.is_empty() {
+            body["secret"] = serde_json::Value::String(s);
+        }
+    }
     let client = reqwest::Client::new();
     let res = client
         .post(&url)
@@ -174,10 +226,16 @@ pub async fn p2p_unregister_host(
     coordinator: String,
     address: String,
     port: u16,
+    secret: Option<String>,
 ) -> Result<bool, String> {
     let base = coordinator.trim_end_matches('/');
     let url = format!("{}/nova/api/gameserver/unregister", base);
-    let body = serde_json::json!({ "address": address, "port": port, "playlist": "*" });
+    let mut body = serde_json::json!({ "address": address, "port": port, "playlist": "*" });
+    if let Some(s) = secret {
+        if !s.is_empty() {
+            body["secret"] = serde_json::Value::String(s);
+        }
+    }
     let client = reqwest::Client::new();
     let res = client
         .post(&url)

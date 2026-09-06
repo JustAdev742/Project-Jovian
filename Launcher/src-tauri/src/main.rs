@@ -130,6 +130,7 @@ fn start_backend(
     path: Option<String>,
     port: Option<u16>,
     coordinator: Option<String>,
+    register_secret: Option<String>,
 ) -> Result<bool, String> {
     let dir = path.unwrap_or_else(resolve_backend_dir);
     if !std::path::Path::new(&dir).join("package.json").exists() {
@@ -198,6 +199,26 @@ fn start_backend(
         // No game client ever connects to the agent — the proxy owns that. Binding the standalone
         // XMPP listener on port 80 would only risk a clash with whatever else wants it.
         cmd.env("NOVA_DISABLE_STANDALONE_XMPP", "1");
+    }
+    if let Some(s) = register_secret.as_deref().filter(|s| !s.trim().is_empty()) {
+        // The gameserver-registration secret, fetched from the coordinator by an AUTHENTICATED
+        // launcher (see host::p2p_fetch_register_secret) and handed to the agent through its
+        // environment.
+        //
+        // Nothing else needs changing to make this work: hostRunner.ts has always sent
+        // `secret: Config.REGISTER_SECRET || undefined` when it registers. The secret was simply
+        // never populated on a player's machine, because there was no way for the agent to learn it.
+        //
+        // This is step one of closing `gameserver-register-unauthenticated` (KNOWN_ISSUES.md). It
+        // changes nothing observable today — the coordinator's gate still admits registrations
+        // without a secret — and that is the point: the field has to be sending the credential
+        // BEFORE the gate can be made to require it, or every launcher already installed loses the
+        // ability to host the moment it flips.
+        //
+        // Passed by environment rather than argv because argv is world-readable on Windows: any
+        // process can list another's command line, and a secret in it would be visible to every
+        // program on the machine.
+        cmd.env("NOVA_REGISTER_SECRET", s);
     }
     {
         // Stamp the LAUNCHER's version into the agent's environment so it appears in the log the
@@ -325,6 +346,7 @@ async fn main() {
             host::p2p_should_i_host,
             diagreport::diagnostics_forward_now,
             diagreport::diagnostics_start_forwarding,
+            host::p2p_fetch_register_secret,
             host::p2p_register_host,
             host::p2p_unregister_host,
             host::is_gameserver_running,
