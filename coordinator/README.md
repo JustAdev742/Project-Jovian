@@ -78,3 +78,45 @@ credentials; they are not read by anything.
 `NOVA_REGISTER_SECRET` is unset, so `/nova/api/gameserver/register` is unauthenticated — see
 KNOWN_ISSUES `gameserver-register-unauthenticated`. Setting it here alone would **break hosting**,
 because no launcher in the field sends it. It needs a launcher release first.
+
+## Diagnostics dashboard — public, deliberately narrow
+
+Deployed 2026-09-06. Until then the dashboard had **never been on the coordinator**: it was running
+45 source files against the repo's 61, and `index.ts` had zero references to `diagnosticsRoutes`.
+`/nova/api/dashboard` answered `200 {}` — the catch-all, not the dashboard. Worth remembering that
+"it returned 200" proved nothing.
+
+```
+cloudflared  ->  127.0.0.1:3560  (diag-proxy.mjs, path allowlist)  ->  127.0.0.1:3551  (Nova)
+```
+
+**Why the proxy is not optional.** Tunnelling 3551 directly would publish every route the backend
+serves, including `POST /nova/api/gameserver/register` — whose gate is deliberately unset, and which
+decides the address every player is routed to (`gameserver-register-unauthenticated`). That issue is
+accepted-open *because the backend is loopback-only*. Publishing it would make it remote.
+
+`diag-proxy.mjs` forwards only `/nova/api/dashboard`, `/nova/api/diagnostics`, `/nova/api/incidents`
+and `/nova/api/incidents/<id>`, GET/HEAD only, and 404s everything else. It adds no authentication —
+the backend's `adminOk()` is still the security boundary. Verified from outside the network:
+
+| request | result |
+|---|---|
+| dashboard, no secret | 403 |
+| dashboard, wrong secret | 403 |
+| dashboard, correct secret | 200 |
+| `gameserver/register`, `oauth/token`, MCP, `/nova/api/logs` | 404 |
+
+**The secret** is `NOVA_AC_ADMIN_SECRET` in `~/nova-backend/.env` (chmod 600). `NOVA_REGISTER_SECRET`
+is deliberately left unset — `adminOk()` falls back to it, so setting it would close the register
+gate and break hosting for every launcher below 1.6.5.
+
+**The URL changes.** `trycloudflare.com` hostnames are issued per tunnel process, so a restart gets a
+new one. Read the current one:
+
+```bash
+ssh -i ~/.ssh/nova_coordinator admin_home@2001:8003:2291:a501:2af1:eff:fe28:da6 \
+  'cat ~/nova-backend/diag-public-url.txt'
+```
+
+`start-diag.sh` keeps both processes up (`@reboot` and every 5 minutes) and is idempotent. A stable
+hostname would need a named Cloudflare tunnel and a domain.
