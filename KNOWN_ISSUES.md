@@ -265,7 +265,7 @@ Verified against the old code: 3 of the 5 tests fail before the fix, all 5 pass 
 
 ---
 
-### `bumper-media-texture-had-no-resource` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)** · *the cause of ten blank-video builds*
+### `bumper-media-texture-had-no-resource` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.3)** · *the cause of ten blank-video builds*
 
 **The intro bumper decoded but drew white, for every build from 1.7.2 to 1.8.1.**
 
@@ -302,7 +302,15 @@ call did not), so nothing was loaded and the video was blank again. **1.8.3 adds
 which loads the two packages in that directory — `PostLoad` included — and then the texture is
 found by its full path. The registry route is kept first; the log names whichever worked.
 
-### `bumper-hide-looked-up-by-the-wrong-path` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.3)** · *1.8.2 locked players out of the login screen*
+**1.8.3 played session, verified from cobalt.log:** `visibility read back 2 before AddToViewport, 2
+after` (login and lobby reachable behind it) → on Battle Royale `audio started`, `shown - visibility
+read back 0` → 7.5 s later `finished … texture reported 854 wide during playback`. Frames were drawn.
+Note the texture was `already resident` in that session — the game had loaded `DefaultMediaTexture`
+itself — so the object-library route was not exercised; it is the fallback for a session where it is
+not, and the log will name it if it runs. The `MISSING AssetRegistry.GetAssetsByClass` line still
+prints once per session from the listing step; it is noise on this build, to be silenced.
+
+### `bumper-hide-looked-up-by-the-wrong-path` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.3)** · *1.8.2 locked players out of the login screen*
 
 **1.8.2 showed the placeholder image over the login screen, full-screen, and no click got through.**
 
