@@ -325,7 +325,7 @@ resolves a call; the hide is applied before and after `AddToViewport`, to the im
 `GetVisibility` is read back and logged (`visibility read back 2 … after`). A silent `if` around a
 lookup that can fail is the pattern to watch for: the log said "hidden" without ever checking.
 
-### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.5)** · *1.8.4 silenced nothing that mattered*
+### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.5)** · *1.8.4 silenced nothing that mattered*
 
 **1.8.4 was supposed to silence the lobby music under the bumper. The music played straight through
 it and was merely restarted at the end.**
@@ -363,7 +363,7 @@ is restarted from the top and the mix popped.
 `stopped Menu_SubgameSelect_Screen_Loop_Cue [Fort_Music_Menu_PSM]`. See the next entry for what it
 got wrong at the other end.
 
-### `bumper-restarted-music-the-game-had-finished-with` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.6)** · *two soundtracks at once*
+### `bumper-restarted-music-the-game-had-finished-with` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.6)** · *two soundtracks at once*
 
 **1.8.5 ended the bumper with two tracks playing over each other:** the game-mode selector's loop
 and the lobby music.
@@ -382,6 +382,11 @@ nothing of its own`).
 
 The general shape, worth remembering: it is safe to take something away from the game for a moment,
 and not safe to decide on the game's behalf that it should come back.
+
+**1.8.6 played session: confirmed working by the player.** The bumper plays with its own sound, the
+game's music is silent underneath it, and one track — the lobby's — starts from the top when the clip
+ends. That closes the bumper feature: trigger, unskippable display, off-switch, audio and music
+handover are all verified in play.
 
 ### `bumper-off-switch-never-worked` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
 
