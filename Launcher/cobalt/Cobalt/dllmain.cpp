@@ -7,6 +7,7 @@
 #include "curlhook.h"
 #include "signatures.h"
 #include "exithook.h"
+#include "ue4.h"
 #include <MinHook/MinHook.h>
 
 #define DetoursEasy(address, hook) \
@@ -601,6 +602,32 @@ DWORD WINAPI Main(LPVOID)
     // alongside them are inside a /* */ block and have not been live.
     MH_Initialize();
     Memcury::VEHHook::Init();
+
+    // ── UNREAL REFLECTION ────────────────────────────────────────────────────────────────────────
+    //
+    // Resolved here but USED later, on a waiter thread. The addresses can be found the moment the
+    // module is mapped; the object array they point at is empty until the engine has built its
+    // objects, several seconds in. Init() reports which patterns matched — that answer is worth
+    // having in the log even on a build where nothing else here applies.
+    //
+    // Nothing is hooked and nothing is mutated. This is a read-only capability being brought up so
+    // that in-game work (the entry bumper) has something to stand on; if every pattern misses,
+    // Cobalt's actual job — redirecting HTTP — is completely unaffected.
+    Nova::UE4::Init();
+    CreateThread(nullptr, 0, [](LPVOID) -> DWORD
+    {
+        // Wait for the engine, then report once. Bounded: ~60s is far longer than any real startup,
+        // and a thread that spins forever inside the game is exactly the kind of thing this project
+        // has had to remove before.
+        for (int i = 0; i < 120 && !Nova::UE4::Ready(); ++i)
+            Sleep(500);
+
+        if (Nova::UE4::Ready())
+            Nova::UE4::SelfTest();
+        else
+            Cobalt::Log::WriteLine("[UE4] engine objects never became available — reflection unavailable");
+        return 0;
+    }, nullptr, 0, nullptr);
 
     bool curlResult = InitializeCurlHook();
     InitializeEOSCurlHook();

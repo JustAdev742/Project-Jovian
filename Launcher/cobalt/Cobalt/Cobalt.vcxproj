@@ -150,6 +150,7 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="log.cpp" />
     <ClCompile Include="diagnostics.cpp" />
+    <ClCompile Include="ue4.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="curlhook.h" />
@@ -160,6 +161,7 @@
     <ClInclude Include="memcury.h" />
     <ClInclude Include="settings.h" />
     <ClInclude Include="url.h" />
+    <ClInclude Include="ue4.h" />
   </ItemGroup>
   <ItemGroup>
   </ItemGroup>
