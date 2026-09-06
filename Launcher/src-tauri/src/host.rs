@@ -260,10 +260,42 @@ pub fn is_gameserver_running() -> bool {
 
 // ── Reboot injection ─────────────────────────────────────────────────────────
 
-/// Default location of the compiled cheat-free Reboot gameserver DLL (dev build path).
-/// For distribution, copy it next to the launcher and pass the path explicitly.
-const DEFAULT_REBOOT_DLL: &str =
-    "C:\\Users\\Admin\\Documents\\backends\\_extracted\\Project-Reboot-main\\Project Reboot\\x64\\Release\\Project Reboot.dll";
+/// Last-resort dev-tree location of the compiled Reboot gameserver DLL.
+///
+/// THIS USED TO BE AN ABSOLUTE PATH ON ONE DEVELOPER'S MACHINE, pointing into
+/// `Documents\backends\_extracted\Project-Reboot-main\...`. Two things were wrong with that beyond
+/// the obvious: it is meaningless on any other machine, and **it is not the authoritative source**.
+/// There are five Project Reboot checkouts on that machine and the one that actually ships is
+/// `Project-Reboot-DLL/` inside this repository — the foreign tree held a build six weeks older.
+///
+/// Resolved relative to the exe instead, mirroring how carter.rs finds Cobalt's dev build. Returns
+/// None rather than a fabricated path when nothing is there, so the caller reports "not found"
+/// honestly instead of naming a file that never existed.
+/// Where the Reboot DLL actually is, in the order the launcher should look.
+///
+/// ONE resolver, used by BOTH `inject_reboot` and `reboot_dll_present`. They disagreed before, and
+/// the disagreement was a live bug rather than an inconsistency: `reboot_dll_present` checked only
+/// the hardcoded developer path, so on every real installation it answered **false** — reporting the
+/// gameserver DLL as missing while it sat correctly bundled under `resources/`.
+pub fn resolve_reboot_dll(explicit: Option<String>) -> Option<String> {
+    explicit
+        .filter(|p| std::path::Path::new(p).exists())
+        .or_else(|| beside_exe("Project Reboot.dll"))
+        .or_else(dev_tree_reboot_dll)
+}
+
+fn dev_tree_reboot_dll() -> Option<String> {
+    // A dev exe sits at Launcher/src-tauri/target/release/, so four parents up is the repo root.
+    let exe = std::env::current_exe().ok()?;
+    let root = exe.parent()?.parent()?.parent()?.parent()?.parent()?;
+    let p = root
+        .join("Project-Reboot-DLL")
+        .join("Project Reboot")
+        .join("x64")
+        .join("Release")
+        .join("Project Reboot.dll");
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
 
 /// Resolve a file/folder that ships ALONGSIDE the launcher exe (portable / zipped install). Returns
 /// it only if it actually exists next to the exe, so a distributed bundle finds its own copies while
@@ -297,9 +329,17 @@ pub fn node_exe() -> String {
 pub fn inject_reboot(dll_path: Option<String>, pid: Option<u32>) -> Result<bool, String> {
     use injrs::inject_windows::*;
     use injrs::process_windows::Process;
-    let dll = dll_path
-        .or_else(|| beside_exe("Project Reboot.dll"))
-        .unwrap_or_else(|| DEFAULT_REBOOT_DLL.to_string());
+    // Resolution order: an explicit path, then the copy shipped with the launcher (beside the exe
+    // or under resources/), then the in-repo dev build. Each step returns None when nothing is
+    // there, so a genuine miss says where it looked instead of naming a path that never existed.
+    let dll = match resolve_reboot_dll(dll_path) {
+        Some(p) => p,
+        None => {
+            return Err("Reboot DLL not found — looked next to the launcher, under resources/, \
+                        and in the dev tree at Project-Reboot-DLL/Project Reboot/x64/Release/."
+                .to_string())
+        }
+    };
     if !std::path::Path::new(&dll).exists() {
         return Err(format!("Reboot DLL not found at {}", dll));
     }

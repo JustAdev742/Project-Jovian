@@ -10,7 +10,7 @@
 //  hostname like a playit address cannot be — that was a real FindSessionFailure bug).
 // ─────────────────────────────────────────────────────────────────────────────
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -502,13 +502,11 @@ pub async fn mesh_bring_up(
 /// Is the compiled Reboot gameserver DLL present where we expect it?
 #[tauri::command]
 pub fn reboot_dll_present(dll_path: Option<String>) -> bool {
-    match dll_path {
-        Some(p) => Path::new(&p).exists(),
-        None => Path::new(
-            "C:\\Users\\Admin\\Documents\\backends\\_extracted\\Project-Reboot-main\\Project Reboot\\x64\\Release\\Project Reboot.dll",
-        )
-        .exists(),
-    }
+    // Shares host::resolve_reboot_dll with inject_reboot. It used to check ONLY an absolute path on
+    // one developer's machine, so on every real installation it answered false — telling players the
+    // gameserver DLL was missing while it sat correctly bundled under resources/. Two functions
+    // answering the same question differently is how that survived.
+    crate::host::resolve_reboot_dll(dll_path).is_some()
 }
 
 // ── Self-repair ───────────────────────────────────────────────────────────────────────────────────

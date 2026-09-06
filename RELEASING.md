@@ -88,11 +88,12 @@ cd ../.. && node tools/stage-cobalt.mjs  # copy it everywhere that actually load
 > Verify before building:
 > ```bash
 > node tools/stage-cobalt.mjs --check   # exit 1 if any consumed copy differs from the build
+> node tools/stage-cobalt.mjs reboot --check   # the SAME check for Project Reboot.dll
 > ```
 
-**Run both `--check` commands before every release.** They are the only things standing between
+**Run all three `--check` commands before every release.** They are the only things standing between
 "fixed in source" and "fixed on a player's machine", and this project has now been caught by that
-gap twice in two different components.
+gap three times, in three different components: the backend payload, Cobalt, and Project Reboot.
 The remaining artefacts are still manual. Copy them into `Launcher/src-tauri/resources/`:
 
 | Goes to | From |

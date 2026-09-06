@@ -257,6 +257,51 @@ diagnostic from `Source::Version` so an unsupported build appears on the coordin
 what it is rather than as a network fault. Built and verified: the new strings are present in
 `Cobalt.dll` with a positive and a negative control in the same scan.
 
+### `reboot-dll-present-always-false-for-players` · CONFIRMED · **FIXED 2026-09-06**
+`tailscale.rs` `reboot_dll_present()` checked **one absolute path on the developer's machine** and
+nothing else:
+
+```
+C:\Users\Admin\Documents\backends\_extracted\Project-Reboot-main\Project Reboot\x64\Release\Project Reboot.dll
+```
+
+On that machine it answered `true`. **On every real installation it answered `false`** — reporting
+the gameserver DLL as missing while it sat correctly bundled under `resources/`. `inject_reboot`
+resolved the same file properly (`beside_exe` first), so two functions answered the same question
+differently and only one of them was right. Both now share `host::resolve_reboot_dll()`.
+
+### `reboot-authoritative-tree-was-not-the-one-referenced` · CONFIRMED · **FIXED 2026-09-06**
+The hardcoded path above pointed into `Documents\backends\_extracted\`, which is **not** where the
+shipped DLL comes from. There are five Project Reboot checkouts on this machine:
+
+| tree | built DLL |
+|---|---|
+| **`Project Nova/Project-Reboot-DLL/`** (in this repo, git-tracked) | **`25011fc5c3de` · 796,672 · 5 Sep — this is what ships** |
+| `backends/_extracted/Project-Reboot-main/` | `1f97f85d999e` · 778,752 · 26 Jul |
+| `backends/_extracted/Project-Reboot-main_backup-nova/` | — |
+| `backends/_backup-reboot-20260720-092843/` | — |
+| `backends/Fortnite-GS-Archive-release3/Project Reboot (S3-S18)/` | — |
+
+`DEFAULT_REBOOT_DLL` is gone; the dev-tree fallback resolves `Project-Reboot-DLL/` relative to the
+exe. Also corrected in memory, which named the wrong tree.
+
+### `reboot-dll-stale-beside-dev-exe` · CONFIRMED · **FIXED 2026-09-06**
+The same defect as `cobalt-dll-three-live-copies`, in a third component and found the same way.
+`beside_exe()` is asked first, so a dev-tree launcher injected
+`target/release/Project Reboot.dll` — the **26 July** build — while players got the 5 September
+bundle. The developer was testing a different gameserver from the one that ships.
+
+`tools/stage-cobalt.mjs` now covers both native DLLs:
+
+```bash
+node tools/stage-cobalt.mjs --check           # Cobalt
+node tools/stage-cobalt.mjs reboot --check    # Project Reboot
+```
+
+**Three components have now had this exact bug** — backend payload, Cobalt, Reboot. The pattern is
+always: built to one path, loaded from another, nothing comparing them. Any new bundled artefact
+needs its `--check` in the same commit.
+
 ### `cobalt-dll-three-live-copies` · CONFIRMED · **FIXED 2026-09-06**
 The same "fixed in source, not shipped" failure as `stale-dist-preferred`, in a second component.
 `build.ps1 -Deploy` copied `Cobalt.dll` to `target/release` and `target/debug` only — **not** to
