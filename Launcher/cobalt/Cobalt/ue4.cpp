@@ -232,40 +232,81 @@ namespace Nova::UE4
     {
         if (!Ready())
         {
-            Cobalt::Log::WriteLine("[UE4] self-test skipped — engine not ready");
+            Cobalt::Log::WriteLine("[UE4] probe skipped - engine not ready");
             return;
         }
 
-        Cobalt::Log::WriteLine("[UE4] self-test: " + std::to_string(ObjectCount()) + " objects live");
-
-        // The inventory that decides whether the in-game bumper is buildable.
+        // ── WHY THIS PROBES REPEATEDLY, AND WHY THE CONTROLS ARE FUNCTIONS ──────────────────────
         //
-        // A binary scan already said these strings are in the executable. That is a weaker claim
-        // than it sounds — it cannot distinguish a live UClass from a leftover symbol. Resolving
-        // them through StaticFindObject in the running process is the real answer.
+        // The first version ran once, the moment the object array became non-empty, and reported
+        // 4,527 objects live - the engine barely awake, fifteen seconds before the game made its
+        // first network call. Every /Script/ CLASS resolved; both UFUNCTIONS missed.
+        //
+        // That is exactly what "too early" looks like: compiled-in classes are registered at static
+        // init, their UFunction children in a later pass. But it is ALSO what "wrong path syntax"
+        // looks like, and the two need completely different fixes.
+        //
+        // So the control set now includes functions Project Reboot resolves successfully on this
+        // build with this exact dotted syntax (/Script/Engine.Actor.ForceNetUpdate). If those miss
+        // alongside the media ones, the problem is function lookup in general and the paths are a
+        // red herring. If they resolve and the media ones do not, the names are genuinely different
+        // here and enumeration is the next step. Either way the answer is unambiguous, which the
+        // single-shot version was not.
         struct Probe { const char* what; const char* path; };
         static const Probe probes[] = {
-            // Control. If this misses, the lookup itself is broken and nothing below means anything.
-            { "control",       "/Script/Engine.KismetSystemLibrary" },
-            { "media player",  "/Script/MediaAssets.MediaPlayer" },
-            { "media texture", "/Script/MediaAssets.MediaTexture" },
-            { "file source",   "/Script/MediaAssets.FileMediaSource" },
-            { "media sound",   "/Script/MediaAssets.MediaSoundComponent" },
-            { "umg image",     "/Script/UMG.Image" },
-            { "umg library",   "/Script/UMG.WidgetBlueprintLibrary" },
-            // The call we would make to start playback.
-            { "OpenFile fn",   "/Script/MediaAssets.MediaPlayer.OpenFile" },
-            { "SetMediaPlayer","/Script/MediaAssets.MediaTexture.SetMediaPlayer" },
+            // Controls - classes.
+            { "CTRL class    ", "/Script/Engine.KismetSystemLibrary" },
+            // Controls - FUNCTIONS. Reboot resolves both of these on 7.40.
+            { "CTRL function ", "/Script/Engine.Actor.ForceNetUpdate" },
+            { "CTRL function ", "/Script/Engine.Actor.K2_GetActorLocation" },
+            // What the bumper needs.
+            { "media player  ", "/Script/MediaAssets.MediaPlayer" },
+            { "media texture ", "/Script/MediaAssets.MediaTexture" },
+            { "file source   ", "/Script/MediaAssets.FileMediaSource" },
+            { "umg image     ", "/Script/UMG.Image" },
+            { "fn OpenFile   ", "/Script/MediaAssets.MediaPlayer.OpenFile" },
+            { "fn OpenSource ", "/Script/MediaAssets.MediaPlayer.OpenSource" },
+            { "fn OpenUrl    ", "/Script/MediaAssets.MediaPlayer.OpenUrl" },
+            { "fn Play       ", "/Script/MediaAssets.MediaPlayer.Play" },
+            { "fn SetMediaPlr", "/Script/MediaAssets.MediaTexture.SetMediaPlayer" },
+            { "fn SetBrushTex", "/Script/UMG.Image.SetBrushFromTexture" },
+            { "fn AddToVwport", "/Script/UMG.UserWidget.AddToViewport" },
         };
+        static const int kProbeCount = sizeof(probes) / sizeof(probes[0]);
 
-        int found = 0;
-        for (const auto& p : probes)
+        // Staged: the point is to watch results CHANGE as the engine fills in, which is the only
+        // way to separate "not there yet" from "not there". Bounded and quiet - it logs a line per
+        // pass, stops as soon as everything resolves, and gives up rather than looping forever.
+        static const int kWaitsMs[] = { 0, 5000, 10000, 20000, 30000, 60000 };
+        static const int kStages = sizeof(kWaitsMs) / sizeof(kWaitsMs[0]);
+
+        for (int stage = 0; stage < kStages; ++stage)
         {
-            const bool ok = FindObject(p.path) != nullptr;
-            if (ok) ++found;
-            Cobalt::Log::WriteLine(std::string("[UE4]   ") + (ok ? "FOUND   " : "MISSING ") + p.what + "  " + p.path);
+            if (kWaitsMs[stage] > 0) Sleep(kWaitsMs[stage]);
+            if (!Ready()) continue;
+
+            int found = 0;
+            std::vector<std::string> missing;
+            for (int i = 0; i < kProbeCount; ++i)
+            {
+                if (FindObject(probes[i].path)) { ++found; continue; }
+                missing.push_back(std::string(probes[i].what) + " " + probes[i].path);
+            }
+
+            Cobalt::Log::WriteLine(
+                "[UE4] probe " + std::to_string(stage + 1) + "/" + std::to_string(kStages) +
+                " at " + std::to_string(ObjectCount()) + " objects: " +
+                std::to_string(found) + "/" + std::to_string(kProbeCount) + " resolved");
+            // One line each: the Logs tab is line-oriented, and a miss is the thing worth reading.
+            for (const auto& m : missing)
+                Cobalt::Log::WriteLine("[UE4]      MISSING " + m);
+
+            if (found == kProbeCount)
+            {
+                Cobalt::Log::WriteLine("[UE4] everything the bumper needs is live - stopping probe");
+                return;
+            }
         }
-        Cobalt::Log::WriteLine("[UE4] self-test: " + std::to_string(found) + "/" +
-                               std::to_string(sizeof(probes) / sizeof(probes[0])) + " resolved");
+        Cobalt::Log::WriteLine("[UE4] probe finished with items still unresolved (see the last pass)");
     }
 }
