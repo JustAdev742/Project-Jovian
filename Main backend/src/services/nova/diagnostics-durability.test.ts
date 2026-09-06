@@ -20,6 +20,7 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -109,6 +110,35 @@ function get(port: number, urlPath: string): Promise<number> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Kill a spawned backend and everything it started.
+ *
+ * `child.kill()` IS NOT ENOUGH HERE, and the difference is not academic — it hung this file on the
+ * coordinator. `tsx` is a launcher: it spawns a SECOND node process that actually runs the code, so
+ * signalling the direct child leaves the real backend alive, still holding the stdout pipe this
+ * process is reading. Every subtest reported ok and the runner then sat there forever.
+ *
+ * So: the whole process tree, by platform. `detached` makes the child a process-group leader on
+ * POSIX, which is what lets `-pid` reach the grandchild; Windows has no process groups to signal, so
+ * `taskkill /T` walks the tree instead. The stdio handles are destroyed either way, because a test
+ * must not depend on a kill having worked to be able to finish.
+ */
+function killTree(proc: { pid?: number; kill: (s?: any) => boolean; stdout: Readable; stderr: Readable }): void {
+  const pid = proc.pid;
+  try {
+    if (process.platform === 'win32') {
+      if (pid) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } else if (pid) {
+      process.kill(-pid, 'SIGKILL'); // negative pid = the whole process group
+    }
+  } catch {
+    /* already gone */
+  }
+  try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+  // Belt and braces: release our end regardless, so a surviving grandchild cannot hold the loop.
+  try { proc.stdout.destroy(); proc.stderr.destroy(); } catch { /* already closed */ }
+}
+
 after(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -163,6 +193,9 @@ describe('durability across a process boundary', () => {
 
     const proc = spawn(process.execPath, [TSX, ENTRY], {
       cwd: ROOT,
+      // detached so the child leads its own process group — see killTree. tsx spawns the real node
+      // process underneath, and without a group there is no way to reach it.
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         NOVA_PORT: String(port),
@@ -195,7 +228,7 @@ describe('durability across a process boundary', () => {
       // than assuming it away.
       await sleep(7_000);
     } finally {
-      proc.kill('SIGKILL');
+      killTree(proc as any);
       await sleep(500);
     }
 
