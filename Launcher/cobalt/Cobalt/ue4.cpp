@@ -705,6 +705,8 @@ namespace Nova::UE4
         void* gImage = nullptr;
         void* gSetBrush = nullptr;
         void* gWidget = nullptr;
+        void* gControlTex = nullptr;
+        bool  gShowVideoNext = true;
 
         /**
          * Keep an object alive across garbage collection.
@@ -736,6 +738,40 @@ namespace Nova::UE4
                 return true;
             }
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+
+        // UStruct::Children sits just past SuperStruct, and UField::Next is at 0x28 (UObject is
+        // 0x28 bytes in 4.22). Both are needed to walk what a class actually declares.
+        constexpr int kOffset_Children = kOffset_SuperStruct + 8;   // 0x48
+        constexpr int kOffset_FieldNext = 0x28;
+
+        /**
+         * Log every UFunction a class exposes, walking the super chain.
+         *
+         * Guessing paths has cost several builds -- Texture.UpdateResource does not exist because
+         * UTexture::UpdateResource is a plain C++ virtual, not a UFunction, and no amount of trying
+         * more paths would have found it. This asks the class what it has instead.
+         */
+        void ListFunctions(const char* label, const char* classPath, int maxOut)
+        {
+            void* cls = FindObject(classPath);
+            if (!cls) { Cobalt::Log::WriteLine(std::string("[UE4] fn: ") + label + " CLASS MISSING"); return; }
+
+            static void* funcCls = FindObject("/Script/CoreUObject.Function");
+            int shown = 0;
+            for (void* c = cls; c && shown < maxOut; c = SafeDeref(c, kOffset_SuperStruct))
+            {
+                for (void* f = SafeDeref(c, kOffset_Children); f && shown < maxOut;
+                     f = SafeDeref(f, kOffset_FieldNext))
+                {
+                    if (funcCls && SafeClassOf(f) != funcCls) continue;
+                    const std::string n = GetName(reinterpret_cast<UObject*>(f));
+                    if (n.empty()) continue;
+                    Cobalt::Log::WriteLine(std::string("[UE4] fn: ") + label + "  " + n);
+                    ++shown;
+                }
+            }
+            if (shown == 0) Cobalt::Log::WriteLine(std::string("[UE4] fn: ") + label + " exposes NO UFunctions");
         }
 
         /** Walk the SuperStruct chain to test inheritance. */
@@ -1038,22 +1074,39 @@ namespace Nova::UE4
                 Cobalt::Log::WriteLine(std::string("[UE4] display: AddToViewport ") +
                                        (SafePE(widget, addToViewport, &p) ? "ok" : "faulted"));
             }
-            Cobalt::Log::WriteLine("[UE4] display: done - a CONTROL image should be on screen now;"
-                                   " the video replaces it in 10 seconds");
+            // What can actually be called on these? The white screen says the MediaTexture has no
+            // rendering resource, and the only way to allocate one is a function that exists.
+            ListFunctions("MediaTexture ", "/Script/MediaAssets.MediaTexture", 25);
+            ListFunctions("MediaPlayer  ", "/Script/MediaAssets.MediaPlayer", 30);
+
+            Cobalt::Log::WriteLine("[UE4] display: done - CONTROL image up; it will ALTERNATE with the"
+                                   " video every 8s so both can be compared");
 
             // Swap to the video on a timer, from a worker thread that only schedules the swap back
             // onto the game thread. Ten seconds is long enough to notice the control and short
             // enough not to be annoying.
+            gControlTex = control;
+            // ALTERNATE rather than swap once. A single swap to white is ambiguous -- it could be a
+            // blank video or a broken texture. Flipping back to a texture known to draw makes the
+            // difference visible without another release.
             CreateThread(nullptr, 0, [](LPVOID) -> DWORD
             {
-                Sleep(10000);
-                RunOnGameThread([]()
+                for (int i = 0; i < 12; ++i)
                 {
-                    if (!gImage || !gSetBrush || !gTexture) return;
-                    struct { void* Texture; bool MatchSize; char pad[7]; } p{ gTexture, false, {} };
-                    Cobalt::Log::WriteLine(std::string("[UE4] display: swapped to the VIDEO texture ") +
-                                           (SafePE(gImage, gSetBrush, &p) ? "ok" : "faulted"));
-                });
+                    Sleep(8000);
+                    const bool showVideo = (i % 2) == 0;
+                    gShowVideoNext = showVideo;
+                    RunOnGameThread([]()
+                    {
+                        if (!gImage || !gSetBrush) return;
+                        void* tex = gShowVideoNext ? gTexture : gControlTex;
+                        if (!tex) return;
+                        struct { void* Texture; bool MatchSize; char pad[7]; } p{ tex, false, {} };
+                        Cobalt::Log::WriteLine(std::string("[UE4] display: showing ") +
+                                               (gShowVideoNext ? "VIDEO " : "CONTROL ") +
+                                               (SafePE(gImage, gSetBrush, &p) ? "ok" : "faulted"));
+                    });
+                }
                 return 0;
             }, nullptr, 0, nullptr);
         }
