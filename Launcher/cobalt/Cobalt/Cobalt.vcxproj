@@ -153,6 +153,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="curlhook.h" />
+    <ClInclude Include="signatures.h" />
     <ClInclude Include="log.h" />
     <ClInclude Include="diagnostics.h" />
     <ClInclude Include="exithook.h" />

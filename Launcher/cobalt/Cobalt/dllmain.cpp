@@ -5,6 +5,7 @@
 #include "log.h"
 #include "diagnostics.h"
 #include "curlhook.h"
+#include "signatures.h"
 #include "exithook.h"
 #include <MinHook/MinHook.h>
 
@@ -510,6 +511,22 @@ DWORD WINAPI Main(LPVOID)
     bool curlResult = InitializeCurlHook();
     InitializeEOSCurlHook();
     InitializeExitHook();
+
+    // SIGNATURE COVERAGE. Purely observational — it runs AFTER the hooks are installed and does not
+    // influence which address any of them chose. That separation is deliberate: a diagnostic that
+    // can change behaviour is a liability, and this one exists precisely for the case where
+    // behaviour is already suspect.
+    //
+    // It is the only way to learn which patterns a given build has. The client's .text section is
+    // encrypted on disk (7.40 measures at maximum entropy, 8.00), so no offline tool can answer it —
+    // see the header of signatures.h. Running the game once is the measurement.
+    //
+    // The build string here is what Diag was initialised with, not something detected from the
+    // process, so on a non-7.40 build the label will be wrong even while the coverage below it is
+    // right. Worth fixing when a second build is actually run; not worth guessing at now.
+    Cobalt::Signatures::Report(
+        Cobalt::Signatures::Measure([](const char* pattern) -> bool { return sigscan(pattern) != 0; }),
+        "7.40 (assumed - Cobalt does not yet detect the build)");
 
     bool result = curlResult;
 
