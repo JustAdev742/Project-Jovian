@@ -13,16 +13,10 @@ mod discord;
 mod host;
 mod tailscale;
 
-#[derive(Debug)]
-pub struct MyError;
-
-impl warp::reject::Reject for MyError {}
-
-impl std::fmt::Display for MyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "An error occurred")
-    }
-}
+// Removed 2026-09-06: `pub struct MyError` with `impl warp::reject::Reject` and a Display impl.
+// Nothing constructed or returned it — grep found the declaration and its two impls and nothing
+// else — so its only effect was to make `warp`, an entire web framework, a build dependency of a
+// desktop launcher that serves no HTTP. `dependency-hygiene` in KNOWN_ISSUES.
 
 #[tauri::command]
 fn close_launcher(app: tauri::AppHandle) {
