@@ -421,14 +421,14 @@ export const FEATURES: readonly FeatureRecord[] = [
   {
     feature: 'transport.eos.sdkAddressing',
     subsystem: 'transport',
-    description: 'Whether an EOS-era client can be pointed at Nova at all.',
+    description: 'Whether a later-era client can be pointed at Nova by a host redirect.',
     timeline: [{
       atMajor: null, change: 'VERSION_SPECIFIC', confidence: 'CONFIRMED',
-      evidence: 'OnlineSubsystemMcp resolves services by URL, so a host redirect reaches them - this is how 7.40 is served today. The EOS SDK resolves by ProductId / SandboxId / DeploymentId issued by Epic, not by a base URL, so there is no URL for a redirect to rewrite.',
-      detail: 'A HARD BLOCKER, not a gap in the work. It bounds what support every version can mean: era-correct RESPONSES are implementable for any build, but an EOS-era client cannot be made to ASK Nova for them by the redirect mechanism this project uses.',
+      evidence: 'CORRECTED 2026-09-06. Enumerated every hostname the endpoint corpus documents: 25+ distinct services, ALL addressed by HTTPS hostname, including the newest ones - fn-service-discovery-live-public (Chapter 3 Season 4 onward), fn-service-habanero-live-public (ranked, Chapter 4+), wasp-service-live-public, pops-api-live-public. account-public-service-prod carries 55 documented endpoints and is the login path. NOT ONE Fortnite game service in the corpus resolves by ProductId / SandboxId / DeploymentId.',
+      detail: 'EOS appears in the corpus as auth ERROR CODES (errors.com.epicgames.eos.auth.deployment_not_found) and as separate subsystems - EOS Connect, anti-cheat, voice - alongside the URL-addressed game backend, not in place of it. Those specific subsystems do resolve by identifier and cannot be redirected; what a later build would actually do when they fail is UNKNOWN and needs a binary to answer.',
     }],
-    failureBehaviour: 'The client talks to Epic, or to nothing. Nova never sees the request.',
-    notes: 'Nothing in the backend can lift this; it is a property of how the client addresses services. Recorded so the limit is visible rather than rediscovered.',
+    failureBehaviour: 'Unknown for a later build, because none has been run. For 7.40 the redirect works and is how the deployment functions.',
+    notes: 'THIS ROW PREVIOUSLY SAID THE OPPOSITE and was graded CONFIRMED. It claimed EOS-era clients could not be pointed at Nova at all, because the SDK resolves by identifier rather than URL. That was an inference about the EOS SDK applied to the whole client, never checked against the corpus, and the corpus contradicts it flatly. The real constraint on later builds is elsewhere: Cobalt and Reboot find their hook targets by byte-signature scan against 7.40, so nothing could be redirected or hosted regardless of addressing. See KNOWN_ISSUES.md.',
   },
   {
     feature: 'mcp.operations.eraSet',

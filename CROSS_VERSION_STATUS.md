@@ -75,25 +75,45 @@ flags do not leak into a Chapter 2 build.
 
 ## What is still NOT finished
 
-**0. A hard ceiling that no amount of backend work lifts: EOS-era clients cannot be pointed at Nova
-at all.** CONFIRMED, and it belongs at the top because it bounds what the phrase "support every
-version" can honestly mean.
+**0. CORRECTED 2026-09-06 — the "EOS ceiling" recorded here earlier today was wrong.**
 
-7.40 uses **OnlineSubsystemMcp**, which resolves Epic services **by URL**. That is the entire reason
-a host redirect works: rewrite the hostname and the client asks Nova instead. Later builds use the
-**EOS SDK**, which resolves by **ProductId / SandboxId / DeploymentId** issued by Epic — identifiers,
-not addresses. There is no URL for a redirect to rewrite.
+This document previously opened with a hard ceiling: that EOS-era clients could not be pointed at
+Nova at all, because the EOS SDK resolves services by ProductId / SandboxId / DeploymentId rather
+than by URL, leaving nothing for a host redirect to rewrite. It was graded CONFIRMED and used to
+argue that a whole class of work was impossible rather than merely undone.
 
-So the two halves of "support" come apart, and it is worth being blunt about which half this work
-delivers:
+**It does not survive the check that should have been run before writing it.** Enumerating every
+hostname in the endpoint corpus gives 25+ distinct Fortnite services, and **every one is addressed by
+an HTTPS hostname** — including the ones that only exist in the later eras:
 
-| | Chapter 1 (pre-EOS) | EOS era |
+| service | era | addressed by |
 |---|---|---|
-| Can Nova *serve* era-correct responses? | yes | yes — the code is version-parameterised |
-| Can the client be made to *ask* Nova? | yes, by host redirect | **no**, not by this mechanism |
+| `fngw-mcp-gc-livefn.ol.epicgames.com` | MCP, all eras | hostname |
+| `account-public-service-prod.ol.epicgames.com` | login, all eras | hostname (55 documented endpoints) |
+| `fn-service-discovery-live-public.ogs.live.on.epicgames.com` | Chapter 3 S4 onward | hostname |
+| `fn-service-habanero-live-public.ogs.live.on.epicgames.com` | ranked, Chapter 4+ | hostname |
+| `wasp-service-live-public` · `pops-api-live-public` | later eras | hostname |
 
-Everything below this line is about the first row. The second row is not a gap in the work; it is a
-property of how those clients address services, and nothing in the backend can change it.
+EOS appears in the corpus as auth **error codes** (`errors.com.epicgames.eos.auth.deployment_not_found`)
+and as separate subsystems — EOS Connect, anti-cheat, voice — running *alongside* the URL-addressed
+game backend, not in place of it. Those subsystems genuinely do resolve by identifier and genuinely
+cannot be redirected. What a later build does when they fail is **UNKNOWN**, and needs a binary to
+answer. That is a real open question. It is not a ceiling.
+
+**What this changes.** Chapter 2–4 is not blocked by an impossibility at the backend layer. The
+blockers are the two that were always underneath it, and both are ordinary work:
+
+1. **No Chapter 2–4 client binary on this machine** — the measurement gate.
+2. **Cobalt and Reboot resolve their hook targets by byte-signature scan against 7.40** — so nothing
+   could be redirected or hosted for another build even with a perfect backend. This is the binding
+   constraint, and it was already recorded as point 3 below.
+
+**Why this happened, since the project keeps a register of exactly this failure mode.** It was an
+inference about the EOS SDK — correct in itself — generalised to "the Fortnite client" without
+checking whether Fortnite's own services had moved to that addressing. One `grep` over the corpus for
+`URL:` lines would have caught it. It is the same shape as the `friends/api/v1` mistake corrected
+earlier today: a true statement about a narrow thing, promoted to a load-bearing claim about a broad
+thing, and graded CONFIRMED on the strength of the narrow part.
 
 **1. Coverage is only as wide as the evidence.** The AES archive stops at 19.01, so Chapter 4 builds
 get an empty keychain — correct, and not the same as supported. Beyond the season number, the lobby
@@ -201,17 +221,24 @@ a December 2016 pre-Battle-Royale build. That is the whole corpus of clients.
 This is the gate. It is a measurement task and about twenty minutes per question once a binary
 exists — proven six times over now, most recently by the 2016 build catching a live defect.
 
-**3. Getting a later build to ASK Nova — impossible by this mechanism, and that is not a gap.**
-See the EOS ceiling above. Chapter 1 clients resolve services by URL, so a host redirect reaches
-them. EOS-era clients resolve by ProductId/SandboxId/DeploymentId. There is no URL to rewrite, so no
-amount of backend work makes a Chapter 3 client talk to Nova. Separately, Cobalt and Reboot both find
-their targets by byte-signature scan against 7.40, so even a Chapter 1 build from a different season
-could neither be redirected nor hosted.
+**3. Getting a later build to ASK Nova — open, and the blocker is the native components, not the
+protocol.** *(Rewritten 2026-09-06; this point previously claimed an EOS addressing ceiling that the
+corpus contradicts — see the correction above.)*
 
-**So: parts 1 and 3 are finished, in the sense that there is nothing further to do — one because the
-work is done, the other because the work is impossible. Part 2 is open and will stay open until a
-client binary from Chapters 2-4 exists on disk.** Everything else on the original list has been
-either implemented, or recorded as a decision with the measurement behind it.
+Fortnite's own services are URL-addressed across the whole documented range, so a host redirect has
+something to rewrite for a Chapter 4 client just as it does for 7.40. What actually stops another
+build being played is one layer down: **Cobalt and Reboot both find their hook targets by
+byte-signature scan against 7.40.** A different build needs different signatures, so it could be
+neither redirected nor hosted. That is real work — porting two native components — but it is work,
+not a wall.
+
+The genuinely unknown part is what a later build does when the EOS-specific subsystems it also uses
+(EOS Connect, anti-cheat, voice) fail, since those resolve by identifier and cannot be redirected.
+Answering that needs a binary and a run.
+
+**So: part 1 is finished to the limit of the evidence. Parts 2 and 3 are open, and neither is
+impossible — part 2 needs a Chapter 2-4 client binary on disk, part 3 needs the two native
+components ported off their 7.40 byte signatures.** Nothing here is blocked by the protocol.
 
 ## Why the foundation was still worth building first
 
