@@ -704,6 +704,55 @@ namespace Nova::UE4
         void* gTexture = nullptr;
         void* gImage = nullptr;
         void* gSetBrush = nullptr;
+        void* gWidget = nullptr;
+
+        /**
+         * Keep an object alive across garbage collection.
+         *
+         * THIS IS WHY NOTHING SURVIVED. Objects made with SpawnObject and outered to the transient
+         * package have nothing referencing them, so the next GC pass takes them. The evidence was
+         * the swap ten seconds later faulting on pointers that were valid when they were created --
+         * that is a collected object, not a bad call.
+         *
+         * There is no UFunction for AddToRoot, but the root set is a bit on the object's entry in
+         * the global array, and that array is already reachable here. EInternalObjectFlags::RootSet
+         * is 1<<30 in 4.22.
+         */
+        bool AddToRoot(void* obj)
+        {
+            if (!Ready() || !obj) return false;
+            const int index = SafeReadInt(obj, 0x0C); // UObject::InternalIndex
+            if (index < 0 || !gObjects || index >= gObjects->NumElements) return false;
+            const int chunk = index / FChunkedFixedUObjectArray::NumElementsPerChunk;
+            const int within = index % FChunkedFixedUObjectArray::NumElementsPerChunk;
+            if (chunk > gObjects->NumChunks) return false;
+            __try
+            {
+                FUObjectItem* c = gObjects->Objects[chunk];
+                if (!c) return false;
+                FUObjectItem* item = c + within;
+                if (item->Object != obj) return false;   // index did not agree; do not touch it
+                item->Flags |= (1 << 30);                // EInternalObjectFlags::RootSet
+                return true;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+
+        /** The live UWorld, found by walking the object array for one. */
+        void* FindWorld()
+        {
+            void* worldCls = FindObject("/Script/Engine.World");
+            if (!worldCls) return nullptr;
+            const int total = ObjectCount();
+            void* best = nullptr;
+            for (int i = 0; i < total; ++i)
+            {
+                void* o = GetObjectByIndex(i);
+                if (o && SafeClassOf(o) == worldCls) best = o;  // last one is the live one
+            }
+            return best;
+        }
+
 
         void BuildAndShow()
         {
@@ -719,12 +768,65 @@ namespace Nova::UE4
                 return;
             }
 
-            void* widget = SpawnObject(userWidgetCls, transient);
+            // A WIDGET NEEDS A WORLD, AND THE CONTROL PROVED IT NEVER DREW.
+            //
+            // The control texture did not appear either, which rules out the MediaTexture entirely:
+            // the widget was never rendering. A UUserWidget outered to the transient package has no
+            // World -- UUserWidget::GetWorld() walks the Outer chain and finds a package -- so
+            // AddToViewport has no viewport to add to and returns without complaint.
+            //
+            // So: find the live World, get its local PlayerController, and let UMG's own factory
+            // build the widget with that context instead of constructing it bare.
+            void* world = FindWorld();
+            void* pc = nullptr;
+            if (world)
+            {
+                if (void* getPC = FindObject("/Script/Engine.GameplayStatics.GetPlayerController"))
+                {
+                    if (void* gs = FindObject("/Script/Engine.Default__GameplayStatics"))
+                    {
+                        struct { void* World; int Index; char pad[4]; void* Return; } p{ world, 0, {}, nullptr };
+                        if (SafePE(gs, getPC, &p)) pc = p.Return;
+                    }
+                }
+            }
+            Cobalt::Log::WriteLine(std::string("[UE4] display: world=") + (world ? "found" : "MISSING") +
+                                   " playerController=" + (pc ? "found" : "MISSING"));
+
+            void* widget = nullptr;
+            if (world)
+            {
+                if (void* create = FindObject("/Script/UMG.WidgetBlueprintLibrary.Create"))
+                {
+                    if (void* lib = FindObject("/Script/UMG.Default__WidgetBlueprintLibrary"))
+                    {
+                        struct { void* WorldContext; void* WidgetType; void* OwningPlayer; void* Return; }
+                            p{ world, userWidgetCls, pc, nullptr };
+                        if (SafePE(lib, create, &p)) widget = p.Return;
+                        Cobalt::Log::WriteLine(std::string("[UE4] display: WidgetBlueprintLibrary.Create ") +
+                                               (widget ? "ok" : "returned null"));
+                    }
+                }
+            }
+            if (!widget)
+            {
+                widget = SpawnObject(userWidgetCls, transient);
+                Cobalt::Log::WriteLine(std::string("[UE4] display: fell back to bare construction ") +
+                                       (widget ? "ok" : "FAIL"));
+            }
+
             void* tree = widget ? SpawnObject(widgetTreeCls, widget) : nullptr;
             void* image = tree ? SpawnObject(imageCls, tree) : nullptr;
             Cobalt::Log::WriteLine(std::string("[UE4] display: widget=") + (widget ? "ok" : "FAIL") +
                                    " tree=" + (tree ? "ok" : "FAIL") + " image=" + (image ? "ok" : "FAIL"));
             if (!widget || !tree || !image) return;
+
+            // Root everything, including the player and texture made earlier. Without this the next
+            // GC pass takes them and the pointers held here go stale -- which is exactly what the
+            // faulting swap in the last build was.
+            const bool rooted = AddToRoot(widget) && AddToRoot(tree) && AddToRoot(image) &&
+                                AddToRoot(gPlayer) && AddToRoot(gTexture);
+            Cobalt::Log::WriteLine(std::string("[UE4] display: rooted against GC: ") + (rooted ? "ok" : "PARTIAL"));
 
             const int treeOff = OffsetOf(widget, "WidgetTree");
             const int rootOff = OffsetOf(tree, "RootWidget");
@@ -774,6 +876,7 @@ namespace Nova::UE4
             }
             gImage = image;
             gSetBrush = setBrush;
+            gWidget = widget;
 
             // ── SIZE, AND WHY NOTHING WAS DRAWN ──────────────────────────────────────────────
             //
