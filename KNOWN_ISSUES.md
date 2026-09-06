@@ -156,9 +156,9 @@ or one test launch with a candidate key and a check of whether the request lands
 | ~~`selfcheck-wrong-gamelog-path`~~ | **FIXED 2026-09-05** | `diagnostics.rs` | Read the build folder; UE4 writes to `%LOCALAPPDATA%`. Now reads the two newest `FortniteGame*.log` there. First run produced NOVA-301 and NOVA-303. See [REGRESSION_HISTORY.md](REGRESSION_HISTORY.md) NOVA-AUDIT-014. |
 | ~~`backend-eaddrinuse-zombie`~~ | **FIXED 2026-09-05** | `index.ts` | A failed HTTP bind is now fatal with a named cause and `exit(1)`. HTTPS stays non-fatal. Regression test spawns two real instances. NOVA-AUDIT-011's sibling; see `startup.test.ts`. |
 | ~~`port-checks-have-no-identity-probe`~~ | **FIXED 2026-09-05** | `diagnostics.rs` | Now GETs `/nova/api/components` and requires a 200 **and** the expected body. Third outcome added for "something else is on this port". NOVA-AUDIT-015. |
-| `minhook-null-aliases-all-hooks` | CONFIRMED | `dllmain.cpp:304-312` | `MH_EnableHook((PVOID)0)` **is** `MH_ALL_HOOKS`; a failed signature scan silently enables everything. |
-| `cobalt-reports-success-unverified` | CONFIRMED | `Cobalt/dllmain.cpp:468-483` | Prints "initialised successfully" without checking the hook installed. |
-| `cobalt-logs-bearer-tokens` | CONFIRMED, **narrowed 2026-09-05** | `curlhook.h:80`, `log.cpp:73-88` | `eg1~` JWTs written to `cobalt.log` and POSTed to the backend. The backend now **redacts on ingest** (NOVA-AUDIT-012), so nothing Cobalt sends is stored or served with a live token — that half needed no DLL release and the earlier framing of it as "the Cobalt half" was what kept it open. What remains is only the plaintext token in `cobalt.log` **on disk**, which needs a Cobalt build. |
+| ~~`minhook-null-aliases-all-hooks`~~ | **FIXED 2026-09-06** | `dllmain.cpp:304-312` | Now refuses a null target and checks both MinHook status codes. Was unreachable in the shipped build — `USE_MINHOOK` is commented out — which the original grade never stated. See the detail below. |
+| ~~`cobalt-reports-success-unverified`~~ | **FIXED 2026-09-06** | `Cobalt/dllmain.cpp:468-483` | `Hook()` returns a result, `InitializeCurlHook()` no longer returns an unconditional `true`, and the caller's existing failure path is now reachable. |
+| ~~`cobalt-logs-bearer-tokens`~~ | **FIXED 2026-09-06** | `curlhook.h:80`, `log.cpp:73-88` | **Both halves closed.** `WriteLine` redacts every line through the existing tested `Nova::Diag::Redact`, covering the file *and* the upload at one choke point. |
 | `trap8-systemic-unguarded-offsets` | CONFIRMED | `structs.cpp:414-422` | Offset-0-means-failure unchecked at most assignment sites (257 of 299 with no in-file zero-check). |
 | `mcp-rvn-from-client` | CONFIRMED | `mcp.routes.ts:20-31` | Revisions computed from the client's `rvn` query param rather than stored state. Latent on 7.40, and **narrower than it looks**: a binary scan shows this build reads only `profileChangesBaseRevision` and `profileChanges` — `profileRevision`, `profileCommandRevision` and `responseVersion` are absent from it entirely, so those three are ignored. See [VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md) §2b. |
 | `common-core-stateless-rvn` | CONFIRMED | `common_core.ts:80,122` | `rvn`/`commandRevision` hard-coded to 1, never persisted. |
@@ -176,7 +176,7 @@ or one test launch with a candidate key and a check of whether the request lands
 | `launcher-evidence-is-self-erasing` | CONFIRMED | `main.rs:174-188` | `nova-agent.log` truncated on every start; proxy has no log at all. |
 | `firewall-result-discarded` | CONFIRMED | `tailscale.rs:269-289` | Firewall-rule result discarded at both call sites; error read from the wrong stream. |
 | ~~`nova-307-dead-check`~~ | **FIXED 2026-09-05** | `diagnostics.rs` | Now reads `nova-agent.log`, reports any non-zero exit, and is called independently of `cobalt.log` existing. NOVA-AUDIT-014. |
-| `cobalt-stamp-frozen` | CONFIRMED | `log.cpp:326` | Banner stamp is `log.cpp`'s compile time, so two different binaries self-identify identically. |
+| ~~`cobalt-stamp-frozen`~~ | **FIXED 2026-09-06** | `log.cpp:326` | Reads the DLL's own last-write time instead of log.cpp's compile time, so two different builds no longer self-identify identically. |
 | `config-comment-stale` | CONFIRMED | `config.ts:96-105` | Asserts `WarmupWaitSeconds = 90s`; `definitions.h:73` is now `45.f`, making the documented "~30s of headroom" negative. **Comment only — do not "fix" the value**, see below. |
 | `join-window-anchor` | CONFIRMED | `matchmaking.routes.ts` | The join window is stamped when a ticket first finds a registered gameserver, not when the server reports warmup start. Pre-existing; the wrong anchor is the real defect. |
 | `bundled-hotfix-wrong-xmpp-port` | CONFIRMED, latent | `resources/…/cloudstorage/DefaultEngine.ini:3-4` | Bundled hotfix hard-codes `ws://127.0.0.1:3596`. Not live in P2P mode (cloudstorage always comes from the coordinator); would bite in standalone/LAN. |
@@ -185,6 +185,64 @@ or one test launch with a candidate key and a check of whether the request lands
 ---
 
 ## Fixed in the tree, NOT yet on any player's machine
+
+### `curl-setopt-null-deref` · CONFIRMED · **FIXED 2026-09-06** · *new, found while fixing the above*
+`InitializeCurlHook()` printed **"Failed to find CurlSetOptAddr! But we will go ahead.."** and
+installed the detour anyway. That was not a degraded mode, it was a guaranteed crash:
+
+```
+CURLOPT_SSL_VERIFYPEER -> CurlSetOpt_(...) -> CurlSetOpt(data, option, arg)
+CURLOPT_URL            -> CurlSetOpt_(...) -> CurlSetOpt(data, option, arg)
+anything else          ->                     CurlSetOpt(data, tag, arg)
+```
+
+`CurlSetOpt` is a plain function pointer initialised to `nullptr` (`curlhook.h:13`) and **no path
+checks it**. Installing the detour with it unresolved calls through null on the first
+`curl_easy_setopt` the game makes — during startup, every time. Now refuses to install, sets the
+failure status and raises `VERSION_MISMATCH`. The game then runs unredirected and says why, which is
+recoverable; a null-deref inside a curl call is not, and looks like the game crashing on its own.
+
+**Bearing on `nova-303-request-escape`:** this is the first mechanism found that fits the unexplained
+1.4.3 inline-hook crash. Under VEH the detour is frequently unarmed, so a null `CurlSetOpt` is
+survivable-ish; an inline hook runs the detour on *every* call, turning the same latent null into an
+immediate hard crash while loading the Frontend map — which is the reported symptom. **Not asserted
+as the cause** (`CurlSetOpt` does resolve on 7.40 today, since redirection works), but recorded so
+the next attempt at an inline hook starts from a hypothesis rather than nothing.
+
+### `minhook-null-aliases-all-hooks` · CONFIRMED · **FIXED 2026-09-06**
+`MH_ALL_HOOKS` is `#define`d to `NULL` (`vendor/MinHook/MinHook.h:88`), so `MH_EnableHook(nullptr)`
+means *enable every hook created so far*. `Hook()` now refuses a null target and reports it.
+
+Worth recording precisely: it was **unreachable in the shipped build** — `USE_MINHOOK` is commented
+out in `settings.h`, so the VEH branch is what compiles. The grade was right and the reachability was
+never stated. Fixed anyway, because "safe because of one commented-out `#define`" is not a property
+to rely on.
+
+### `cobalt-reports-success-unverified` · CONFIRMED · **FIXED 2026-09-06**
+`Hook()` returned `void` and discarded both MinHook status codes; `InitializeCurlHook()` returned an
+unconditional `true`. So "Cobalt v0.1 initialized sucessfully" was printed whether or not anything
+had been hooked. `Hook()` now returns a result, both status codes are checked and named, and the
+caller's existing failure path — which was correct all along and simply unreachable — now runs.
+
+### `cobalt-logs-bearer-tokens` · CONFIRMED · **FIXED 2026-09-06** · *both halves now closed*
+The remaining half was the plaintext token in `cobalt.log` **on disk** — a file players are routinely
+asked to send when something breaks, which is exactly when a live token gets pasted into a chat.
+
+`Cobalt::Log::WriteLine` now redacts every line through `Nova::Diag::Redact`. That is the only choke
+point needed: `std::cout` is redirected into `QueueStreamBuf`, which calls `WriteLine` per line, and
+**both** consumers — the file blob and the JSON upload body — are built from the queue it fills.
+Reuses the existing redactor rather than adding a second: `tests/test_redact.cpp` covers it (11 cases
+plus a Cobalt/Reboot drift check, all passing), and two implementations would drift.
+
+### `cobalt-stamp-frozen` · CONFIRMED · **FIXED 2026-09-06**
+The banner used `__DATE__ " " __TIME__`, which is **log.cpp's** compile time — and log.cpp changes far
+less often than dllmain.cpp, so two genuinely different builds introduced themselves identically.
+Now reads the DLL's own last-write time via `GetModuleHandleEx` + `GetFileAttributesEx`, which
+changes whenever the linker runs regardless of which source file caused it. Falls back to the macros
+if the module path cannot be read.
+
+This matters more than a P3 usually would: this project's recurring failure is a component being
+older than everyone assumes, and the banner is the one place that should have said so.
 
 ### `cobalt-sigscan-hangs-forever` · CONFIRMED · **FIXED 2026-09-06**
 `dllmain.cpp` `InitializeCurlHook()` retried the `curl_easy_setopt` signature in

@@ -97,13 +97,57 @@ static const unsigned char* FindFunctionEntry(const unsigned char* inner)
     return nullptr;
 }
 
-void Hook(void* Target, void* Detour)
+/**
+ * Install one hook. Returns false if it did not install — which callers must now check.
+ *
+ * ── WHY THE NULL GUARD IS NOT DEFENSIVE PADDING ──────────────────────────────────────────────────
+ *
+ * `MH_ALL_HOOKS` is `#define`d to `NULL` (vendor/MinHook/MinHook.h:88). So `MH_EnableHook(nullptr)`
+ * does not fail — it means **enable every hook created so far**. A failed signature scan reaching
+ * here would therefore arm every hook in the process at once, including any that were deliberately
+ * left disabled, and report nothing. That is `minhook-null-aliases-all-hooks` in KNOWN_ISSUES.
+ *
+ * It is currently unreachable because `USE_MINHOOK` is commented out in settings.h and the VEH
+ * branch is what compiles — but "unreachable because of one commented-out define" is not a property
+ * worth relying on, and uncommenting that define is a one-character change somebody will make.
+ *
+ * ── AND THE RETURN CODES WERE ALL DISCARDED ──────────────────────────────────────────────────────
+ *
+ * Neither MinHook call was checked. `MH_CreateHook` failing (target unreachable, already hooked,
+ * MinHook not initialised) left `MH_EnableHook` to be called anyway, and the caller then printed
+ * "Cobalt v0.1 initialized sucessfully" regardless — `cobalt-reports-success-unverified`. Both are
+ * now reported, and the result is returned rather than assumed.
+ */
+bool Hook(void* Target, void* Detour)
 {
+    if (!Target)
+    {
+        std::cout << "Hook: refusing a NULL target - MH_EnableHook(NULL) means ALL HOOKS, not "
+                     "'this one'. Nothing installed.\n";
+        Nova::Diag::Report(Nova::Diag::Source::Client,
+                           Nova::Diag::Category::UnexpectedState,
+                           "HOOK", "null-target", 0,
+                           "refused a null hook target");
+        return false;
+    }
+
 #ifdef USE_MINHOOK
-    MH_CreateHook(Target, Detour, nullptr);
-    MH_EnableHook(Target);
+    const MH_STATUS created = MH_CreateHook(Target, Detour, nullptr);
+    if (created != MH_OK)
+    {
+        std::cout << "Hook: MH_CreateHook failed (" << MH_StatusToString(created) << ")\n";
+        return false;
+    }
+    const MH_STATUS enabled = MH_EnableHook(Target);
+    if (enabled != MH_OK)
+    {
+        std::cout << "Hook: MH_EnableHook failed (" << MH_StatusToString(enabled) << ")\n";
+        return false;
+    }
+    return true;
 #else
     Memcury::VEHHook::AddHook(Target, Detour);
+    return true;
 #endif
 }
 
@@ -116,8 +160,10 @@ bool FixMemoryLeak() // 8.51
         return false;
     }
 
-    Hook((void*)memoryleak, returnNone);
-    return true;
+    // Report what actually happened rather than the scan result. The caller prints "Applied memory
+    // leak fix!" on a true return, which was previously true whenever the SIGNATURE matched even if
+    // the hook itself did not install.
+    return Hook((void*)memoryleak, returnNone);
 }
 
 void InitializeEOSCurlHook()
@@ -193,7 +239,40 @@ bool InitializeCurlHook()
 
     if (!CurlSetOptAddr)
     {
-        std::cout << "Failed to find CurlSetOptAddr! But we will go ahead..\n";
+        // ── "We will go ahead" was a GUARANTEED CRASH, not a degraded mode ───────────────────────
+        //
+        // Every path through CurlEasySetOptDetour ends in a call to CurlSetOpt:
+        //
+        //     CURLOPT_SSL_VERIFYPEER -> CurlSetOpt_(...)  -> CurlSetOpt(data, option, arg)
+        //     CURLOPT_URL            -> CurlSetOpt_(...)  -> CurlSetOpt(data, option, arg)
+        //     anything else          -> CurlSetOpt(data, tag, arg)
+        //
+        // `CurlSetOpt` is a plain function pointer initialised to nullptr (curlhook.h:13) and there
+        // is no null check on any of those paths. So installing the detour with this unresolved does
+        // not degrade behaviour — it calls through a null pointer on the FIRST curl_easy_setopt the
+        // game makes, which is during startup, every time.
+        //
+        // Refusing to install is strictly better: the game runs, unredirected, and says why. That is
+        // recoverable and diagnosable. A null-deref inside a curl call is neither, and it looks
+        // exactly like the game crashing for its own reasons.
+        //
+        // Worth noting against `nova-303-request-escape`: this is a candidate explanation for the
+        // 1.4.3 inline-hook crash that KNOWN_ISSUES records as unexplained. Under VEH the detour is
+        // frequently unarmed, so a null CurlSetOpt is survivable-ish; an inline hook runs the detour
+        // on EVERY call, which would turn the same latent null into an immediate hard crash while
+        // loading the Frontend map. NOT asserted as the cause — CurlSetOpt does resolve on 7.40
+        // today, since redirection works — but it is the first mechanism found that fits the
+        // symptom, and it is recorded rather than lost.
+        std::cout << "Failed to find CurlSetOptAddr - REFUSING to install the curl hook.\n";
+        std::cout << "  Every detour path calls it; installing now would null-deref on the first "
+                     "curl call.\n";
+
+        Cobalt::Log::SetStatus("failed to hook curl (internal setter not found)", false);
+        Nova::Diag::Report(Nova::Diag::Source::Version,
+                           Nova::Diag::Category::VersionMismatch,
+                           "HOOK", "curl_setopt", 0,
+                           "internal setter signature not found; hook not installed");
+        return false;
     }
 
     CurlEasySetOpt = decltype(CurlEasySetOpt)(CurlEasySetOptAddr);
@@ -329,7 +408,20 @@ bool InitializeCurlHook()
     // 1.5.0 reverted that change in memcury.h but not here. A log that lies about which build you are
     // running costs hours during a diagnosis — it nearly sent this one down the wrong path twice.
     std::cout << "Curl hook: VEH with deferred re-arm (single-step).\n";
-    Hook(CurlEasySetOpt, CurlEasySetOptDetour);
+
+    // The return value used to be discarded and this function returned an unconditional `true`, so
+    // "Cobalt v0.1 initialized sucessfully" was printed whether or not anything had been hooked —
+    // `cobalt-reports-success-unverified`. The caller already has a correct failure path; it was
+    // simply never reachable.
+    if (!Hook(CurlEasySetOpt, CurlEasySetOptDetour))
+    {
+        std::cout << "Curl hook: the hook did not install - the game will NOT reach Nova.\n";
+        Nova::Diag::Report(Nova::Diag::Source::Client,
+                           Nova::Diag::Category::UnexpectedState,
+                           "HOOK", "curl_easy_setopt", 0,
+                           "hook install failed after the address resolved");
+        return false;
+    }
 
     return true;
 }

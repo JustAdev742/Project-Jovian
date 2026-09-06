@@ -1,5 +1,6 @@
 #include "log.h"
 #include "settings.h"
+#include "diagnostics.h"   // Redact() - see WriteLine
 
 #include <Windows.h>
 // Types and constants only. Including this header does NOT create an import — that would come from
@@ -68,6 +69,52 @@ namespace Cobalt::Log
             dir += L"\\Logs";
             CreateDirectoryW(dir.c_str(), nullptr);
             return dir + L"\\cobalt.log";
+        }
+
+        /**
+         * A stamp that actually identifies THIS binary.
+         *
+         * The banner used to read `__DATE__ " " __TIME__`, which is the compile time of **this
+         * translation unit** — and log.cpp changes far less often than dllmain.cpp does. So two
+         * genuinely different Cobalt builds introduced themselves identically, and a log could not
+         * be matched to the binary that produced it. That is `cobalt-stamp-frozen` in KNOWN_ISSUES,
+         * and it has already cost time twice: this project's recurring failure is a component being
+         * older than everyone assumes, and the banner was the one place that should have said so.
+         *
+         * The DLL's own last-write time cannot go stale — it changes whenever the linker runs,
+         * whichever source file caused it. Falls back to the compile-time macros if the module path
+         * or its timestamp cannot be read, since a slightly-wrong stamp still beats none.
+         */
+        std::string BuildStamp()
+        {
+            HMODULE self = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   // Any address inside this DLL identifies it. ResolveLogPath is
+                                   // declared just above, so it is in scope and unambiguous.
+                                   reinterpret_cast<LPCWSTR>(&ResolveLogPath), &self) && self)
+            {
+                wchar_t path[MAX_PATH] = {};
+                if (GetModuleFileNameW(self, path, MAX_PATH))
+                {
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad))
+                    {
+                        SYSTEMTIME st{};
+                        FILETIME local{};
+                        if (FileTimeToLocalFileTime(&fad.ftLastWriteTime, &local) &&
+                            FileTimeToSystemTime(&local, &st))
+                        {
+                            char buf[40];
+                            _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                                        "built %04d-%02d-%02d %02d:%02d:%02d",
+                                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                            return buf;
+                        }
+                    }
+                }
+            }
+            return "compiled " __DATE__ " " __TIME__ " (module time unavailable)";
         }
 
         void AppendToFile(const std::string& text)
@@ -323,7 +370,7 @@ namespace Cobalt::Log
             return;
 
         g_logFilePath = ResolveLogPath();
-        AppendToFile("\r\n==== Cobalt starting (" __DATE__ " " __TIME__ ") ====\r\n");
+        AppendToFile("\r\n==== Cobalt starting (" + BuildStamp() + ") ====\r\n");
 
         g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (HANDLE t = CreateThread(nullptr, 0, WriterThread, nullptr, 0, nullptr))
@@ -356,8 +403,34 @@ namespace Cobalt::Log
         AppendToFile(blob);
     }
 
+    /**
+     * Queue one line for the log file and the backend upload.
+     *
+     * ── EVERY LINE IS REDACTED HERE, AND THIS IS THE ONLY PLACE IT NEEDS TO BE ───────────────────
+     *
+     * `cobalt-logs-bearer-tokens` in KNOWN_ISSUES: Cobalt sees the player's session token as a
+     * matter of course — 7.40 puts `eg1~<jwt>` in the URL PATH, and this DLL's whole job is to
+     * inspect the URL curl is about to fetch. Those URLs were logged verbatim.
+     *
+     * The backend half was closed in NOVA-AUDIT-012 (it redacts on ingest, so nothing is stored or
+     * served with a live token). What remained was the PLAINTEXT COPY ON DISK, in a file players are
+     * routinely asked to send when something breaks — which is exactly the moment a live token gets
+     * pasted into a chat.
+     *
+     * This is the right choke point because it is the ONLY one: `std::cout` is redirected into
+     * QueueStreamBuf, which calls WriteLine per line, and both consumers — the file blob and the
+     * JSON upload body — are built from the queue this fills. One call covers both.
+     *
+     * Reusing Nova::Diag::Redact rather than writing a second redactor is deliberate: there is one
+     * implementation, `tests/test_redact.cpp` covers it, and two would drift.
+     *
+     * Redacting BEFORE the lock, matching diagnostics.cpp — it allocates, and the critical section
+     * is contended by several game threads.
+     */
     void WriteLine(std::string line)
     {
+        line = Nova::Diag::Redact(line);
+
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_queue.size() >= kMaxQueued)
         {
