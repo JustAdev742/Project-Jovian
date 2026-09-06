@@ -157,28 +157,36 @@ if (missing.length) {
 // Never ship live data or secrets. RELEASING.md records that `data/nova.db` — a real account
 // database — once made it into a build because a test run created it inside the staging folder.
 //
-// Match on FILES, not directory names. RELEASING.md says "never ship data/", but that is shorthand:
-// `Backend-Coordinator/data/cloudstorage/*.ini` is the bundled hotfix payload and is *supposed* to
-// ship — standalone/LAN mode serves those files. Blocking the directory flagged them as a leak on
-// the first run of this script. What must never ship is the database and anything secret.
+// Match on FILES, not directory names, because `data/` also holds `profiles/`, which is created
+// empty and is harmless.
 const isForbiddenFile = (name) =>
   name === '.env' ||
   /\.(db|db-wal|db-shm|sqlite|sqlite3|log)$/i.test(name) ||
   /\.(key|pem|pfx)$/i.test(name) ||
-  // DefaultEngine.ini must NOT be bundled — it must be GENERATED.
+  // NO cloudstorage hotfix .ini may be bundled. Every one of them is GENERATED.
   //
-  // It carries the XMPP address, and `seedCloudstorageDefaults()` writes it from the port the
-  // backend is actually listening on. That function deliberately never overwrites an existing file,
-  // so a bundled copy wins permanently and the generated-from-the-real-port guarantee is void.
+  // `seedCloudstorageDefaults()` runs on every startup and writes the current set — but it does
+  // `if (fs.existsSync(file)) continue;`, so ANY bundled copy wins permanently and pins that file
+  // at whatever it said the day it was staged. That is not a theoretical risk; both halves of it
+  // have now happened:
   //
-  // The bundled copy said `ServerPort=3596`. Nothing listens there in either mode — standalone is
-  // 3551, agent mode 3552 — so in standalone/LAN the client got an XMPP address pointing at nothing
-  // and force-logged-out ~400ms after a successful login, reporting "Fortnite was not started
-  // correctly". That exact symptom has been chased twice before from two different causes; see the
-  // comment on seedCloudstorageDefaults.
+  //   * DefaultEngine.ini carries the XMPP address, written from the port the backend is actually
+  //     listening on. The bundled copy said `ServerPort=3596`, where nothing listens in either mode
+  //     (standalone 3551, agent 3552), so the client got an XMPP address pointing at nothing and
+  //     force-logged-out ~400ms after a successful login with "Fortnite was not started correctly".
+  //     That symptom has been chased twice before from two different causes.
   //
-  // The other three hotfix .ini files carry no port and are fine to ship.
-  name === 'DefaultEngine.ini';
+  //   * DefaultGame.ini was excluded from that rule as "carries no port, fine to ship" — and then
+  //     drifted. Measured 2026-09-06 while cutting 1.7.0: the bundle held a 2-line August copy
+  //     while the code had grown a whole `[/Script/FortniteGame.FortRuntimeOptions]` section
+  //     (global chat, four gifting flags). None of it had ever reached an installed client.
+  //     The bundle also still carried DefaultInput.ini and DefaultRuntimeOptions.ini, which the
+  //     code consolidated away — so installs served FOUR hotfix files where the design says two,
+  //     and UE4 discards the ENTIRE batch if any one download fails.
+  //
+  // "Fine to ship" was the mistake. A file the code generates must not also be shipped, because
+  // shipping it is what stops the generation from ever running again.
+  /^Default.*\.ini$/i.test(name);
 
 const resources = path.join(ROOT, 'Launcher', 'src-tauri', 'resources');
 const leaked = [];
@@ -200,8 +208,9 @@ if (leaked.length) {
   console.error('[stage-backend] REFUSING TO SHIP — files that must not be in the payload:');
   for (const l of leaked) {
     // Two different reasons land here and they need different remedies, so say which.
-    const why = path.basename(l) === 'DefaultEngine.ini'
-      ? 'must be GENERATED from the live port by seedCloudstorageDefaults(), not bundled — delete it'
+    const why = /^Default.*\.ini$/i.test(path.basename(l))
+      ? 'a cloudstorage hotfix — seedCloudstorageDefaults() writes it on startup and never ' +
+        'overwrites, so a bundled copy pins it forever. Delete it; it regenerates.'
       : 'live data or a secret — delete it and check how it got there';
     console.error(`  - ${l}`);
     console.error(`      ${why}`);

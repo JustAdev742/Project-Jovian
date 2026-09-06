@@ -420,6 +420,12 @@ pub fn scan_text_with(text: &str, header: &Header) -> Scan {
 }
 
 /// Scan text that carries its own header. Convenience for a whole-file read.
+///
+/// Not called by the running launcher — the watcher reads incremental chunks and resolves the
+/// header separately, which is the whole point of `scan_text_with`. This is the whole-file entry
+/// point used by the tests and by the real-log probe, and it is kept because a caller that has the
+/// entire text in hand should not have to know to resolve a header first.
+#[allow(dead_code)]
 pub fn scan_text(text: &str) -> Scan {
     scan_text_with(text, &Header::from_text(text))
 }
