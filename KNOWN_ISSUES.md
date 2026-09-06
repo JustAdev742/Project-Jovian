@@ -158,6 +158,40 @@ or one test launch with a candidate key and a check of whether the request lands
 
 ## Fixed in the tree, NOT yet on any player's machine
 
+### `cobalt-sigscan-hangs-forever` · CONFIRMED · **FIXED 2026-09-06**
+`dllmain.cpp` `InitializeCurlHook()` retried the `curl_easy_setopt` signature in
+`while (!addr) { addr = sigscan(same); Sleep(200); }` — **unbounded**. On any build the signature was
+not written for, the game did not fail, it **hung silently forever**. The `if (!CurlEasySetOptAddr)`
+check below it was unreachable, and its author had marked it `// impossibel ol`. The caller already
+implemented a proper failure path — status line plus message box — which could never run.
+
+Now bounded to 100 × 200 ms (20 s, far longer than module mapping takes), then it logs
+"This build is probably not 7.40", sets the failure status, and raises a `VERSION_MISMATCH`
+diagnostic from `Source::Version` so an unsupported build appears on the coordinator dashboard as
+what it is rather than as a network fault. Built and verified: the new strings are present in
+`Cobalt.dll` with a positive and a negative control in the same scan.
+
+### `cobalt-dll-three-live-copies` · CONFIRMED · **FIXED 2026-09-06**
+The same "fixed in source, not shipped" failure as `stale-dist-preferred`, in a second component.
+`build.ps1 -Deploy` copied `Cobalt.dll` to `target/release` and `target/debug` only — **not** to
+`resources/`, which is what `tauri.conf.json` bundles. And `carter.rs` resolves via
+`beside_exe("Cobalt.dll")` **first**, so the build output was the one copy guaranteed not to load.
+
+Three different builds were live simultaneously:
+
+| hash | date | path | who loads it |
+|---|---|---|---|
+| `a62d20cc` | 2026-09-06 | `cobalt/x64/Release/` | nobody |
+| `22c87f01` | 2026-09-05 | `src-tauri/resources/` | an installed launcher; shipped in 1.6.0 |
+| `84622a61` | **2026-07-25** | `src-tauri/target/release/` | **a dev-tree launcher, first** |
+
+Fixed by `tools/stage-cobalt.mjs`, mirroring `stage-backend.mjs`: it copies the build output to all
+five consumed locations and `--check` exits 1 if any differs. Wired into RELEASING.md next to the
+backend check.
+
+**The pattern, now seen twice:** a component is built to one path and loaded from another, with
+nothing comparing them. When adding any new bundled artefact, add its `--check` at the same time.
+
 Everything in this section is done and tested in source. It reaches players only when a launcher
 installer is next built and released. Recorded separately because conflating the two is exactly the
 mistake that produced NOVA-AUDIT-013.

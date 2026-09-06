@@ -123,24 +123,60 @@ void InitializeEOSCurlHook()
 {
 }
 
+/**
+ * The curl_easy_setopt signature, and what to do when it does not match.
+ *
+ * Scanning can legitimately fail for a moment at startup: libcurl's code has to be mapped before a
+ * pattern in it can be found, so a retry is right. It was UNBOUNDED, and that is the defect —
+ * `while (!addr) { addr = sigscan(same); Sleep(200); }` around a signature that will never match on a
+ * build it was not written for. The game does not fail; it HANGS, silently, forever, and the
+ * `if (!CurlEasySetOptAddr)` below it was unreachable. Its own author marked it `// impossibel ol`.
+ *
+ * A hang is the worst available outcome. Nobody can tell it from a slow load, there is nothing in
+ * any log, and the failure branch the caller already implements — a status line and a message box —
+ * never runs. Twenty seconds is far longer than mapping takes and far shorter than a player's
+ * patience, so it is bounded there and then reported.
+ */
+static const char* kCurlEasySetOptSig =
+    "89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 48 85 C9 75 08 8D 41 2B 48 83 C4 28 C3 4C";
+
+/** 20 seconds at 200ms. Generous for module mapping; hopeless cases now end instead of hanging. */
+static constexpr int kSigScanAttempts = 100;
+static constexpr int kSigScanDelayMs  = 200;
+
 bool InitializeCurlHook()
 {
-    auto CurlEasySetOptAddr = sigscan("89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 48 85 C9 75 08 8D 41 2B 48 83 C4 28 C3 4C");
+    auto CurlEasySetOptAddr = sigscan(kCurlEasySetOptSig);
 
     if (!CurlEasySetOptAddr)
     {
-        std::cout << "Fallback!\n";
+        std::cout << "curl_easy_setopt not found yet - waiting for the module to map...\n";
 
-        while (!CurlEasySetOptAddr)
+        for (int attempt = 0; attempt < kSigScanAttempts && !CurlEasySetOptAddr; ++attempt)
         {
-            CurlEasySetOptAddr = sigscan("89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 48 85 C9 75 08 8D 41 2B 48 83 C4 28 C3 4C");
-            Sleep(200);
+            Sleep(kSigScanDelayMs);
+            CurlEasySetOptAddr = sigscan(kCurlEasySetOptSig);
         }
     }
 
-    if (!CurlEasySetOptAddr) // impossibel ol
+    if (!CurlEasySetOptAddr)
     {
-        std::cout << "Failed to find CurlEasySetOptAddr!\n";
+        // Reached only when the signature is genuinely absent, which in practice means the running
+        // build is not the one this signature was written against. Say so rather than blaming curl:
+        // that is the first thing anyone reading the log needs to know.
+        std::cout << "Failed to find curl_easy_setopt after "
+                  << (kSigScanAttempts * kSigScanDelayMs / 1000)
+                  << "s. This build is probably not 7.40 - the redirect cannot be installed.\n";
+
+        Cobalt::Log::SetStatus("failed to hook curl - is this build 7.40?", false);
+
+        // VERSION_MISMATCH rather than a generic failure: it is the accurate category, and it is the
+        // one that makes an unsupported build visible on the coordinator dashboard instead of
+        // looking like a network problem. Source::Version for the same reason.
+        Nova::Diag::Report(Nova::Diag::Source::Version,
+                           Nova::Diag::Category::VersionMismatch,
+                           "HOOK", "curl_easy_setopt", 0,
+                           "signature not found; client build is probably not 7.40");
         return false;
     }
 

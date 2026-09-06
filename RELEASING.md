@@ -64,6 +64,35 @@ way into the payload.
 > node tools/stage-backend.mjs --check   # exit 1 if the payload is behind the source
 > ```
 
+**Cobalt is scripted too, and for the same reason.**
+
+```bash
+cd Launcher/cobalt && ./build.ps1        # produces cobalt/x64/Release/Cobalt.dll
+cd ../.. && node tools/stage-cobalt.mjs  # copy it everywhere that actually loads one
+```
+
+> **Why it is a script.** `build.ps1 -Deploy` copied the DLL to `target/release` and `target/debug`
+> only — **not** to `resources/`, which is what `tauri.conf.json` bundles and what an installed
+> launcher loads. And `carter.rs` asks `beside_exe("Cobalt.dll")` FIRST, so the build output is the
+> one copy guaranteed *not* to be used.
+>
+> Measured 2026-09-06: **three different Cobalt builds were live in the tree at once**, and the one a
+> dev-tree launcher loaded first was from **25 July** — six weeks stale.
+>
+> ```
+> a62d20cc  2026-09-06  cobalt/x64/Release/         just built, loaded by nobody
+> 22c87f01  2026-09-05  src-tauri/resources/        what 1.6.0 shipped
+> 84622a61  2026-07-25  src-tauri/target/release/   what a dev launcher actually loaded
+> ```
+>
+> Verify before building:
+> ```bash
+> node tools/stage-cobalt.mjs --check   # exit 1 if any consumed copy differs from the build
+> ```
+
+**Run both `--check` commands before every release.** They are the only things standing between
+"fixed in source" and "fixed on a player's machine", and this project has now been caught by that
+gap twice in two different components.
 The remaining artefacts are still manual. Copy them into `Launcher/src-tauri/resources/`:
 
 | Goes to | From |
