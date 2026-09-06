@@ -68,6 +68,20 @@ namespace Nova::UE4
     /** How many objects the engine currently holds. 0 before the array is up. */
     int ObjectCount();
 
+    /** An object's name, via KismetSystemLibrary.GetObjectName. Empty when unavailable. */
+    std::string GetName(UObject* object);
+
+    /**
+     * Census of everything media-shaped the game already has.
+     *
+     * This decides how the bumper gets on screen. Driving UE4's media framework from scratch means
+     * building a widget to show the texture in, which is the hard part; if Fortnite already owns a
+     * player/texture/widget for its own videos, reusing that is far cheaper and far less likely to
+     * fight the game's UI. That is not answerable by reading the binary — only by looking at what is
+     * actually constructed at runtime.
+     */
+    void EnumerateMedia();
+
     /**
      * Log what resolved and which classes the bumper needs are actually live.
      *

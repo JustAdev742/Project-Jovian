@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <vector>
 #include <atomic>
+#include <algorithm>
 
 namespace Nova::UE4
 {
@@ -107,6 +108,25 @@ namespace Nova::UE4
             int32_t        NumElements;
             int32_t        MaxChunks;
             int32_t        NumChunks;
+        };
+
+        /** UObject's first fields, 4.22. Only what the walk reads. */
+        struct UObjectLayout
+        {
+            void**   VFTable;
+            int32_t  ObjectFlags;
+            int32_t  InternalIndex;
+            void*    ClassPrivate;      // the UClass - what the census filters on
+            uint64_t NamePrivate;
+            void*    OuterPrivate;
+        };
+
+        /** TArray<TCHAR> as FString carries it. */
+        struct FStringOut
+        {
+            wchar_t* Data;
+            int32_t  ArrayNum;
+            int32_t  ArrayMax;
         };
 
         using ProcessEventFn    = void  (*)(void*, void*, void*);
@@ -228,6 +248,121 @@ namespace Nova::UE4
             Cobalt::Log::WriteLine("[UE4] ProcessEvent faulted and was contained");
     }
 
+    namespace
+    {
+        /** Guarded ProcessEvent that returns success, split for C2712 as above. */
+        bool SafePE(void* obj, void* fn, void* params)
+        {
+            __try { gProcessEvent(obj, fn, params); return true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+
+        /** Guarded read of an object's UClass pointer. */
+        void* SafeClassOf(void* obj)
+        {
+            __try { return static_cast<UObjectLayout*>(obj)->ClassPrivate; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        }
+
+        void* GetObjectByIndex(int index)
+        {
+            if (!gObjects || index < 0 || index >= gObjects->NumElements) return nullptr;
+            const int chunk = index / FChunkedFixedUObjectArray::NumElementsPerChunk;
+            const int within = index % FChunkedFixedUObjectArray::NumElementsPerChunk;
+            if (chunk > gObjects->NumChunks) return nullptr;
+            FUObjectItem* c = gObjects->Objects[chunk];
+            return c ? (c + within)->Object : nullptr;
+        }
+    }
+
+    std::string GetName(UObject* object)
+    {
+        if (!Ready() || !object) return {};
+
+        // Via the engine's own accessor rather than by decoding the FName pool. It costs a
+        // ProcessEvent per call, which is why the census below resolves a name once per distinct
+        // CLASS and never once per object -- 226,000 calls would stutter the game for no gain.
+        static void* fn  = FindObject("/Script/Engine.KismetSystemLibrary.GetObjectName");
+        static void* lib = FindObject("/Script/Engine.Default__KismetSystemLibrary");
+        if (!fn || !lib) return {};
+
+        struct { void* Object; FStringOut Return; } params{ object, {} };
+        if (!SafePE(lib, fn, &params)) return {};
+        if (!params.Return.Data || params.Return.ArrayNum <= 0) return {};
+
+        std::string out;
+        for (int i = 0; i < params.Return.ArrayNum && params.Return.Data[i]; ++i)
+            out += static_cast<char>(params.Return.Data[i] < 128 ? params.Return.Data[i] : '?');
+        return out;
+    }
+
+    void EnumerateMedia()
+    {
+        if (!Ready()) return;
+
+        // Classes whose INSTANCES are worth listing individually -- there should be few, and each
+        // one is a candidate to reuse instead of constructing our own.
+        struct Watch { const char* label; void* cls; };
+        Watch watches[] = {
+            { "MediaPlayer",         FindObject("/Script/MediaAssets.MediaPlayer") },
+            { "MediaTexture",        FindObject("/Script/MediaAssets.MediaTexture") },
+            { "FileMediaSource",     FindObject("/Script/MediaAssets.FileMediaSource") },
+            { "MediaSoundComponent", FindObject("/Script/MediaAssets.MediaSoundComponent") },
+        };
+
+        const int total = ObjectCount();
+        Cobalt::Log::WriteLine("[UE4] media census over " + std::to_string(total) + " objects");
+
+        // Pass 1: instances of the media classes. Cheap -- a pointer compare per object.
+        int listed = 0;
+        for (int i = 0; i < total && listed < 40; ++i)
+        {
+            void* obj = GetObjectByIndex(i);
+            if (!obj) continue;
+            void* cls = SafeClassOf(obj);
+            if (!cls) continue;
+
+            for (const auto& w : watches)
+            {
+                if (!w.cls || cls != w.cls) continue;
+                Cobalt::Log::WriteLine(std::string("[UE4]   instance ") + w.label + " -> " +
+                                       GetName(reinterpret_cast<UObject*>(obj)));
+                ++listed;
+                break;
+            }
+        }
+        if (listed == 0)
+            Cobalt::Log::WriteLine("[UE4]   no live instances of any media class -- nothing to reuse, build from scratch");
+
+        // Pass 2: which CLASSES exist whose name looks video-shaped. One name lookup per distinct
+        // class pointer, not per object, which is what keeps this affordable.
+        std::vector<void*> seen;
+        seen.reserve(4096);
+        int classesNamed = 0, hits = 0;
+        for (int i = 0; i < total && classesNamed < 6000; ++i)
+        {
+            void* obj = GetObjectByIndex(i);
+            if (!obj) continue;
+            void* cls = SafeClassOf(obj);
+            if (!cls) continue;
+            if (std::find(seen.begin(), seen.end(), cls) != seen.end()) continue;
+            seen.push_back(cls);
+            ++classesNamed;
+
+            const std::string n = GetName(reinterpret_cast<UObject*>(cls));
+            if (n.empty()) continue;
+            if (n.find("Media") != std::string::npos || n.find("Movie") != std::string::npos ||
+                n.find("Video") != std::string::npos || n.find("Cinematic") != std::string::npos)
+            {
+                Cobalt::Log::WriteLine("[UE4]   class  " + n);
+                if (++hits >= 30) break;
+            }
+        }
+        Cobalt::Log::WriteLine("[UE4] media census done: " + std::to_string(listed) + " instance(s), " +
+                               std::to_string(hits) + " video-shaped class(es), " +
+                               std::to_string(classesNamed) + " classes examined");
+    }
+
     void SelfTest()
     {
         if (!Ready())
@@ -304,6 +439,7 @@ namespace Nova::UE4
             if (found == kProbeCount)
             {
                 Cobalt::Log::WriteLine("[UE4] everything the bumper needs is live - stopping probe");
+                EnumerateMedia();
                 return;
             }
         }
