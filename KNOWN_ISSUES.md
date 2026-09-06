@@ -314,6 +314,41 @@ to run a match, read the report, and migrate the ones that actually fail on 7.40
 existed before; now it does. Note that not every entry will be a defect: a lookup on a class that
 legitimately lacks an optional member appears too.
 
+### `harvesting-guard-disabled-all-harvesting` · CONFIRMED · **REGRESSION I SHIPPED IN 1.6.4 · FIXED 2026-09-06**
+The self-guarding rewrite of `harvesting.cpp` in 1.6.3/1.6.4 included `DamageOffset < 0` in its
+refuse-to-read guard. On 7.40, `/Script/FortniteGame.BuildingActor.OnDamageServer` has no findable
+`Damage` property — proven by the shipped build's own log, which is the instrumentation working
+exactly as intended and immediately catching its author:
+
+```
+[Harvest] BuildingActor.Damage: neither 'Damage' nor '(none)' found - harvesting disabled for it
+```
+
+**`BuildingActor` is every tree, wall and rock in the game**, so that guard disabled ALL harvesting
+for anyone who took 1.6.4.
+
+**Why the guard was wrong, and it is a reasoning error not a typo.** `Damage` feeds exactly one
+thing — `bHitWeakspot = Damage == 100.f` — while the material amount comes from the game's own
+`PotentialResourceCount`. A missing `Damage` therefore means *"cannot tell whether that was a weak
+spot"*, not *"do not harvest"*. The previous code read offset 0 and worked fine, because an
+unreliable weak-spot flag is the entire cost. **I treated a cosmetic value as fatal, which was
+strictly worse than the bug being guarded against.**
+
+Fixed by splitting the guard along what is actually dereferenced:
+
+- `InstigatedBy` and `DamageCauser` are read as `UObject*` and handed to `IsA()`. A bad offset there
+  is a garbage pointer and a dead match — still fatal, still refuses.
+- `Damage` is read as a float for one comparison. Unusable offset now yields `0.f`: not a weak spot,
+  and no out-of-bounds read either — better than the old code, which dereferenced offset 0 blind.
+
+Also removed `!Damage` from the null test: it was a pointer computed as `(Parameters + offset)`,
+which can never be null, so that condition tested nothing.
+
+**The lesson, which is the part worth keeping:** a guard has to be justified per-field by what the
+value is *used for*, not applied uniformly because all three came from the same helper. And the
+reason this was caught within hours rather than by a player report is that the same change shipped
+the logging that named it.
+
 ### `harvesting-wrong-property-name` · CONFIRMED · **FIXED 2026-09-06** · *consequence upgraded from PLAUSIBLE to certain*
 All six Car parameter lookups in `harvesting.cpp` asked for `"InstigatedBy"`. The commented-out
 originals beside them named `DamageCauser` and `Damage`, and the `BuildingActor` block immediately

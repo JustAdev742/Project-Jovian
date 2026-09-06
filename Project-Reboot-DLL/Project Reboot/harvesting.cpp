@@ -144,8 +144,13 @@ static int ParamOffset(UObject* Fn, const char* Name, const char* Fallback, cons
 		}
 	}
 
-	std::cout << "[Harvest] " << Label << ": neither '" << Name << "' nor '"
-	          << (Fallback ? Fallback : "(none)") << "' found - harvesting disabled for it\n";
+	// Says only what it knows. The earlier wording claimed "harvesting disabled for it", which was
+	// both alarming and wrong for the Damage lookup — a missing Damage costs the weak-spot flag and
+	// nothing else. Only InstigatedBy and DamageCauser actually stop harvesting, and the call site
+	// says so where that decision is made.
+	std::cout << "[Harvest] " << Label << ": not found ('" << Name << "'"
+	          << (Fallback ? std::string(" or '") + Fallback + "'" : std::string())
+	          << ")\n";
 	return -1;
 }
 
@@ -224,23 +229,43 @@ bool Harvesting::OnDamageServer(UObject* BuildingActor, UFunction* Function, voi
 
 		static auto FortWeaponPickaxeAthenaClass = FindObject("/Script/FortniteGame.FortWeaponPickaxeAthena");
 
-		// THE GUARD. ParamOffset returns -1 for "no usable offset", and -1 is not a sentinel that can
-		// be quietly tolerated here: these three lines take it as a byte offset into the parameter
-		// block, so a negative value reads BEFORE the struct and a garbage pointer gets dereferenced
-		// two lines later. Refuse instead. Losing harvesting on one actor type is a bad afternoon;
-		// reading wild memory inside the gameserver takes the whole match down.
+		// THE GUARD — and note what it does NOT include.
 		//
-		// Checked here rather than at resolution because these are per-actor: BuildingActor can
-		// resolve cleanly while a Car blueprint absent from some build does not, and that case should
-		// cost only the cars.
-		if (InstigatedByOffset < 0 || DamageCauserOffset < 0 || DamageOffset < 0)
+		// InstigatedBy and DamageCauser are DEREFERENCED as UObject pointers. A -1 offset there reads
+		// before the parameter block and hands a garbage pointer to IsA() two lines later, which takes
+		// the match down. Those two are genuinely fatal and must refuse.
+		//
+		// `Damage` IS NOT. It feeds exactly one thing — `bHitWeakspot = Damage == 100.f` in Harvest()
+		// — while the material amount comes from the game's own PotentialResourceCount. A missing
+		// Damage therefore means "we cannot tell whether this was a weak spot", not "do not harvest".
+		//
+		// GETTING THAT WRONG BROKE HARVESTING IN 1.6.4. This guard originally included
+		// `DamageOffset < 0`, and on 7.40 `/Script/FortniteGame.BuildingActor.OnDamageServer` has no
+		// findable `Damage` property — proven by the shipped build's own log:
+		//
+		//     [Harvest] BuildingActor.Damage: neither 'Damage' nor '(none)' found - harvesting
+		//               disabled for it
+		//
+		// BuildingActor is every tree, wall and rock in the game, so that disabled ALL harvesting.
+		// The previous code read offset 0 there and worked, because the only cost of a wrong Damage
+		// is an unreliable weak-spot flag. Treating a cosmetic value as fatal was strictly worse than
+		// the bug it was guarding against.
+		if (InstigatedByOffset < 0 || DamageCauserOffset < 0)
 			return false;
 
 		auto InstigatedBy = *(UObject**)(__int64(Parameters) + InstigatedByOffset);
 		auto DamageCauser = *(UObject**)(__int64(Parameters) + DamageCauserOffset);
-		auto Damage = (float*)(__int64(Parameters) + DamageOffset);
 
-		if (!InstigatedBy || !DamageCauser || !Damage)
+		// 0.f when the offset is unusable: not a weak spot, and no out-of-bounds read either. The old
+		// code dereferenced offset 0 unconditionally and got whatever float happened to be there.
+		const float DamageValue = DamageOffset >= 0
+			? *(float*)(__int64(Parameters) + DamageOffset)
+			: 0.f;
+
+		// `!Damage` used to be part of this test and was always false: Damage was a pointer computed
+		// as (Parameters + offset), which cannot be null. It tested nothing. DamageValue is a float
+		// now, so there is nothing to null-check — the two actor pointers are the real conditions.
+		if (!InstigatedBy || !DamageCauser)
 		{
 			// std::cout << "fail5!\n";
 			return false;
@@ -267,7 +292,7 @@ bool Harvesting::OnDamageServer(UObject* BuildingActor, UFunction* Function, voi
 			return false;
 		}
 
-		Harvest(InstigatedBy, BuildingActor, *Damage);
+		Harvest(InstigatedBy, BuildingActor, DamageValue);
 	}
 
 	return false;
