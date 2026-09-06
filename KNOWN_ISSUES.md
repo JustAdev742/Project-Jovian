@@ -295,6 +295,28 @@ loaded; a failure degrades to the old blank video, never to no widget.
 **Proof to look for in cobalt.log:** `[UE4] assets: N MediaTexture asset(s) in the registry`, the
 load line, and at teardown `texture reported 854 wide during playback`.
 
+**1.8.2 result:** `assets: MISSING AssetRegistry.GetAssetsByClass` — on this build the registry's
+query is not a UFunction (the helper class and the `AssetData` struct resolved; only the interface
+call did not), so nothing was loaded and the video was blank again. **1.8.3 adds a second route:**
+`ObjectLibrary.CreateLibrary(MediaTexture)` + `LoadAssetsFromPath("/Game/UI/Foundation/Movie")`,
+which loads the two packages in that directory — `PostLoad` included — and then the texture is
+found by its full path. The registry route is kept first; the log names whichever worked.
+
+### `bumper-hide-looked-up-by-the-wrong-path` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.3)** · *1.8.2 locked players out of the login screen*
+
+**1.8.2 showed the placeholder image over the login screen, full-screen, and no click got through.**
+
+The widget was meant to be added hidden and shown on Battle Royale. Both calls resolved
+`SetVisibility` by the path `/Script/UMG.UserWidget.SetVisibility` — but a function's path names the
+class that DECLARES it, and `SetVisibility` is declared on `Widget`. The lookup returned null, the
+call sat inside an `if`, and the hide silently never happened — in 1.8.1 as well. Because a
+`Visible` full-screen Slate widget is hit-testable, every click ended in it.
+
+**Fix.** `FindFunctionOn(obj, "SetVisibility")` walks the object's class chain, the way the engine
+resolves a call; the hide is applied before and after `AddToViewport`, to the image as well, and
+`GetVisibility` is read back and logged (`visibility read back 2 … after`). A silent `if` around a
+lookup that can fail is the pattern to watch for: the log said "hidden" without ever checking.
+
 ### `bumper-off-switch-never-worked` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
 
 `BumperEnabled()` built the marker path as `L"\ProjectNova\bumper.off"`. `\P` is an invalid escape

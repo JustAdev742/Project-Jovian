@@ -62,19 +62,34 @@ pub fn bumper_set_enabled(enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Put the bundled clip where Cobalt looks, if it is missing or not the bundled one.
+/// Put the bundled clip -- and its soundtrack, `bumper.wav` -- where Cobalt looks, if either is
+/// missing or not the bundled one.
 ///
 /// Called on the launch path, next to the Cobalt deployment. Never fatal: a launch must not fail
-/// because a bumper could not be copied, so this only reports.
+/// because a bumper could not be copied, so this only reports. The first failure is returned; the
+/// other file is still attempted.
 pub fn stage_clip() -> Result<(), String> {
-    let dest = clip_path().ok_or("LOCALAPPDATA is not set")?;
-    let src = crate::host::beside_exe("bumper.mp4").ok_or("bumper.mp4 is not bundled with this launcher")?;
+    let dir = nova_dir().ok_or("LOCALAPPDATA is not set")?;
+    let mut first_err: Option<String> = None;
+    for name in ["bumper.mp4", "bumper.wav"] {
+        if let Err(e) = stage_one(&dir.join(name), name) {
+            first_err.get_or_insert(e);
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn stage_one(dest: &std::path::Path, name: &str) -> Result<(), String> {
+    let src = crate::host::beside_exe(name).ok_or_else(|| format!("{} is not bundled with this launcher", name))?;
     let src_len = fs::metadata(&src).map_err(|e| e.to_string())?.len();
-    let up_to_date = fs::metadata(&dest).map(|m| m.len() == src_len).unwrap_or(false);
+    let up_to_date = fs::metadata(dest).map(|m| m.len() == src_len).unwrap_or(false);
     if up_to_date {
         return Ok(());
     }
-    fs::copy(&src, &dest).map_err(|e| format!("copy {} -> {}: {}", src, dest.display(), e))?;
-    println!("Staged bumper.mp4 ({} bytes) to {}", src_len, dest.display());
+    fs::copy(&src, dest).map_err(|e| format!("copy {} -> {}: {}", src, dest.display(), e))?;
+    println!("Staged {} ({} bytes) to {}", name, src_len, dest.display());
     Ok(())
 }

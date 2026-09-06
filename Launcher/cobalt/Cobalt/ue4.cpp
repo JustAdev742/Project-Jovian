@@ -420,6 +420,41 @@ namespace Nova::UE4
             for (size_t i = 0; i < w.size(); ++i) s += (w[i] < 128 ? (char)w[i] : '?');
             return s;
         }
+
+        // ── THE SOUNDTRACK ───────────────────────────────────────────────────────────────────────
+        //
+        // UE4's MediaPlayer only makes sound through a MediaSoundComponent, which needs an actor to
+        // live on and the audio mixer underneath it -- two more things to get wrong from outside
+        // the engine. Windows will play a WAV on its own thread with one call. So the launcher
+        // ships the clip's audio as bumper.wav beside bumper.mp4, and this starts it alongside the
+        // video. winmm is loaded on first use rather than imported, so the DLL's import table --
+        // which the game's loader resolves at startup -- does not change.
+        std::wstring gWavPath;
+        using PlaySoundWFn = BOOL (WINAPI*)(LPCWSTR, HMODULE, DWORD);
+        PlaySoundWFn gPlaySound = nullptr;
+        constexpr DWORD kSndAsync = 0x0001, kSndNoDefault = 0x0002, kSndFilename = 0x00020000;
+
+        bool LoadPlaySound()
+        {
+            if (gPlaySound) return true;
+            HMODULE winmm = LoadLibraryW(L"winmm.dll");
+            if (!winmm) return false;
+            gPlaySound = reinterpret_cast<PlaySoundWFn>(GetProcAddress(winmm, "PlaySoundW"));
+            return gPlaySound != nullptr;
+        }
+
+        void StartAudio()
+        {
+            if (gWavPath.empty()) { Cobalt::Log::WriteLine("[UE4] bumper: no bumper.wav - playing silent"); return; }
+            if (!LoadPlaySound()) { Cobalt::Log::WriteLine("[UE4] bumper: winmm.PlaySoundW unavailable - playing silent"); return; }
+            const BOOL ok = gPlaySound(gWavPath.c_str(), nullptr, kSndAsync | kSndNoDefault | kSndFilename);
+            Cobalt::Log::WriteLine(std::string("[UE4] bumper: audio ") + (ok ? "started" : "FAILED to start"));
+        }
+
+        void StopAudio()
+        {
+            if (gPlaySound) gPlaySound(nullptr, nullptr, 0);
+        }
     }
 
     void TryDecodeBumper()
@@ -441,6 +476,14 @@ namespace Nova::UE4
         {
             Cobalt::Log::WriteLine("[UE4] no bumper.mp4 in any candidate location - copy the file to one of the above");
             return;
+        }
+        // Its soundtrack, beside it. Absent is not fatal: the video plays silent and the log says so.
+        {
+            const std::wstring wav = path.substr(0, path.find_last_of(L'.')) + L".wav";
+            const DWORD attr = GetFileAttributesW(wav.c_str());
+            const bool ok = attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+            Cobalt::Log::WriteLine(std::string("[UE4] bumper audio ") + (ok ? "FOUND  " : "absent ") + Narrow(wav));
+            gWavPath = ok ? wav : L"";
         }
 
         // 2. Construct a player. The transient package is what engine code uses for objects that
@@ -645,6 +688,28 @@ namespace Nova::UE4
             }
             return -1;
         }
+
+        /**
+         * A UFunction by name on an OBJECT, walking its class chain -- the way the engine itself
+         * resolves a call.
+         *
+         * A function's path names the class that DECLARES it. SetVisibility is declared on Widget,
+         * so "/Script/UMG.UserWidget.SetVisibility" finds nothing -- and the code that hid the
+         * bumper until Battle Royale looked it up exactly that way, inside an `if`, for two
+         * releases. The hide silently never happened: the control texture sat over the login
+         * screen, full-screen and hit-testable, and swallowed every click.
+         */
+        void* FindFunctionOn(void* obj, const char* name)
+        {
+            if (!Ready() || !obj || !name) return nullptr;
+            static void* funcClass = FindObject("/Script/CoreUObject.Function");
+            if (!funcClass) return nullptr;
+            const std::string narrow(name);
+            const std::wstring wide(narrow.begin(), narrow.end());
+            for (void* cls = SafeClassOf(obj); cls; cls = SafeDeref(cls, kOffset_SuperStruct))
+                if (void* fn = SafeStaticFindIn(funcClass, cls, wide.c_str())) return fn;
+            return nullptr;
+        }
     }
 
     // ── GAME-THREAD HOP ──────────────────────────────────────────────────────────────────────────
@@ -768,6 +833,9 @@ namespace Nova::UE4
          * this is the same lookup OffsetInStruct does for a struct member.
          */
         int ParamOffset(void* fn, const char* name) { return OffsetInStruct(fn, name); }
+
+        /** Defined with the display code below; the object library it roots is created here. */
+        bool AddToRoot(void* obj);
 
         /**
          * A zeroed parameter buffer, deliberately larger than any parameter struct used here.
@@ -961,28 +1029,140 @@ namespace Nova::UE4
 
         GameAssets gAssets;
 
+        // The MediaTexture assets 7.40 ships, in preference order, as object paths -- and the
+        // directories they live in, for the route that loads by directory. Both come from the pak
+        // index, not from a guess.
+        static const char* kGameMediaTextures[] = {
+            "/Game/UI/Foundation/Movie/DefaultMediaTexture.DefaultMediaTexture",
+            "/Game/Movies/PlaceholderMediaTexture.PlaceholderMediaTexture",
+        };
+        static const char* kGameMediaTextureDirs[] = { "/Game/UI/Foundation/Movie", "/Game/Movies" };
+
+        /** Either known texture, if it is already in memory. */
+        void* ResidentGameMediaTexture()
+        {
+            for (const char* p : kGameMediaTextures)
+                if (void* o = FindObject(p)) return o;
+            return nullptr;
+        }
+
         /**
-         * The game's own MediaTexture, loaded. Prefers the one Fortnite's movie widget uses; takes
-         * any other MediaTexture asset if that one is not in the registry; null if there are none.
-         * Must run on the game thread -- it loads a package.
+         * Route B: UObjectLibrary.
+         *
+         * The registry route needs AssetRegistry.GetAssetsByClass to be a UFunction, and on this
+         * build it is not (1.8.2 logged it MISSING). ObjectLibrary is older and plainer:
+         * CreateLibrary(class) then LoadAssetsFromPath(dir) loads every package under a directory
+         * of the mounted paks, PostLoad and all. The directory that holds DefaultMediaTexture has
+         * two packages in it. A library loads a path once, so it is one library per directory.
+         */
+        void* LoadViaObjectLibrary()
+        {
+            void* texCls   = FindObject("/Script/MediaAssets.MediaTexture");
+            void* cdo      = FindObject("/Script/Engine.Default__ObjectLibrary");
+            void* create   = FindObject("/Script/Engine.ObjectLibrary.CreateLibrary");
+            void* fromPath = FindObject("/Script/Engine.ObjectLibrary.LoadAssetsFromPath");
+            bool all = true;
+            auto need = [&all](const char* what, void* p)
+            {
+                if (!p) { Cobalt::Log::WriteLine(std::string("[UE4] assets: MISSING ") + what); all = false; }
+            };
+            need("MediaTexture class", texCls);
+            need("Default__ObjectLibrary", cdo);
+            need("ObjectLibrary.CreateLibrary", create);
+            need("ObjectLibrary.LoadAssetsFromPath", fromPath);
+            if (!all) return nullptr;
+
+            const int baseOff = ParamOffset(create, "InBaseClass");
+            const int bpOff   = ParamOffset(create, "bInHasBlueprintClasses");
+            const int weakOff = ParamOffset(create, "bInUseWeak");
+            const int libOff  = ParamOffset(create, "ReturnValue");
+            const int pathOff = ParamOffset(fromPath, "Path");
+            const int cntOff  = ParamOffset(fromPath, "ReturnValue");
+            if (baseOff < 0 || bpOff < 0 || weakOff < 0 || libOff < 0 || pathOff < 0 || cntOff < 0)
+            {
+                Cobalt::Log::WriteLine("[UE4] assets: ObjectLibrary parameter layout did not resolve");
+                return nullptr;
+            }
+
+            for (const char* dir : kGameMediaTextureDirs)
+            {
+                Params c;
+                c.at<void*>(baseOff) = texCls;
+                c.at<bool>(bpOff) = false;
+                c.at<bool>(weakOff) = false;
+                if (!SafePE(cdo, create, c.bytes)) { Cobalt::Log::WriteLine("[UE4] assets: CreateLibrary faulted"); return nullptr; }
+                void* lib = c.at<void*>(libOff);
+                if (!lib) { Cobalt::Log::WriteLine("[UE4] assets: CreateLibrary returned null"); return nullptr; }
+                AddToRoot(lib);
+
+                const std::wstring wide = Widen(dir);
+                Params l;
+                l.at<FStringIn>(pathOff) = FStringIn(wide);
+                const bool ok = SafePE(lib, fromPath, l.bytes);
+                const int count = ok ? l.at<int>(cntOff) : -1;
+                Cobalt::Log::WriteLine(std::string("[UE4] assets: ObjectLibrary.LoadAssetsFromPath(") + dir + ") " +
+                                       (ok ? "-> " + std::to_string(count) + " MediaTexture(s)" : "FAULTED"));
+                if (void* o = ResidentGameMediaTexture()) return o;
+            }
+            return nullptr;
+        }
+
+        /**
+         * The game's own MediaTexture, loaded. Already resident wins; then the registry; then the
+         * object library. Null with the reasons logged if none of them produce one.
+         * Must run on the game thread -- it loads packages.
          */
         void* LoadGameMediaTexture()
         {
+            if (void* o = ResidentGameMediaTexture())
+            {
+                Cobalt::Log::WriteLine("[UE4] assets: game MediaTexture already resident");
+                return o;
+            }
+
+            // Route A: the registry.
             std::vector<GameAssets::Ref> found = gAssets.Find("MediaTexture", 64);
             for (size_t i = 0; i < found.size() && i < 12; ++i)
                 Cobalt::Log::WriteLine("[UE4] assets:   " + found[i].path);
-            if (found.empty()) return nullptr;
-
-            static const char* kPreferred[] = { "DefaultMediaTexture", "PlaceholderMediaTexture" };
-            const GameAssets::Ref* pick = nullptr;
-            for (const char* want : kPreferred)
+            if (!found.empty())
             {
-                for (const auto& r : found)
-                    if (r.path.find(want) != std::string::npos) { pick = &r; break; }
-                if (pick) break;
+                static const char* kPreferred[] = { "DefaultMediaTexture", "PlaceholderMediaTexture" };
+                const GameAssets::Ref* pick = nullptr;
+                for (const char* want : kPreferred)
+                {
+                    for (const auto& r : found)
+                        if (r.path.find(want) != std::string::npos) { pick = &r; break; }
+                    if (pick) break;
+                }
+                if (!pick) pick = &found[0];
+                if (void* o = gAssets.Load(*pick)) return o;
             }
-            if (!pick) pick = &found[0];
-            return gAssets.Load(*pick);
+
+            // Route B.
+            return LoadViaObjectLibrary();
+        }
+
+        /**
+         * Set a widget's visibility -- and its image's, so the two never disagree -- and read it
+         * back, because the previous version reported "hidden" without ever checking.
+         * ESlateVisibility: 0 Visible, 1 Collapsed, 2 Hidden. Returns the read-back, -1 if unknown.
+         */
+        int ApplyVisibility(void* widget, void* image, unsigned char vis)
+        {
+            void* set = FindFunctionOn(widget, "SetVisibility");
+            void* get = FindFunctionOn(widget, "GetVisibility");
+            if (!set)
+            {
+                Cobalt::Log::WriteLine("[UE4] display: SetVisibility NOT FOUND on the widget's class chain");
+                return -1;
+            }
+            struct { unsigned char V; char pad[7]; } p{ vis, {} };
+            SafePE(widget, set, &p);
+            if (image) { struct { unsigned char V; char pad[7]; } q{ vis, {} }; SafePE(image, set, &q); }
+            if (!get) return -1;
+            struct { unsigned char R; char pad[7]; } r{ 255, {} };
+            if (!SafePE(widget, get, &r)) return -1;
+            return r.R;
         }
 
         /** What else the game has, for the record. Lists; loads nothing. */
@@ -1393,27 +1573,26 @@ namespace Nova::UE4
             // Added now but HIDDEN, so it is ready the instant Battle Royale is chosen rather than
             // being built at the moment it is needed -- construction takes long enough that doing it
             // on the trigger would show a gap.
-            if (void* vis = FindObject("/Script/UMG.UserWidget.SetVisibility"))
-            {
-                struct { unsigned char V; char pad[7]; } p{ 2, {} };   // ESlateVisibility::Hidden
-                SafePE(widget, vis, &p);
-            }
+            //
+            // Hidden BEFORE and AGAIN AFTER AddToViewport, and read back both times. Before, so the
+            // Slate widget is built hidden; after, in case building it re-synchronised properties.
+            // Hidden is also not hit-testable, which is what gives the player their mouse back.
+            int visBefore = ApplyVisibility(widget, image, 2);   // ESlateVisibility::Hidden
             if (void* addToViewport = FindObject("/Script/UMG.UserWidget.AddToViewport"))
             {
                 struct { int ZOrder; } p{ 9999 };
                 Cobalt::Log::WriteLine(std::string("[UE4] display: AddToViewport ") +
                                        (SafePE(widget, addToViewport, &p) ? "ok" : "faulted"));
             }
-            // What can actually be called on these? The white screen says the MediaTexture has no
-            // rendering resource, and the only way to allocate one is a function that exists.
-            ListFunctions("MediaTexture ", "/Script/MediaAssets.MediaTexture", 25);
-            ListFunctions("MediaPlayer  ", "/Script/MediaAssets.MediaPlayer", 30);
-
-            Cobalt::Log::WriteLine("[UE4] display: done - CONTROL image up; it will ALTERNATE with the"
-                                   " video every 8s so both can be compared");
+            const int visAfter = ApplyVisibility(widget, image, 2);
+            Cobalt::Log::WriteLine("[UE4] display: visibility read back " + std::to_string(visBefore) +
+                                   " before AddToViewport, " + std::to_string(visAfter) +
+                                   " after (2 = Hidden, which is what it must be)");
+            if (visAfter != 2)
+                Cobalt::Log::WriteLine("[UE4] display: WARNING - the widget is not hidden; it will cover the screen");
 
             gControlTex = control;
-            Cobalt::Log::WriteLine("[UE4] display: ready and hidden - waiting for Battle Royale");
+            Cobalt::Log::WriteLine("[UE4] display: built and hidden - waiting for Battle Royale");
             return kBuildDone;
         }
 
@@ -1560,12 +1739,15 @@ namespace Nova::UE4
             if (void* play = FindObject("/Script/MediaAssets.MediaPlayer.Play")) {
                 struct { bool R; char pad[7]; } p{ false, {} }; SafePE(gPlayer, play, &p);
             }
+            // Same moment as Play, same thread, so the two start within a frame of each other.
+            StartAudio();
             struct { void* Texture; bool MatchSize; char pad[7]; } b{ gTexture, false, {} };
             SafePE(gImage, gSetBrush, &b);
-            if (void* z = FindObject("/Script/UMG.UserWidget.SetVisibility")) {
-                struct { unsigned char V; char pad[7]; } p{ 0, {} };   // ESlateVisibility::Visible
-                SafePE(gWidget, z, &p);
-            }
+            // Visible, not just un-hidden: Visible is hit-testable, so a full-screen widget takes
+            // the clicks for the seven seconds it is up. That is what unskippable means.
+            const int vis = ApplyVisibility(gWidget, gImage, 0);   // ESlateVisibility::Visible
+            Cobalt::Log::WriteLine("[UE4] bumper: shown - visibility read back " + std::to_string(vis) +
+                                   " (0 = Visible)");
         });
 
         // Remove it when the clip ends. Unskippable is the point, so nothing watches for input --
@@ -1582,6 +1764,7 @@ namespace Nova::UE4
                     SafePE(gWidget, remove, nullptr);
                 if (void* stop = FindObject("/Script/MediaAssets.MediaPlayer.Close"))
                     SafePE(gPlayer, stop, nullptr);
+                StopAudio();
                 Cobalt::Log::WriteLine("[UE4] bumper: finished - back to the lobby (texture reported " +
                                        std::to_string(w) + " wide during playback; 854 = frames drawn, 0 = none)");
             });
