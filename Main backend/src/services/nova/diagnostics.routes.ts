@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import * as crypto from 'crypto';
 import { requireAuth } from '../../middleware/auth.middleware';
 import { Config } from '../../config';
 import {
@@ -48,14 +49,65 @@ function shortBuild(build: string | undefined): string | undefined {
  */
 
 /** Same gate as the anti-cheat admin views, deliberately: one secret to manage, one behaviour. */
+/** Whether a secret exists at all. Distinct from "the caller sent one" — see adminRefused. */
+function adminConfigured(): boolean {
+  return Boolean(Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET);
+}
+
+/**
+ * The value stored in the sign-in cookie.
+ *
+ * DERIVED, NOT THE SECRET ITSELF. A cookie is written to disk by the browser and travels on every
+ * request; putting `NOVA_AC_ADMIN_SECRET` in one verbatim would hand out the real secret to anything
+ * that can read the cookie jar. This is an HMAC of a fixed label under that secret, so it grants the
+ * same dashboard access and reveals nothing that can be replayed as the header elsewhere.
+ */
+function cookieToken(): string {
+  const secret = Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET || '';
+  return crypto.createHmac('sha256', secret).update('nova-dashboard-cookie-v1').digest('hex');
+}
+
+/** Read one cookie without pulling in a cookie plugin for a single name. */
+function cookieValue(request: any, name: string): string {
+  const raw = String(request.headers?.cookie || '');
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return '';
+}
+
+/** Length-independent comparison, so a wrong secret cannot be narrowed down by timing it. */
+function sameSecret(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  // timingSafeEqual throws on a length mismatch, which would itself be a length oracle. Hash both
+  // to a fixed width first so every comparison costs the same.
+  const ah = crypto.createHash('sha256').update(ab).digest();
+  const bh = crypto.createHash('sha256').update(bb).digest();
+  return crypto.timingSafeEqual(ah, bh);
+}
+
 function adminOk(request: any): boolean {
   const expected = Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET;
   if (!expected) return false; // no secret configured → closed, not open
+
+  // The cookie is what makes this usable from a browser at all. A browser cannot send a custom
+  // header by opening a URL, so before this the only way in was `?secret=` — which puts the secret
+  // in the address bar, in browser history, in the tunnel's logs, and in any screenshot of the
+  // link. Exactly the class of leak the rest of this subsystem redacts against.
+  const cookie = cookieValue(request, ADMIN_COOKIE);
+  if (cookie && sameSecret(cookie, cookieToken())) return true;
+
   const supplied = String(
     request.headers?.['x-nova-admin'] || (request.query as any)?.secret || (request.body as any)?.secret || ''
   );
-  return supplied.length > 0 && supplied === expected;
+  return sameSecret(supplied, String(expected));
 }
+
+const ADMIN_COOKIE = 'nova_admin';
 
 function adminRefused(reply: any) {
   return reply.status(403).send({
@@ -307,7 +359,14 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
   fastify.get('/nova/api/dashboard', async (request, reply) => {
     if (!adminOk(request)) {
       reply.header('content-type', 'text/html; charset=utf-8');
-      return reply.status(403).send(renderDashboard(null));
+      // `failed` comes back as a query flag from the login redirect rather than from a session,
+      // because there is no session to hold it in until sign-in succeeds. It carries no secret.
+      return reply.status(403).send(
+        renderDashboard(null, {
+          configured: adminConfigured(),
+          failed: (request.query as any)?.denied === '1',
+        }),
+      );
     }
     const incidents = buildIncidents(getDiagnostics({ limit: 400 }));
     reply.header('content-type', 'text/html; charset=utf-8');
@@ -318,6 +377,57 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
       // needs to know whether what they are looking at will still exist after a restart.
       persistence: diagnosticPersistenceStatus(),
     }));
+  });
+
+  /**
+   * POST /nova/api/dashboard/login — exchange the admin secret for a cookie.
+   *
+   * WHY THIS EXISTS. Every other way in requires something a browser cannot do by opening a link:
+   * `x-nova-admin` is a custom header, and `?secret=` puts the secret in the address bar, in
+   * history, in the tunnel's access logs, and in any screenshot of the link. The operator reading
+   * this from a phone during an outage is precisely the person most likely to share that link.
+   *
+   * The cookie holds a DERIVED value, not the secret — see `cookieToken`.
+   *
+   * A wrong secret redirects back to the locked page with `denied=1` rather than rendering an
+   * error inline, so a refresh cannot re-submit it and the attempt leaves nothing in the URL.
+   */
+  fastify.post('/nova/api/dashboard/login', async (request, reply) => {
+    const supplied = String((request.body as any)?.secret || '');
+    const expected = String(Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET || '');
+
+    if (!expected || !sameSecret(supplied, expected)) {
+      // Recorded like any other auth failure: repeated attempts on this endpoint are exactly the
+      // kind of thing the dashboard should be able to show.
+      recordDiagnostic({
+        category: 'AUTH_FAILURE', method: 'POST', url: '/nova/api/dashboard/login', status: 403,
+        detail: expected ? 'wrong admin secret' : 'no admin secret configured',
+      });
+      return reply.redirect('/nova/api/dashboard?denied=1', 303);
+    }
+
+    // Secure only when the request actually arrived over HTTPS. Setting it unconditionally would
+    // make the cookie silently not-set over plain http://127.0.0.1:3551, which is how this is used
+    // on the machine itself.
+    const proto = String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const secure = proto === 'https' ? '; Secure' : '';
+    reply.header(
+      'set-cookie',
+      `${ADMIN_COOKIE}=${cookieToken()}; Path=/nova/api; Max-Age=43200; HttpOnly; SameSite=Strict${secure}`,
+    );
+    // 303 so the browser follows with GET; a 302 after a POST is where re-submission bugs live.
+    return reply.redirect('/nova/api/dashboard', 303);
+  });
+
+  /**
+   * POST /nova/api/dashboard/logout — drop the cookie.
+   *
+   * Present because a sign-in with no sign-out is a session an operator cannot end on a shared or
+   * borrowed device.
+   */
+  fastify.post('/nova/api/dashboard/logout', async (_request, reply) => {
+    reply.header('set-cookie', `${ADMIN_COOKIE}=; Path=/nova/api; Max-Age=0; HttpOnly; SameSite=Strict`);
+    return reply.redirect('/nova/api/dashboard', 303);
   });
 
   /**

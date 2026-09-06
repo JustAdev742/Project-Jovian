@@ -54,24 +54,40 @@ const EXACT = new Set([
   // reads the same events by sequence number instead when the stream stays silent.
   '/nova/api/diagnostics/since',
 ]);
+
+/**
+ * The only two paths allowed to take a POST, and the only reason the GET/HEAD rule below has an
+ * exception at all.
+ *
+ * A browser cannot send the `x-nova-admin` header by opening a link, so before sign-in existed the
+ * only way into the dashboard through this tunnel was `?secret=` — the secret in the address bar,
+ * in history, in Cloudflare's access logs, and in any screenshot of the link. These two exchange it
+ * for an HttpOnly cookie instead.
+ *
+ * Narrow on purpose: named exactly, POST only, and still gated by the backend's own secret check.
+ * Nothing else on the allowlist may take a body.
+ */
+const POSTABLE = new Set(['/nova/api/dashboard/login', '/nova/api/dashboard/logout']);
 const INCIDENT_ID = /^\/nova\/api\/incidents\/[A-Za-z0-9_-]{1,64}$/;
 
-const allowed = (pathname) => EXACT.has(pathname) || INCIDENT_ID.test(pathname);
+const allowed = (pathname) => EXACT.has(pathname) || POSTABLE.has(pathname) || INCIDENT_ID.test(pathname);
 
 const server = http.createServer((req, res) => {
-  // GET/HEAD only. Every allowed route is a read; accepting POST here would let a request body
-  // through to a route that never expects one.
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405, { 'content-type': 'application/json', allow: 'GET, HEAD' });
-    return res.end(JSON.stringify({ error: 'method not allowed' }));
-  }
-
   let pathname;
   try {
     pathname = new URL(req.url, 'http://localhost').pathname;
   } catch {
     res.writeHead(400, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ error: 'bad request' }));
+  }
+
+  // Reads everywhere; a body only on the two sign-in paths. Checked against the path FIRST, so a
+  // POST to any other allowlisted route is refused rather than forwarded to a handler that never
+  // expects one.
+  const readOnly = req.method === 'GET' || req.method === 'HEAD';
+  if (!readOnly && !(req.method === 'POST' && POSTABLE.has(pathname))) {
+    res.writeHead(405, { 'content-type': 'application/json', allow: 'GET, HEAD' });
+    return res.end(JSON.stringify({ error: 'method not allowed' }));
   }
 
   if (!allowed(pathname)) {
@@ -110,6 +126,7 @@ const server = http.createServer((req, res) => {
 // Loopback only. cloudflared runs on this machine and connects here; nothing else should be able to.
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[diag-proxy] 127.0.0.1:${PORT} -> 127.0.0.1:${UPSTREAM}`);
-  console.log(`[diag-proxy] allowing: ${[...EXACT].join(', ')}, /nova/api/incidents/<id>`);
+  console.log(`[diag-proxy] allowing GET: ${[...EXACT].join(', ')}, /nova/api/incidents/<id>`);
+  console.log(`[diag-proxy] allowing POST: ${[...POSTABLE].join(', ')}`);
   console.log('[diag-proxy] everything else: 404. The backend admin secret is still required.');
 });

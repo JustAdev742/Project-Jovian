@@ -144,6 +144,22 @@ main{padding:var(--s4); max-width:1100px; margin:0 auto}
 /* Amber rather than red: diagnostics not being saved is a degraded state, not an outage, and it
    must not compete visually with the incident banner directly above it. */
 .banner.warn{border-color:#F5A524; border-left-color:#F5A524}
+/* Sign-in. Deliberately plain: this page is reached from a phone during an outage, so it is one
+   field, one button, and a touch target that clears the 44px minimum. */
+form.signin{display:flex; flex-direction:column; gap:var(--s2); max-width:420px; margin:var(--s4) 0}
+form.signin label{font-size:13px; color:var(--fg-dim)}
+form.signin input{
+  background:var(--card); border:1px solid var(--border); border-radius:6px;
+  padding:12px; color:var(--fg); font-size:16px; min-height:44px;
+}
+/* Never remove the focus ring; this is the one control on the page. */
+form.signin input:focus-visible, form.signin button:focus-visible{outline:2px solid #93C5FD; outline-offset:2px}
+form.signin button{
+  background:#1D4ED8; color:#fff; border:1px solid #3B82F6; border-radius:6px;
+  padding:12px 18px; font-size:15px; font-weight:600; min-height:44px; cursor:pointer;
+}
+form.signin button:hover{background:#1E40AF}
+main > .hint{font-size:12px; color:var(--fg-dim)}
 ol.incidents{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--s2)}
 li.incident{
   background:var(--card); border:1px solid var(--border); border-radius:6px;
@@ -202,19 +218,72 @@ button:hover{background:#33405A}
 `;
 
 /** Passing `null` renders the locked page — used when the admin secret is absent or wrong. */
-export function renderDashboard(data: DashboardData | null): string {
+/**
+ * Why the locked page needs an argument.
+ *
+ * `renderDashboard(null)` used to mean "locked", full stop, and rendered one message for two
+ * unrelated situations. `configured` says whether a secret exists at all; `failed` says the visitor
+ * just tried one and it was wrong. Optional so every existing caller and test keeps working, and
+ * absent behaves as it always did.
+ */
+export interface LockedState {
+  configured: boolean;
+  failed?: boolean;
+}
+
+export function renderDashboard(data: DashboardData | null, locked?: LockedState): string {
   const head =
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<title>Nova — diagnostics</title><style>${STYLES}</style></head><body>`;
 
   if (!data) {
+    // TWO DIFFERENT STATES, AND THEY USED TO RENDER THE SAME TEXT.
+    //
+    // "no secret is configured" and "you did not send the secret" are opposite problems with
+    // opposite fixes, and the page said the first for both. The reported symptom was exactly that:
+    // an operator opened the link, read "closed unless an admin secret is configured", and
+    // reasonably concluded the coordinator was misconfigured — while the secret was set, working,
+    // and simply not being sent, because a BROWSER CANNOT SEND A CUSTOM HEADER by typing a URL.
+    //
+    // A diagnostic tool that misdiagnoses its own state is worse than one that says nothing.
+    if (!locked?.configured) {
+      return (
+        head +
+        `<main><h1>Diagnostics dashboard is not enabled</h1>` +
+        `<p class="sub">This view shows cross-player failure data, so it is closed until an admin ` +
+        `secret exists. Set <code class="mono">NOVA_AC_ADMIN_SECRET</code> in the coordinator's ` +
+        `<code class="mono">.env</code> and restart the backend.</p>` +
+        `</main></body></html>`
+      );
+    }
+
     return (
       head +
-      `<main><h1>Diagnostics dashboard is not enabled</h1>` +
-      `<p class="sub">This view shows cross-player failure data, so it is closed unless an admin ` +
-      `secret is configured. Set <code class="mono">NOVA_AC_ADMIN_SECRET</code> on the coordinator ` +
-      `and send it as the <code class="mono">x-nova-admin</code> header, or as <code class="mono">?secret=</code>.</p>` +
+      `<main><h1>Sign in to the diagnostics dashboard</h1>` +
+      `<p class="sub">A secret is configured on this coordinator; this browser has not sent it. ` +
+      `Signing in stores it as an HttpOnly cookie, so it stays out of the address bar, out of ` +
+      `browser history, and out of any screenshot of this link.</p>` +
+      (locked.failed
+        ? `<div class="banner" role="alert"><strong>That secret was not accepted.</strong> ` +
+          `It must match <code class="mono">NOVA_AC_ADMIN_SECRET</code> exactly.</div>`
+        : '') +
+      `<form class="signin" method="post" action="/nova/api/dashboard/login">` +
+        `<label for="secret">Admin secret</label>` +
+        // type=password so it is not shouldered or captured by a screen recording.
+        //
+        // `autocomplete="current-password"`, NOT "off". The first version used "off" on the
+        // reasoning that this is a shared operational secret rather than a personal credential —
+        // accesslint failed it as a WCAG 2.2 SC 3.3.8 violation, and the rule is right: blocking
+        // password managers forces the reader to transcribe a 31-character secret by hand, on a
+        // phone, during an outage. That is a cognitive-accessibility failure, and the alternative
+        // people actually reach for is pasting the secret somewhere less safe.
+        `<input id="secret" name="secret" type="password" autocomplete="current-password" autofocus ` +
+          `required maxlength="200" spellcheck="false">` +
+        `<button type="submit">Sign in</button>` +
+      `</form>` +
+      `<p class="hint">Scripts and probes can keep using the ` +
+      `<code class="mono">x-nova-admin</code> header, which is unchanged.</p>` +
       `</main></body></html>`
     );
   }

@@ -452,3 +452,117 @@ describe('the read side is closed by default', () => {
     assert.ok(res.json().summary);
   });
 });
+
+describe('signing in from a browser', () => {
+  // WHY THIS EXISTS. The reported symptom was an operator opening the tunnel link and being told
+  // "closed unless an admin secret is configured" — while the secret was configured and working. A
+  // browser cannot send `x-nova-admin` by opening a URL, and the only alternative was `?secret=`,
+  // which puts the secret in the address bar, in history, in the tunnel's logs, and in any
+  // screenshot of the link.
+
+  test('a configured-but-unauthenticated visitor is offered a sign-in, not a misdiagnosis', async () => {
+    const res = await app.inject({ method: 'GET', url: '/nova/api/dashboard' });
+    assert.equal(res.statusCode, 403);
+    assert.match(res.payload, /Sign in to the diagnostics dashboard/);
+    assert.match(res.payload, /this browser has not sent it/);
+    assert.ok(
+      !res.payload.includes('is not enabled'),
+      'a configured coordinator must not be reported as unconfigured',
+    );
+  });
+
+  test('the right secret sets a cookie and redirects', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/nova/api/dashboard/login',
+      payload: 'secret=test-admin-secret',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    assert.equal(res.statusCode, 303, 'a POST must redirect with 303, not 302');
+    assert.equal(res.headers.location, '/nova/api/dashboard');
+
+    const cookie = String(res.headers['set-cookie']);
+    assert.match(cookie, /nova_admin=[0-9a-f]{64}/, 'no cookie was set');
+    assert.match(cookie, /HttpOnly/, 'the cookie must not be readable from script');
+    assert.match(cookie, /SameSite=Strict/, 'the cookie must not travel on cross-site requests');
+  });
+
+  test('the cookie does NOT contain the secret itself', async () => {
+    // A cookie is written to disk and sent on every request. Putting the real
+    // NOVA_AC_ADMIN_SECRET in one would hand it to anything that can read the cookie jar.
+    const res = await app.inject({
+      method: 'POST', url: '/nova/api/dashboard/login',
+      payload: 'secret=test-admin-secret',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    assert.ok(
+      !String(res.headers['set-cookie']).includes('test-admin-secret'),
+      `the secret was stored verbatim: ${res.headers['set-cookie']}`,
+    );
+  });
+
+  test('the cookie then opens the dashboard, with no secret in the URL', async () => {
+    const login = await app.inject({
+      method: 'POST', url: '/nova/api/dashboard/login',
+      payload: 'secret=test-admin-secret',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    const cookie = String(res_cookie(login));
+
+    const dash = await app.inject({ method: 'GET', url: '/nova/api/dashboard', headers: { cookie } });
+    assert.equal(dash.statusCode, 200, 'the cookie did not authenticate');
+    assert.match(dash.payload, /Nova diagnostics/);
+
+    // And the JSON API too, which is what the live tail polls.
+    const since = await app.inject({ method: 'GET', url: '/nova/api/diagnostics/since?seq=0', headers: { cookie } });
+    assert.equal(since.statusCode, 200);
+  });
+
+  test('a wrong secret is refused, recorded, and leaves nothing in the URL', async () => {
+    const before = store.getDiagnostics({ limit: 400 }).length;
+    const res = await app.inject({
+      method: 'POST', url: '/nova/api/dashboard/login',
+      payload: 'secret=not-the-secret',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    assert.equal(res.statusCode, 303);
+    assert.equal(res.headers.location, '/nova/api/dashboard?denied=1');
+    assert.ok(!res.headers['set-cookie'], 'a rejected attempt must not set a cookie');
+    assert.ok(
+      !String(res.headers.location).includes('not-the-secret'),
+      'the attempted secret must not end up in the redirect URL',
+    );
+    assert.ok(
+      store.getDiagnostics({ limit: 400 }).length > before,
+      'a failed sign-in left no diagnostic — repeated attempts should be visible',
+    );
+  });
+
+  test('a forged cookie does not work', async () => {
+    const dash = await app.inject({
+      method: 'GET', url: '/nova/api/dashboard',
+      headers: { cookie: 'nova_admin=' + 'a'.repeat(64) },
+    });
+    assert.equal(dash.statusCode, 403, 'an arbitrary cookie value authenticated');
+  });
+
+  test('logging out drops the cookie', async () => {
+    const res = await app.inject({ method: 'POST', url: '/nova/api/dashboard/logout' });
+    assert.equal(res.statusCode, 303);
+    assert.match(String(res.headers['set-cookie']), /nova_admin=;/);
+    assert.match(String(res.headers['set-cookie']), /Max-Age=0/);
+  });
+
+  test('the header still works, because scripts and probes use it', async () => {
+    const res = await app.inject({
+      method: 'GET', url: '/nova/api/incidents',
+      headers: { 'x-nova-admin': 'test-admin-secret' },
+    });
+    assert.equal(res.statusCode, 200, 'the existing header path regressed');
+  });
+});
+
+/** `set-cookie` comes back as a string or an array depending on how many were set. */
+function res_cookie(r: any): string {
+  const c = r.headers['set-cookie'];
+  return Array.isArray(c) ? c[0] : String(c ?? '');
+}
