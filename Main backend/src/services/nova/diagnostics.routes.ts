@@ -4,6 +4,7 @@ import { Config } from '../../config';
 import {
   recordDiagnostic, getDiagnostics, getDiagnosticsSummary,
   subscribeDiagnostics, diagnosticSubscriberCount, diagnosticsSince,
+  diagnosticPersistenceStatus,
 } from './diagnostics';
 import { parseBatch, LIMITS } from './diagnostics.schema';
 import { buildIncidents, incidentId } from './incidents';
@@ -257,6 +258,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     });
     return reply.send({
       summary: getDiagnosticsSummary(),
+      persistence: diagnosticPersistenceStatus(),
       possibleIncidents: incidents.filter((i) => i.possibleIncident).length,
       incidents: filtered.slice(0, Math.min(Number(q.limit) || 100, 400)),
     });
@@ -289,7 +291,13 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     }
     const incidents = buildIncidents(getDiagnostics({ limit: 400 }));
     reply.header('content-type', 'text/html; charset=utf-8');
-    return reply.send(renderDashboard({ summary: getDiagnosticsSummary(), incidents }));
+    return reply.send(renderDashboard({
+      summary: getDiagnosticsSummary(),
+      incidents,
+      // Shown in both directions on purpose: an operator reading this page during an incident
+      // needs to know whether what they are looking at will still exist after a restart.
+      persistence: diagnosticPersistenceStatus(),
+    }));
   });
 
   /**
@@ -377,6 +385,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     // until the next failure happens.
     send('hello', {
       summary: getDiagnosticsSummary(),
+      persistence: diagnosticPersistenceStatus(),
       subscribers: diagnosticSubscriberCount(),
       serverTime: new Date().toISOString(),
     });

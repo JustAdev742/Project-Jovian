@@ -41,6 +41,14 @@ interface DashboardData {
     bySeverity: Record<string, number>;
   };
   incidents: Incident[];
+  /**
+   * Whether diagnostics are being written to disk, and how much is there.
+   *
+   * Optional so existing callers and tests keep compiling; absent means "not reported", which is
+   * rendered as nothing rather than as a reassuring default. An operator must never read silence as
+   * "history is safe".
+   */
+  persistence?: { durable: boolean; rows: number; pending: number };
 }
 
 /** HTML-escape. Applied to EVERY interpolated value; see the security note above. */
@@ -133,6 +141,9 @@ main{padding:var(--s4); max-width:1100px; margin:0 auto}
   background:var(--card); border:1px solid #F87171; border-left:4px solid #F87171;
   border-radius:6px; padding:var(--s3); margin-bottom:var(--s4);
 }
+/* Amber rather than red: diagnostics not being saved is a degraded state, not an outage, and it
+   must not compete visually with the incident banner directly above it. */
+.banner.warn{border-color:#F5A524; border-left-color:#F5A524}
 ol.incidents{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--s2)}
 li.incident{
   background:var(--card); border:1px solid var(--border); border-radius:6px;
@@ -404,13 +415,29 @@ export function renderDashboard(data: DashboardData | null): string {
 })();
 </script>`;
 
+  // Durability, stated plainly in both directions. "Kept" tells an operator that what they are
+  // looking at will still be there after the restart they are about to do; the warning tells them
+  // the opposite before they find out the hard way.
+  const p = data.persistence;
+  const durability = !p
+    ? ''
+    : p.durable
+      ? ` · ${esc(p.rows)} kept on disk`
+      : ' · history NOT saved';
+  const storeWarning = p && !p.durable
+    ? `<div class="banner warn" role="status"><strong>DIAGNOSTICS ARE NOT BEING SAVED</strong> — ` +
+      `the durable store did not come up, so everything on this page is in memory only and a crash ` +
+      `will take it with it. Check the backend log for a <code>[Diagnostics]</code> line.</div>`
+    : '';
+
   return (
     head +
     `<header><h1>Nova diagnostics</h1>` +
     `<div class="sub">${esc(summary.distinctProblems)} distinct problems · ` +
-    `${esc(summary.totalEvents)} events · ${esc(active.length)} active · ` +
+    `${esc(summary.totalEvents)} events · ${esc(active.length)} active${durability} · ` +
     `generated ${esc(new Date().toISOString())}</div></header>` +
     `<main>` +
+    storeWarning +
     banner +
     `<div class="tiles">${tiles}</div>` +
     // The live tail sits ABOVE the incident list because it answers a different question: the list

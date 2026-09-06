@@ -372,6 +372,35 @@ describe('dashboard', () => {
     assert.match(html, /correct and boring state/);
   });
 
+  test('a store that is not saving anything says so, loudly', () => {
+    // The failure this guards against is silent: the page looks completely normal while nothing on
+    // it will survive the next restart. An operator reading it during an incident has no way to tell
+    // — so the page has to tell them, in words, above the incident list.
+    const html = dashboard.renderDashboard({
+      summary: store.getDiagnosticsSummary(), incidents: [],
+      persistence: { durable: false, rows: 0, pending: 3 },
+    });
+    assert.match(html, /NOT BEING SAVED/, 'a non-durable store rendered no warning');
+    assert.match(html, /history NOT saved/, 'the header did not report the degraded state');
+  });
+
+  test('a working store reports what it is holding', () => {
+    const html = dashboard.renderDashboard({
+      summary: store.getDiagnosticsSummary(), incidents: [],
+      persistence: { durable: true, rows: 42, pending: 0 },
+    });
+    assert.match(html, /42 kept on disk/, 'the header did not report the stored row count');
+    assert.ok(!html.includes('NOT BEING SAVED'), 'a healthy store rendered the degraded warning');
+  });
+
+  test('an unreported persistence state renders nothing rather than reassurance', () => {
+    // Absent must not read as "fine". Defaulting to a green claim would make the one field whose
+    // whole job is honesty the field most likely to lie.
+    const html = dashboard.renderDashboard({ summary: store.getDiagnosticsSummary(), incidents: [] });
+    assert.ok(!html.includes('kept on disk'), 'an unreported state claimed durability');
+    assert.ok(!html.includes('NOT BEING SAVED'), 'an unreported state claimed failure');
+  });
+
   test('the page is self-contained — no external requests at all', () => {
     const html = dashboard.renderDashboard({ summary: store.getDiagnosticsSummary(), incidents: [] });
     // A font, a CDN or an analytics beacon is one more thing between an operator and an outage.

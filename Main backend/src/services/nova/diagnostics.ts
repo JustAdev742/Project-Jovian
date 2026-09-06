@@ -38,6 +38,10 @@
 export type { DiagnosticCategory, DiagnosticSource } from './diagnostics.schema';
 import type { DiagnosticCategory, DiagnosticSource } from './diagnostics.schema';
 import { noteOccurrence } from './incidents';
+import {
+  initDiagnosticStore, loadPersisted, persist, clearPersisted, persistedCount, storeReady,
+  type PersistedDiagnostic,
+} from './diagnostics.store';
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL';
 
@@ -447,6 +451,11 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     // a BASELINE — and without a baseline "is this getting worse" is unanswerable. See incidents.ts.
     noteOccurrence(key, input.count ?? 1, nowMs);
 
+    // Mark for the next flush rather than writing now. `recordDiagnostic` runs on error paths and
+    // inside the crash handler; a synchronous disk write per event would put I/O on the hot path of
+    // a process that is already failing, and an error storm would become a write storm.
+    dirty.add(key);
+
     // LAST, on purpose. Everything above has already been committed to `entries`, so a subscriber
     // reacting to this event and re-reading state sees it — and a listener that misbehaves cannot
     // leave the store half-updated, because there is nothing left to update.
@@ -517,7 +526,156 @@ export function getDiagnosticsSummary(): {
   return { totalEvents, distinctProblems: all.length, byCategory, bySubsystem, bySeverity };
 }
 
-/** Test/maintenance hook. */
-export function clearDiagnostics(): void {
+// ── DURABILITY ───────────────────────────────────────────────────────────────────────────────────
+//
+// DIAGNOSTIC_COVERAGE.md named this the largest gap in the system, in these words: "the most valuable
+// record — what happened immediately before a crash — is the one guaranteed not to survive it." The
+// store was in memory, so a crash destroyed the evidence of the crash, and every restart erased the
+// history that would answer "did this start after the last deploy?".
+//
+// The design is write-behind, not write-through, and the reason is the same reason the rest of this
+// module is defensive: `recordDiagnostic` is called from error handlers. Doing disk I/O there would
+// add a failure mode to the code whose entire job is to survive failures, and a 500-storm would
+// become a write-storm. So memory stays authoritative, changed keys are marked, and a timer writes
+// them in one transaction.
+//
+// THE CRASH CASE IS THE POINT. `flushDiagnosticsNow()` is called from the `uncaughtException`
+// handler in index.ts, so the record that matters most is written by the crash itself. A durable
+// store that persisted everything except the crash would have missed the only event nobody can
+// reproduce on demand.
+//
+// WHAT SURVIVES A RESTART, PRECISELY — stated because "it persists now" is the kind of claim that
+// quietly means less than it sounds:
+//   survives:  the key, category, source, component, method, route, subsystem, version, status,
+//              detail, count, firstSeen, lastSeen, and the NUMBER of affected users.
+//   does not:  the per-user hash set (only its cardinality is kept, so a returning player can be
+//              counted twice after a restart — see restoreDiagnostics), the 5-minute trend window
+//              (correctly: nothing is "recent" after a restart), correlation id samples, and the
+//              incident baseline in incidents.ts.
+
+/** Keys changed since the last successful flush. Bounded by `entries`, which is bounded by MAX_KEYS. */
+const dirty = new Set<string>();
+
+/** How long a diagnostic can exist only in memory. The exposure window, in ms. */
+const FLUSH_INTERVAL_MS = 5_000;
+let flushTimer: NodeJS.Timeout | null = null;
+
+function rowFor(key: string, e: InternalEntry): PersistedDiagnostic {
+  return {
+    key, category: e.category, source: e.source, component: e.component,
+    method: e.method, route: e.route, subsystem: e.subsystem, version: e.version,
+    status: e.status, detail: e.detail, count: e.count,
+    firstSeen: e.firstSeen, lastSeen: e.lastSeen,
+    users: e.users.size + e.overflowUsers,
+  };
+}
+
+/**
+ * Write every changed entry now. Returns how many rows were written.
+ *
+ * Safe to call at any time, including from a fatal handler and more than once: the upsert is
+ * idempotent, so a double flush during shutdown writes the same rows rather than double-counting.
+ * Never throws — a diagnostic system must not be the reason a shutdown fails.
+ */
+export function flushDiagnosticsNow(): number {
+  try {
+    if (dirty.size === 0) return 0;
+    const rows: PersistedDiagnostic[] = [];
+    for (const key of dirty) {
+      const e = entries.get(key);
+      // Evicted between being marked and being flushed. The row it had on disk stays as it was —
+      // `persist` never lowers a count, so eviction cannot erase history.
+      if (e) rows.push(rowFor(key, e));
+    }
+    // Cleared before the write, not after: a flush that fails must not accumulate an ever-growing
+    // dirty set, and every one of these keys will be marked again the next time it occurs.
+    dirty.clear();
+    return persist(rows);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Load persisted diagnostics back into memory at startup.
+ *
+ * Restored rows are NOT marked dirty — they already match what is on disk, and re-flushing them
+ * would be pure write amplification on every start.
+ *
+ * The affected-user count comes back as `overflowUsers` because the hashes themselves are not
+ * stored (deliberately — see `userTag`). The cardinality is therefore right at restore and can
+ * drift upward afterwards: a player who was already counted before the restart is counted again
+ * when they next hit the same failure. That is a known, bounded inaccuracy in the direction of
+ * over-reporting breadth, and it is preferred to the alternative of retaining per-user material
+ * across restarts purely to keep a counter tidy.
+ */
+export function restoreDiagnostics(): number {
+  let restored = 0;
+  try {
+    for (const r of loadPersisted()) {
+      if (entries.size >= MAX_KEYS) break; // most-recent-first, so this keeps the useful end
+      if (entries.has(r.key)) continue;
+      entries.set(r.key, {
+        category: r.category as DiagnosticCategory, source: r.source as DiagnosticSource,
+        component: r.component, method: r.method, route: r.route, subsystem: r.subsystem,
+        version: r.version, status: r.status, detail: r.detail,
+        count: r.count, firstSeen: r.firstSeen, lastSeen: r.lastSeen,
+        users: new Set<string>(), overflowUsers: r.users,
+        // Empty on purpose. `recent` drives the "is this getting worse" term, and history read off
+        // a disk is by definition not happening right now — seeding it would make every restart
+        // look like a spike.
+        recent: [], correlations: [],
+      });
+      restored++;
+    }
+  } catch {
+    /* a store that cannot be read must not stop the backend starting */
+  }
+  return restored;
+}
+
+/**
+ * Turn on durable diagnostics. Call once, after the database is open.
+ *
+ * Returns false when the store is unavailable, in which case everything above still works exactly
+ * as it did — in memory, non-durable. Degrading is acceptable; refusing to start is not.
+ */
+export function startDiagnosticPersistence(): boolean {
+  if (!initDiagnosticStore()) return false;
+  const restored = restoreDiagnostics();
+  if (restored > 0) console.log(`[Diagnostics] restored ${restored} diagnostic(s) from the last run`);
+
+  if (!flushTimer) {
+    flushTimer = setInterval(flushDiagnosticsNow, FLUSH_INTERVAL_MS);
+    // unref so the timer cannot hold the process open. This is the OPPOSITE case to the one in
+    // index.ts, where `.unref()` on the exit timer meant the process exited 0 after a crash: here
+    // nothing depends on the timer firing before exit, because every exit path flushes explicitly.
+    flushTimer.unref?.();
+  }
+  return true;
+}
+
+/** Stop the flush timer, flushing what is pending first. For shutdown and for tests. */
+export function stopDiagnosticPersistence(): void {
+  if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+  flushDiagnosticsNow();
+}
+
+/** Whether diagnostics are durable right now, and how many rows are on disk. For the dashboard. */
+export function diagnosticPersistenceStatus(): { durable: boolean; rows: number; pending: number } {
+  return { durable: storeReady(), rows: persistedCount(), pending: dirty.size };
+}
+
+/**
+ * Test/maintenance hook.
+ *
+ * Memory-only by default, which is what the `POST /nova/api/diagnostics/clear` admin route has
+ * always meant: dismiss what is on screen. Pass `{ persisted: true }` to also drop the history —
+ * that is a deliberate destructive act, not the default, because "clear the view" and "delete the
+ * record of what went wrong" should never be the same button.
+ */
+export function clearDiagnostics(opts: { persisted?: boolean } = {}): void {
   entries.clear();
+  dirty.clear();
+  if (opts.persisted) clearPersisted();
 }

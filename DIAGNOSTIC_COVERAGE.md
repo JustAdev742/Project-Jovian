@@ -30,10 +30,23 @@ REBOOT / HOST ────┘
 BACKEND ────► recordDiagnostic() ──► aggregate by (source|category|method|route|version)
                   │                        │
                   │                        ├─► replay ring (200) ──► GET /diagnostics/since
-                  │                        └─► live subscribers   ──► GET /diagnostics/stream (SSE)
+                  │                        ├─► live subscribers   ──► GET /diagnostics/stream (SSE)
+                  │                        └─► dirty set ──► SQLite `diagnostics` table
+                  │                              (flushed every 5s, and immediately on crash/exit)
                   ↓
             GET /nova/api/dashboard  (admin-gated, fails closed)
 ```
+
+The store is **write-behind, not write-through**: `recordDiagnostic` marks a key dirty and returns,
+and a timer writes the changed rows in one transaction. Measured cost of that decision, from
+`diagnostics-durability.test.ts`: **4.7 us per record** with persistence enabled, 20,000 events
+collapsing to 50 rows written in **0.7 ms**. Write-through would have put a disk write on the error
+path of the code whose job is to survive errors, and turned a 500-storm into a write-storm.
+
+The exposure window is therefore real and bounded: up to 5 seconds of diagnostics exist only in
+memory. Two things close it where it matters — `flushDiagnosticsNow()` runs inside the
+`uncaughtException` handler, so **the crash writes its own record**, and the `exit` and SIGTERM/SIGINT
+handlers flush before the process goes away.
 
 Call sites feeding it, counted rather than estimated: **9 backend**, **6 Cobalt**, **1 Reboot**,
 **14 launcher**.
@@ -65,18 +78,46 @@ at runtime needs a route-table lookup on the miss path, which is not built.
 
 | Failure surface | Captured | Source | Transport | Dashboard | Tested |
 |---|---|---|---|---|---|
-| Uncaught exception | ✅ | `process.on('uncaughtException')` | in-process | ⚠️ see note | **T** |
-| Unhandled promise rejection | ✅ | `process.on('unhandledRejection')` | in-process | ⚠️ see note | **T** |
-| Startup failure | ✅ | `main().catch` | in-process | ⚠️ see note | **T** |
-| Non-zero process exit | ✅ | `process.on('exit')` | console only | ❌ | **T** |
-| Clean shutdown (must NOT alarm) | ✅ | SIGTERM/SIGINT handled separately | — | — | **T** |
+| Uncaught exception | ✅ | `process.on('uncaughtException')` | in-process + flushed to disk | ✅ | **T** |
+| Unhandled promise rejection | ✅ | `process.on('unhandledRejection')` | in-process + flushed to disk | ✅ | **T** |
+| Startup failure | ✅ | `main().catch` | in-process + flushed to disk | ✅ | **T** |
+| Non-zero process exit | ✅ | `process.on('exit')` | console + flush | ⚠️ the exit code itself is console-only | **T** |
+| Clean shutdown (must NOT alarm) | ✅ | SIGTERM/SIGINT handled separately | flushed, not recorded as a failure | — | **T** |
+| Diagnostics surviving the crash | ✅ | SQLite `diagnostics` table | write-behind, forced on crash | ✅ | **T** |
+| Diagnostics surviving a hard kill | ✅ | same, via the 5s flush | — | ✅ | **T** |
 
-**The ⚠️ that matters most in this table.** The diagnostic store is **in-memory**. A crash records
-the event and then dies with it — the dashboard never sees the last thing that happened before a
-crash, which is the single most valuable record there is. The console line survives in the agent log
-(which now appends rather than truncating), so the evidence exists; it just does not reach the
-aggregate. **This is the largest known gap in the system.** Closing it needs a durable store, which
-is Phase 9 and is not built.
+**This used to be the largest gap in the system, and it is now closed.** The store was in-memory, so
+a crash recorded the event and then died with it — the dashboard never showed the last thing that
+happened before a crash, which is the single most valuable record there is.
+
+It is now backed by the backend's own SQLite file, and the claim is tested across a **real process
+boundary** rather than in-process: one process crashes with a genuine uncaught exception, a different
+process opens the database and must find the record with its cause intact. A second test kills the
+real backend with `SIGKILL` — no clean shutdown, no signal handler — and asserts the diagnostic
+recorded beforehand is still there. Killing rather than stopping is deliberate twice over: it is the
+honest analogue of a crash, and Windows has no signal delivery, so a `SIGTERM` test would have passed
+on Linux and proved nothing on the machine this is developed on.
+
+**What survives, precisely** — because "it persists now" is the kind of claim that quietly means less
+than it sounds:
+
+| Survives a restart | Does not |
+|---|---|
+| key, category, source, component, method, route, subsystem, version | the per-user hash set (only its cardinality is kept) |
+| status, detail (redacted), count, firstSeen, lastSeen | the 5-minute trend window — correctly: nothing is "recent" after a restart |
+| the NUMBER of distinct affected users | correlation-id samples |
+| | the incident baseline in `incidents.ts` |
+
+The user-count caveat is a real, bounded inaccuracy: a player already counted before a restart is
+counted again the next time they hit the same failure, so breadth can over-report after a restart.
+That is preferred to retaining per-user material across restarts purely to keep a counter tidy.
+
+**A stored count can never go down.** The in-memory aggregate holds 400 distinct problems and the
+table holds 2,000, so a rare failure can be evicted from memory, recur, restart from 1, and — with a
+naive upsert — overwrite a stored count of 5,000. The upsert uses `MAX` on the counters and `MIN` on
+`firstSeen`, so the stored value is "the highest this key has ever reached". Deliberate reset is
+still possible and still explicit: clearing the dashboard view is memory-only, and destroying the
+history is a separate act.
 
 ### Native components
 
@@ -142,8 +183,9 @@ Expressed the way the brief asked for, as observed paths rather than as a headli
 
 ```
 Backend HTTP failures ................ 100% of responses (every 4xx/5xx and every unrouted path)
-Backend exceptions ................... 100% recorded, but LOST ON CRASH (in-memory store)
+Backend exceptions ................... 100% recorded, and DURABLE (written by the crash itself)
 Backend process events ............... 100% of the four handled signals
+Diagnostic history across restarts .... durable; <=5s of events can be lost to a hard kill
 Cobalt hook/version failures ......... 100% of observable ones (6 report sites)
 Cobalt per-request status/latency .... 0% — architecturally unavailable, and duplicated by the backend
 Cobalt VEH-window escapes ............ 0% — unobservable by construction
@@ -171,19 +213,28 @@ Not claimed — driven and observed:
 | Fallback delivers over that tunnel | cursor 0 → 2 events with seq numbers, `missed: 0`, re-poll returns 0 |
 | Subscriber safety | A throwing subscriber cannot break recording; cap is reported, not silently starved |
 | No account ids on the wire | Asserted on the serialised live event |
+| A crash's own record survives it | Process A crashes on a real uncaught exception; process B opens the DB and finds it, cause intact |
+| A hard kill does not lose diagnostics | Real backend + real HTTP, killed with `SIGKILL`; the recorded 404 is still there afterwards |
+| History accumulates instead of resetting | Two writer processes, one reader: both runs present, one aggregated row with count 10 not two rows of 5 |
+| Eviction cannot erase a count | A count of 5,000 followed by a post-eviction count of 1 leaves 5,000 stored |
+| Recording stays off the disk | 20,000 events wrote 0 rows until flushed; measured 4.7 us/record, 0.7 ms to write 50 rows |
+| No database is survivable | With `initDatabase()` never called, the store reports itself non-durable, recording still works, exit 0 |
+| A rejected write does not poison the store | A binding SQLite refuses returns 0, rolls back, and the next flush succeeds |
+| Nothing secret reaches the file | Account ids and `eg1~` tokens absent from the serialised table |
 
 ---
 
 ## Known blind spots, ranked by what they cost
 
-1. **Diagnostics are lost on crash.** In-memory store. The most valuable record — what happened
-   immediately before a crash — is the one guaranteed not to survive it. Needs Phase 9.
-2. **UE4 errors are not ingested.** A real, readable surface on disk, unused.
-3. **Reboot is barely instrumented.** One report site. Host and session failures are invisible.
-4. **Native crashes are not collected.** `crash.log`/`crash.dmp` are written and never read.
-5. **No timeout/DNS/TLS instrumentation.** Categories exist; nothing emits them.
-6. **Correlation is per-event, not per-incident chain.** `correlationId` is carried and stored, but
+1. **UE4 errors are not ingested.** A real, readable surface on disk, unused.
+2. **Reboot is barely instrumented.** One report site. Host and session failures are invisible.
+3. **Native crashes are not collected.** `crash.log`/`crash.dmp` are written and never read.
+4. **No timeout/DNS/TLS instrumentation.** Categories exist; nothing emits them.
+5. **Correlation is per-event, not per-incident chain.** `correlationId` is carried and stored, but
    nothing walks a chain to identify the *first* failure — Phase 8's central goal is unbuilt.
+6. **Up to 5 seconds of diagnostics can still be lost.** The write-behind window. Bounded, measured,
+   and closed for the crash path specifically — but a power cut or a `SIGKILL` between flushes drops
+   whatever landed since the last one. Stated rather than rounded down to zero.
 
 ---
 

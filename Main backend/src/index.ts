@@ -25,7 +25,9 @@ import { anticheatRoutes } from './services/anticheat/anticheat.routes';
 import { compatRoutes } from './services/compat/compat.routes';
 import { latentRoutes } from './services/compat/latent.routes';
 import { installLogCapture } from './services/nova/logStore';
-import { recordDiagnostic, redactSecrets } from './services/nova/diagnostics';
+import {
+  recordDiagnostic, redactSecrets, startDiagnosticPersistence, flushDiagnosticsNow,
+} from './services/nova/diagnostics';
 
 // Capture console output into a ring buffer so the launcher can stream live logs.
 installLogCapture();
@@ -50,6 +52,13 @@ async function main() {
   // Initialize directories and database
   Config.init();
   await initDatabase();
+
+  // Diagnostics become durable here, and only here — the store shares the backend's SQLite file, so
+  // it cannot come up before the database does. Everything recorded before this line is still
+  // captured in memory; it just is not written until the first flush after startup.
+  if (!startDiagnosticPersistence()) {
+    console.warn('[Diagnostics] running WITHOUT durable storage — a crash will lose the record of it');
+  }
 
   // Load TLS certs if available
   let httpsOptions: { key: Buffer; cert: Buffer } | undefined;
@@ -335,6 +344,10 @@ function recordProcessFailure(category: 'INTERNAL_ERROR' | 'CRASH', detail: stri
       status: 0,
       detail: safe,
     });
+    // Write it out NOW rather than waiting for the flush timer. This is the whole reason the durable
+    // store exists: the process is about to die, and the record of why is worthless if it dies with
+    // it. Synchronous (better-sqlite3), bounded, and non-throwing, which is what rule 3 above allows.
+    flushDiagnosticsNow();
   } catch {
     // Deliberately empty and the ONE place that is acceptable: we are already inside a fatal
     // handler, and a failure to record must not replace the crash we were trying to describe.
@@ -365,16 +378,29 @@ process.on('unhandledRejection', (reason) => {
 });
 
 process.on('exit', (code) => {
+  // Backstop for every exit path that is not a crash and not a signal — including a plain
+  // `process.exit()` from somewhere else in the codebase. Synchronous, which is all an exit handler
+  // permits, and a no-op when the flush timer already wrote everything.
+  //
+  // ORDERING IS LOAD-BEARING AND NOT ACCIDENTAL: this listener is registered while index.ts is
+  // evaluated, and database.ts registers its own `process.once('exit')` — which closes the SQLite
+  // handle — from inside `initDatabase()`, i.e. later. Node runs exit listeners in registration
+  // order, so the flush happens while the database is still open. Moving either registration
+  // reverses that and the final write silently becomes a no-op.
+  try { flushDiagnosticsNow(); } catch { /* nothing left to do at this point */ }
+
   // Last line in the log, so "the process is gone" and "the process stopped cleanly" stop looking
-  // identical after the fact. Only synchronous work is permitted in an exit handler.
+  // identical after the fact.
   if (code !== 0) console.error(`[FATAL] process exiting with code ${code}`);
 });
 
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => {
     // A signalled stop is NOT a crash and must not be recorded as one, or every ordinary restart
-    // would show up as an incident and the dashboard would cry wolf.
+    // would show up as an incident and the dashboard would cry wolf. It still flushes, though —
+    // a clean restart must not be a reason to lose the diagnostics from before it.
     console.log(`[Server] ${sig} received — shutting down`);
+    flushDiagnosticsNow();
     process.exit(0);
   });
 }
