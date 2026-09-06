@@ -97,11 +97,13 @@ namespace Nova::UE4
     void TryDecodeBumper();
 
     /**
-     * Put a media texture on screen: build a widget tree by hand, point an Image at the texture,
-     * and add it to the viewport.
+     * Put the bumper on screen: load the game's own MediaTexture asset (so the engine allocated
+     * its rendering resource), bind it to `player`, build a widget tree by hand around an Image
+     * showing it, and add that to the viewport hidden -- ready for OnEnteredBattleRoyale.
      *
-     * Runs on the GAME THREAD. Constructing a MediaPlayer off-thread happened to work; Slate will
-     * not be so forgiving, and this DLL is in every player's client.
+     * Called from a worker. Each build pass is scheduled onto the GAME THREAD and waited for here;
+     * Slate and package loading are not thread-tolerant, and this DLL is in every player's client.
+     * `texture` is the constructed fallback, used only if no game asset can be loaded.
      */
     void ShowBumper(void* player, void* texture);
 
@@ -118,11 +120,11 @@ namespace Nova::UE4
     bool BumperEnabled();
 
     /**
-     * Give a MediaTexture a rendering surface.
+     * Deliberately a no-op that returns false.
      *
-     * UpdateResource is a plain C++ virtual, not a UFunction, so it is called through the vtable --
-     * and the slot is SEARCHED and VERIFIED with GetWidth rather than guessed, because a wrong slot
-     * is arbitrary code. Returns true once the texture reports a non-zero width.
+     * This used to search vtable slots for UTexture::UpdateResource and hung the game (1.8.0).
+     * The shape is kept so the history is visible at the call site; the working approach is to
+     * load a texture the engine has already initialised (see ShowBumper).
      */
     bool AllocateTextureResource(void* texture);
 

@@ -136,6 +136,9 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
   const [isLaunching, setIsLaunching] = useState(false);
   const [EOR, setEOR] = useState(false);
   const [p2pMode, setP2pMode] = useState<boolean>(localStorage.getItem("p2pMode") !== "false");
+  // The intro bumper. Owned by a marker file the game-side shim reads, not by localStorage — the
+  // launcher asks the backend for the truth rather than remembering its own version of it.
+  const [bumper, setBumper] = useState(true);
 
   const [status, setStatus] = useState<string>("");
   const [role, setRole] = useState<MeshRole>("offline");
@@ -181,6 +184,10 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
     const rawEOR = localStorage.getItem("EOR");
     if (rawEOR !== null) setEOR(rawEOR === "true");
+
+    invoke<{ enabled: boolean; clip_present: boolean }>("bumper_status")
+      .then((s) => setBumper(s.enabled))
+      .catch(() => { /* default stays on, which is what the game assumes too */ });
 
     const savedBuilds = localStorage.getItem("ProjectMP.builds");
     if (savedBuilds) {
@@ -890,6 +897,14 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     localStorage.setItem("p2pMode", String(next));
   }, []);
 
+  const toggleBumper = useCallback((next: boolean) => {
+    setBumper(next);
+    invoke("bumper_set_enabled", { enabled: next }).catch((e) => {
+      setBumper(!next);
+      notify({ kind: "error", title: "Couldn’t change the bumper setting", body: String(e) });
+    });
+  }, [notify]);
+
   /* Poll the coordinator so the banner reflects now, not whenever Play was last pressed.
      30s is a compromise: fast enough that a player who alt-tabs back sees the truth, slow enough
      that it is not a meaningful load on a home-hosted box. Only runs in P2P mode — a single-PC
@@ -950,9 +965,9 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
   return {
     // state
-    path, setPath, builds, isLaunching, EOR, p2pMode, status, role, injecting, playitAddr, mesh, health,
+    path, setPath, builds, isLaunching, EOR, p2pMode, bumper, status, role, injecting, playitAddr, mesh, health,
     // actions
     launch, injectServer, registerHost, launchClient, addBuild, removeBuild,
-    setPlayitAddr, toggleEOR, toggleP2p,
+    setPlayitAddr, toggleEOR, toggleP2p, toggleBumper,
   };
 }

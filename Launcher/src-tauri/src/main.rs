@@ -5,6 +5,7 @@ use std::os::windows::process::CommandExt;
 use sysinfo::System;
 use tauri::{AppHandle, Manager, Window};
 mod anticheat;
+mod bumper;
 mod diagnostics;
 mod diagreport;
 mod net;
@@ -376,6 +377,8 @@ async fn main() {
             diagreport::diagnostics_start_forwarding,
             ue4log::ue4_log_start_watching,
             ue4log::ue4_log_ingest_now,
+            bumper::bumper_status,
+            bumper::bumper_set_enabled,
             host::p2p_fetch_register_secret,
             host::p2p_register_host,
             host::p2p_unregister_host,

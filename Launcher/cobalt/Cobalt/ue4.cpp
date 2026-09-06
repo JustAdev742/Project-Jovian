@@ -5,6 +5,7 @@
 #include <vector>
 #include <atomic>
 #include <algorithm>
+#include <cstring>
 #include <MinHook/MinHook.h>
 
 namespace Nova::UE4
@@ -733,6 +734,269 @@ namespace Nova::UE4
         return false;
     }
 
+    // ── THE GAME'S OWN MEDIA TEXTURE ─────────────────────────────────────────────────────────────
+    //
+    // A MediaTexture constructed here never draws, because the one thing that gives a texture a
+    // rendering resource -- UTexture::UpdateResource -- is a C++ virtual with no UFunction, and
+    // calling it through a guessed vtable slot hung the game. That route is closed for good.
+    //
+    // The engine allocates the resource ITSELF for any texture it loads: UTexture::PostLoad calls
+    // UpdateResource. And 7.40 ships MediaTexture assets of its own. The pak index (read offline
+    // with the 7.40 key; the reader is tools/paklist.mjs) lists
+    //
+    //   FortniteGame/Content/UI/Foundation/Movie/DefaultMediaTexture.uasset  (+ DefaultMediaPlayer)
+    //   FortniteGame/Content/Movies/PlaceholderMediaTexture.uasset
+    //   FortniteGame/Content/Movies/**/FMS_*.uasset     FileMediaSources for the STW clips
+    //   FortniteGame/AssetRegistry.bin
+    //
+    // which is exactly the machinery Fortnite's own movie widget draws the STW tutorial and gadget
+    // clips through -- "use the game's own video system", done with the game's own texture rather
+    // than by hijacking its widget.
+    //
+    // So: load that texture and point it at the player that already decodes the bumper. Every step
+    // is a UFunction the game exposes, every offset is read from the engine's reflection data, and
+    // the only engine memory ever written is parameter buffers this code owns:
+    //
+    //   AssetRegistryHelpers.GetAssetRegistry()           the registry (AssetRegistry.bin ships)
+    //   AssetRegistry.GetAssetsByClass("MediaTexture")    an FAssetData per such asset
+    //   AssetRegistryHelpers.GetAsset(FAssetData)         StaticLoadObject; PostLoad allocates
+    //   MediaTexture.SetMediaPlayer(ours)                 frames now land in a real resource
+    namespace
+    {
+        /**
+         * Offset of a UFunction parameter. Parameters are properties outered to the function, so
+         * this is the same lookup OffsetInStruct does for a struct member.
+         */
+        int ParamOffset(void* fn, const char* name) { return OffsetInStruct(fn, name); }
+
+        /**
+         * A zeroed parameter buffer, deliberately larger than any parameter struct used here.
+         * ProcessEvent copies ParmsSize bytes out of it and writes results back at offsets the
+         * engine reports, so a generous buffer means no hand-computed struct can be too small.
+         */
+        struct Params
+        {
+            alignas(16) unsigned char bytes[1024];
+            Params() { memset(bytes, 0, sizeof(bytes)); }
+            template <typename T> T& at(int off) { return *reinterpret_cast<T*>(bytes + off); }
+        };
+
+        struct FScriptInterfaceOut { void* Object; void* Interface; };   // TScriptInterface<>
+        struct TArrayRaw { void* Data; int32_t Num; int32_t Max; };
+
+        std::wstring Widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+        /** An FName for `text`, made by the engine (KismetStringLibrary.Conv_StringToName). 0 if that fails. */
+        uint64_t MakeName(const std::wstring& text)
+        {
+            static void* lib = FindObject("/Script/Engine.Default__KismetStringLibrary");
+            static void* fn  = FindObject("/Script/Engine.KismetStringLibrary.Conv_StringToName");
+            if (!lib || !fn) return 0;
+            const int inOff = ParamOffset(fn, "InString"), retOff = ParamOffset(fn, "ReturnValue");
+            if (inOff < 0 || retOff < 0) return 0;
+            Params p;
+            p.at<FStringIn>(inOff) = FStringIn(text);
+            if (!SafePE(lib, fn, p.bytes)) return 0;
+            return p.at<uint64_t>(retOff);
+        }
+
+        /** The text of an FName (KismetStringLibrary.Conv_NameToString). Empty if that fails. */
+        std::string NameText(uint64_t name)
+        {
+            static void* lib = FindObject("/Script/Engine.Default__KismetStringLibrary");
+            static void* fn  = FindObject("/Script/Engine.KismetStringLibrary.Conv_NameToString");
+            if (!lib || !fn) return {};
+            const int inOff = ParamOffset(fn, "InName"), retOff = ParamOffset(fn, "ReturnValue");
+            if (inOff < 0 || retOff < 0) return {};
+            Params p;
+            p.at<uint64_t>(inOff) = name;
+            if (!SafePE(lib, fn, p.bytes)) return {};
+            const FStringOut& s = p.at<FStringOut>(retOff);
+            std::string out;
+            for (int i = 0; s.Data && i < s.ArrayNum && s.Data[i]; ++i)
+                out += (s.Data[i] < 128 ? (char)s.Data[i] : '?');
+            return out;
+        }
+
+        /**
+         * The asset registry, and the two calls needed to find and load an asset through it.
+         *
+         * Resolved once, and every layout fact is read from the engine: FAssetData's size is where
+         * GetAsset's return value starts (its one parameter is an FAssetData at offset 0), and
+         * ObjectPath's position comes from the struct itself. If any of that fails to resolve, the
+         * whole thing reports why and does nothing -- there is no fallback to a guessed number.
+         */
+        class GameAssets
+        {
+        public:
+            struct Ref
+            {
+                std::vector<unsigned char> data;   // one FAssetData, byte for byte
+                std::string path;                  // its ObjectPath, e.g. /Game/Movies/X.X
+            };
+
+            bool Resolve()
+            {
+                if (resolved) return ok;
+                resolved = true;
+
+                void* getRegistry = FindObject("/Script/AssetRegistry.AssetRegistryHelpers.GetAssetRegistry");
+                helpers   = FindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers");
+                byClass   = FindObject("/Script/AssetRegistry.AssetRegistry.GetAssetsByClass");
+                getAsset  = FindObject("/Script/AssetRegistry.AssetRegistryHelpers.GetAsset");
+                void* assetData = FindObject("/Script/AssetRegistry.AssetData");
+
+                bool all = true;
+                auto need = [&all](const char* what, void* p)
+                {
+                    if (!p) { Cobalt::Log::WriteLine(std::string("[UE4] assets: MISSING ") + what); all = false; }
+                };
+                need("AssetRegistryHelpers.GetAssetRegistry", getRegistry);
+                need("Default__AssetRegistryHelpers", helpers);
+                need("AssetRegistry.GetAssetsByClass", byClass);
+                need("AssetRegistryHelpers.GetAsset", getAsset);
+                need("AssetData struct", assetData);
+                if (!all) return ok = false;
+
+                // The registry object itself.
+                {
+                    const int retOff = ParamOffset(getRegistry, "ReturnValue");
+                    Params p;
+                    if (retOff < 0 || !SafePE(helpers, getRegistry, p.bytes))
+                    {
+                        Cobalt::Log::WriteLine("[UE4] assets: GetAssetRegistry faulted");
+                        return ok = false;
+                    }
+                    registry = p.at<FScriptInterfaceOut>(retOff).Object;
+                    if (!registry)
+                    {
+                        Cobalt::Log::WriteLine("[UE4] assets: GetAssetRegistry returned null");
+                        return ok = false;
+                    }
+                }
+
+                inOff   = ParamOffset(getAsset, "InAssetData");
+                stride  = ParamOffset(getAsset, "ReturnValue");
+                pathOff = OffsetInStruct(assetData, "ObjectPath");
+                nameOff = ParamOffset(byClass, "ClassName");
+                outOff  = ParamOffset(byClass, "OutAssetData");
+                subOff  = ParamOffset(byClass, "bSearchSubClasses");
+                Cobalt::Log::WriteLine("[UE4] assets: FAssetData is " + std::to_string(stride) + " bytes, ObjectPath@" +
+                                       std::to_string(pathOff) + "; GetAssetsByClass ClassName@" +
+                                       std::to_string(nameOff) + " Out@" + std::to_string(outOff) +
+                                       " Sub@" + std::to_string(subOff));
+                // 80 is the 4.22 size; anything far from it means the layout read went wrong.
+                ok = inOff == 0 && stride >= 64 && stride <= 256 && pathOff >= 0 && pathOff + 8 <= stride &&
+                     nameOff >= 0 && outOff >= 0 && subOff >= 0;
+                if (!ok) Cobalt::Log::WriteLine("[UE4] assets: layout did not resolve sanely - not loading anything");
+                return ok;
+            }
+
+            /** Every asset of `className` the registry knows, up to `max`. */
+            std::vector<Ref> Find(const char* className, int max)
+            {
+                std::vector<Ref> out;
+                if (!Resolve()) return out;
+
+                const std::wstring wide = Widen(className);
+                const uint64_t cls = MakeName(wide);
+                if (!cls)
+                {
+                    Cobalt::Log::WriteLine(std::string("[UE4] assets: could not make an FName for ") + className);
+                    return out;
+                }
+
+                Params q;
+                q.at<uint64_t>(nameOff) = cls;
+                q.at<bool>(subOff) = false;
+                if (!SafePE(registry, byClass, q.bytes))
+                {
+                    Cobalt::Log::WriteLine("[UE4] assets: GetAssetsByClass faulted");
+                    return out;
+                }
+
+                // The array's storage was allocated by the engine. It is copied out and then
+                // deliberately leaked: there is no UFunction to free it, and a few hundred bytes
+                // once per session is a better trade than freeing it with the wrong allocator.
+                const TArrayRaw arr = q.at<TArrayRaw>(outOff);
+                Cobalt::Log::WriteLine("[UE4] assets: " + std::to_string(arr.Num) + " " + className +
+                                       " asset(s) in the registry");
+                if (!arr.Data || arr.Num <= 0) return out;
+
+                for (int i = 0; i < arr.Num && i < max; ++i)
+                {
+                    const unsigned char* ad = (const unsigned char*)arr.Data + (size_t)i * stride;
+                    Ref r;
+                    r.data.assign(ad, ad + stride);
+                    r.path = NameText(*(const uint64_t*)(ad + pathOff));
+                    out.push_back(r);
+                }
+                return out;
+            }
+
+            /** Load one. StaticLoadObject under the hood, so PostLoad -- and UpdateResource -- run. */
+            void* Load(const Ref& ref)
+            {
+                if (!Resolve() || ref.data.size() != (size_t)stride) return nullptr;
+                Params g;
+                memcpy(g.bytes + inOff, ref.data.data(), ref.data.size());
+                if (!SafePE(helpers, getAsset, g.bytes))
+                {
+                    Cobalt::Log::WriteLine("[UE4] assets: GetAsset faulted for " + ref.path);
+                    return nullptr;
+                }
+                void* obj = g.at<void*>(stride);
+                Cobalt::Log::WriteLine("[UE4] assets: load " + ref.path + (obj ? " -> ok" : " -> returned null"));
+                return obj;
+            }
+
+        private:
+            bool resolved = false, ok = false;
+            void* registry = nullptr;
+            void* helpers = nullptr;
+            void* byClass = nullptr;
+            void* getAsset = nullptr;
+            int inOff = -1, stride = 0, pathOff = -1, nameOff = -1, outOff = -1, subOff = -1;
+        };
+
+        GameAssets gAssets;
+
+        /**
+         * The game's own MediaTexture, loaded. Prefers the one Fortnite's movie widget uses; takes
+         * any other MediaTexture asset if that one is not in the registry; null if there are none.
+         * Must run on the game thread -- it loads a package.
+         */
+        void* LoadGameMediaTexture()
+        {
+            std::vector<GameAssets::Ref> found = gAssets.Find("MediaTexture", 64);
+            for (size_t i = 0; i < found.size() && i < 12; ++i)
+                Cobalt::Log::WriteLine("[UE4] assets:   " + found[i].path);
+            if (found.empty()) return nullptr;
+
+            static const char* kPreferred[] = { "DefaultMediaTexture", "PlaceholderMediaTexture" };
+            const GameAssets::Ref* pick = nullptr;
+            for (const char* want : kPreferred)
+            {
+                for (const auto& r : found)
+                    if (r.path.find(want) != std::string::npos) { pick = &r; break; }
+                if (pick) break;
+            }
+            if (!pick) pick = &found[0];
+            return gAssets.Load(*pick);
+        }
+
+        /** What else the game has, for the record. Lists; loads nothing. */
+        void ListGameMediaAssets()
+        {
+            static const char* kClasses[] = { "MediaPlayer", "FileMediaSource" };
+            for (const char* cls : kClasses)
+            {
+                std::vector<GameAssets::Ref> found = gAssets.Find(cls, 4);
+                for (const auto& r : found) Cobalt::Log::WriteLine("[UE4] assets:   " + r.path);
+            }
+        }
+    }
+
     // ── DISPLAY ──────────────────────────────────────────────────────────────────────────────────
     //
     // A UUserWidget created from native code has no WidgetTree -- normally the blueprint's generated
@@ -747,6 +1011,12 @@ namespace Nova::UE4
         void* gWidget = nullptr;
         void* gControlTex = nullptr;
         bool  gShowVideoNext = true;
+
+        // How the game-thread build ended, read by the worker that scheduled it. The wait for a
+        // local player lives on the WORKER: sleeping inside the game-thread task would stall the
+        // very thread that creates the PlayerController it is waiting for.
+        enum { kBuildPending = 0, kBuildNoPlayer = 1, kBuildDone = 2, kBuildFailed = 3 };
+        std::atomic<int> gBuildOutcome{ kBuildPending };
 
         /**
          * Keep an object alive across garbage collection.
@@ -838,9 +1108,9 @@ namespace Nova::UE4
         }
 
 
-        void BuildAndShow()
+        int BuildAndShowInner()
         {
-            if (!gTexture) { Cobalt::Log::WriteLine("[UE4] display: no texture"); return; }
+            if (!gTexture) { Cobalt::Log::WriteLine("[UE4] display: no texture"); return kBuildFailed; }
 
             void* transient = FindObject("/Engine/Transient");
             void* userWidgetCls = FindObject("/Script/UMG.UserWidget");
@@ -849,7 +1119,7 @@ namespace Nova::UE4
             if (!transient || !userWidgetCls || !widgetTreeCls || !imageCls)
             {
                 Cobalt::Log::WriteLine("[UE4] display: a UMG class is missing (UserWidget/WidgetTree/Image)");
-                return;
+                return kBuildFailed;
             }
 
             // A WIDGET NEEDS A WORLD, AND THE CONTROL PROVED IT NEVER DREW.
@@ -861,41 +1131,35 @@ namespace Nova::UE4
             //
             // So: find the live World, get its local PlayerController, and let UMG's own factory
             // build the widget with that context instead of constructing it bare.
-            // WAIT FOR A PLAYER, do not ask once.
+            // A PLAYER IS REQUIRED, AND THE WAITING HAPPENS ELSEWHERE.
             //
-            // Last build found a World and no PlayerController, so Create returned null and it fell
-            // back to bare construction -- which has no world, so AddToViewport had nothing to add
-            // to. The display ran ~15s in, before the frontend map had even loaded; there was no
-            // local player yet.
+            // An earlier build found a World and no PlayerController, so Create returned null and
+            // it fell back to bare construction -- which has no world, so AddToViewport had nothing
+            // to add to. The display ran ~15s in, before the frontend map had even loaded.
             //
-            // This is the third time in this subsystem that the answer was "too early" (the media
-            // factory, the UFunction probes, now this), so it retries rather than picking a moment.
-            // It also tries EVERY live World, because "the last World object in the array" is not
-            // necessarily the one the player is in.
+            // The retry used to live here, as a Sleep loop. That was wrong in a way that only bites
+            // sometimes: this function runs ON the game thread, so sleeping in it stalls the thread
+            // that would have created the player. One pass now; the worker in ShowBumper sees
+            // kBuildNoPlayer and schedules another pass a few seconds later. Every live World is
+            // tried, because "the last World in the array" is not necessarily the player's.
             void* world = nullptr;
             void* pc = nullptr;
             void* getPC = FindObject("/Script/Engine.GameplayStatics.GetPlayerController");
             void* gs = FindObject("/Script/Engine.Default__GameplayStatics");
             void* worldCls = FindObject("/Script/Engine.World");
 
-            for (int attempt = 1; attempt <= 40 && !pc; ++attempt)
+            if (worldCls && getPC && gs)
             {
-                if (worldCls && getPC && gs)
+                const int total = ObjectCount();
+                for (int i = 0; i < total && !pc; ++i)
                 {
-                    const int total = ObjectCount();
-                    for (int i = 0; i < total && !pc; ++i)
-                    {
-                        void* o = GetObjectByIndex(i);
-                        if (!o || SafeClassOf(o) != worldCls) continue;
-                        struct { void* World; int Index; char pad[4]; void* Return; } p{ o, 0, {}, nullptr };
-                        if (SafePE(gs, getPC, &p) && p.Return) { world = o; pc = p.Return; }
-                    }
+                    void* o = GetObjectByIndex(i);
+                    if (!o || SafeClassOf(o) != worldCls) continue;
+                    struct { void* World; int Index; char pad[4]; void* Return; } p{ o, 0, {}, nullptr };
+                    if (SafePE(gs, getPC, &p) && p.Return) { world = o; pc = p.Return; }
                 }
-                if (pc) break;
-                if (attempt == 1)
-                    Cobalt::Log::WriteLine("[UE4] display: no local player yet - waiting for the frontend");
-                Sleep(3000);
             }
+            if (!pc) return kBuildNoPlayer;
             Cobalt::Log::WriteLine(std::string("[UE4] display: world=") + (world ? "found" : "MISSING") +
                                    " playerController=" + (pc ? "found" : "MISSING"));
 
@@ -975,7 +1239,7 @@ namespace Nova::UE4
             void* image = tree ? SpawnObject(imageCls, tree) : nullptr;
             Cobalt::Log::WriteLine(std::string("[UE4] display: widget=") + (widget ? "ok" : "FAIL") +
                                    " tree=" + (tree ? "ok" : "FAIL") + " image=" + (image ? "ok" : "FAIL"));
-            if (!widget || !tree || !image) return;
+            if (!widget || !tree || !image) return kBuildFailed;
 
             // Root everything, including the player and texture made earlier. Without this the next
             // GC pass takes them and the pointers held here go stale -- which is exactly what the
@@ -991,7 +1255,7 @@ namespace Nova::UE4
             if (treeOff < 0 || rootOff < 0)
             {
                 Cobalt::Log::WriteLine("[UE4] display: could not locate the properties to wire the tree");
-                return;
+                return kBuildFailed;
             }
             SafeWritePtr(tree, rootOff, image);
             SafeWritePtr(widget, treeOff, tree);
@@ -1047,8 +1311,6 @@ namespace Nova::UE4
             //
             // The old ImageSize is logged before it is changed, so the 32x32 theory is confirmed
             // or killed by this run rather than assumed.
-            // UpdateResource is not at Texture.UpdateResource on this build -- try the places it
-            // could be rather than assuming one and reporting nothing.
             // NO VTABLE SEARCH. It is removed, not disabled, and this comment is why.
             //
             // 1.8.0 walked vtable slots calling each one and checking GetWidth for a non-zero
@@ -1061,11 +1323,31 @@ namespace Nova::UE4
             // should have rejected is worse than no verification: it turned "this is risky" into
             // "this worked", and shipped.
             //
-            // Calling arbitrary virtuals in a game other people run is not worth a bumper. The
-            // texture stays unallocated -- the video renders blank -- until there is a way to
-            // allocate it that does not involve guessing at code addresses.
-            Cobalt::Log::WriteLine("[UE4] texture: resource NOT allocated - the vtable search was"
-                                   " removed after it hung the game (see the comment in ue4.cpp)");
+            // THE GAME'S OWN TEXTURE INSTEAD. Loaded from the pak, so the engine allocated its
+            // resource in PostLoad -- see the section above. The texture constructed in
+            // TryDecodeBumper stays rooted and unused if this succeeds; it is the fallback only
+            // so that a failure here degrades to "blank video", never to "no widget".
+            if (void* loaded = LoadGameMediaTexture())
+            {
+                AddToRoot(loaded);
+                bool bound = false;
+                if (void* setPlayer = FindObject("/Script/MediaAssets.MediaTexture.SetMediaPlayer"))
+                {
+                    struct { void* Player; } sp{ gPlayer };
+                    bound = SafePE(loaded, setPlayer, &sp);
+                }
+                Cobalt::Log::WriteLine(std::string("[UE4] texture: game asset ") + GetName(reinterpret_cast<UObject*>(loaded)) +
+                                       " bound to our player: " + (bound ? "ok" : "FAULTED") +
+                                       " (reports " + std::to_string(MediaTextureWidth(loaded)) +
+                                       " wide before any frame)");
+                if (bound) gTexture = loaded;
+            }
+            else
+            {
+                Cobalt::Log::WriteLine("[UE4] texture: no game MediaTexture asset could be loaded - the"
+                                       " constructed one has no resource and will draw blank");
+            }
+            ListGameMediaAssets();
 
             // SIZE. The previous build read the viewport as 1x1 and then dutifully set the image to
             // 1x1 -- taking a 32-pixel square down to a single pixel. That was my bug, and the shape
@@ -1130,11 +1412,15 @@ namespace Nova::UE4
             Cobalt::Log::WriteLine("[UE4] display: done - CONTROL image up; it will ALTERNATE with the"
                                    " video every 8s so both can be compared");
 
-            // Swap to the video on a timer, from a worker thread that only schedules the swap back
-            // onto the game thread. Ten seconds is long enough to notice the control and short
-            // enough not to be annoying.
             gControlTex = control;
             Cobalt::Log::WriteLine("[UE4] display: ready and hidden - waiting for Battle Royale");
+            return kBuildDone;
+        }
+
+        /** The game-thread task: run one build pass and publish how it ended. */
+        void BuildAndShow()
+        {
+            gBuildOutcome.store(BuildAndShowInner());
         }
     }
 
@@ -1142,8 +1428,36 @@ namespace Nova::UE4
     {
         gPlayer = player;
         gTexture = texture;
-        if (!RunOnGameThread(&BuildAndShow))
-            Cobalt::Log::WriteLine("[UE4] display: could not schedule onto the game thread");
+
+        // Runs on the worker that decoded the bumper. Each pass is scheduled onto the game thread
+        // and waited for HERE; "no player yet" comes back as an outcome and the next pass goes out
+        // a few seconds later. The game thread never sleeps on this.
+        for (int attempt = 1; attempt <= 40; ++attempt)
+        {
+            gBuildOutcome.store(kBuildPending);
+            if (!RunOnGameThread(&BuildAndShow))
+            {
+                Cobalt::Log::WriteLine("[UE4] display: could not schedule onto the game thread");
+                return;
+            }
+            // The task runs on the next ProcessEvent call, which is at most a frame away; the
+            // bound is for a game thread that is loading and not calling ProcessEvent at all.
+            int waited = 0;
+            while (gBuildOutcome.load() == kBuildPending && waited < 30000) { Sleep(50); waited += 50; }
+
+            const int outcome = gBuildOutcome.load();
+            if (outcome == kBuildNoPlayer)
+            {
+                if (attempt == 1)
+                    Cobalt::Log::WriteLine("[UE4] display: no local player yet - waiting for the frontend");
+                Sleep(3000);
+                continue;
+            }
+            if (outcome == kBuildPending)
+                Cobalt::Log::WriteLine("[UE4] display: the game-thread task did not run within 30s");
+            return;
+        }
+        Cobalt::Log::WriteLine("[UE4] display: gave up waiting for a local player after 40 passes");
     }
 
     void EnumerateCinematics()
@@ -1212,7 +1526,9 @@ namespace Nova::UE4
         // feature works on a fresh install without the launcher having written anything.
         wchar_t buf[MAX_PATH]{};
         if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return true;
-        const std::wstring off = std::wstring(buf) + L"\ProjectNova\bumper.off";
+        // Double backslashes: the previous spelling had \P and \b in it, which the compiler read as
+        // escapes (the build even warned), so this checked a garbled path and never saw the file.
+        const std::wstring off = std::wstring(buf) + L"\\ProjectNova\\bumper.off";
         return GetFileAttributesW(off.c_str()) == INVALID_FILE_ATTRIBUTES;
     }
 
@@ -1259,11 +1575,15 @@ namespace Nova::UE4
             Sleep(7200);   // 6.867s of video, plus a beat
             RunOnGameThread([]()
             {
+                // The proof, in the log rather than a screenshot: a MediaTexture reports the size
+                // of the last frame it rendered. 854 means frames were drawn; 0 means none were.
+                const int w = MediaTextureWidth(gTexture);
                 if (void* remove = FindObject("/Script/UMG.UserWidget.RemoveFromViewport"))
                     SafePE(gWidget, remove, nullptr);
                 if (void* stop = FindObject("/Script/MediaAssets.MediaPlayer.Close"))
                     SafePE(gPlayer, stop, nullptr);
-                Cobalt::Log::WriteLine("[UE4] bumper: finished - back to the lobby");
+                Cobalt::Log::WriteLine("[UE4] bumper: finished - back to the lobby (texture reported " +
+                                       std::to_string(w) + " wide during playback; 854 = frames drawn, 0 = none)");
             });
             return 0;
         }, nullptr, 0, nullptr);

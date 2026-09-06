@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "Project Launcher",
-    "version": "1.8.1"
+    "version": "1.8.2"
   },
   "tauri": {
     "allowlist": {
@@ -67,6 +67,7 @@
       "resources": [
         "resources/Project Reboot.dll",
         "resources/Cobalt.dll",
+        "resources/bumper.mp4",
         "resources/node/*",
         "resources/nova-proxy/**/*",
         "resources/Backend-Coordinator/**/*"

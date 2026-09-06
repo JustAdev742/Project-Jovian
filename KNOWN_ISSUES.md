@@ -265,6 +265,54 @@ Verified against the old code: 3 of the 5 tests fail before the fix, all 5 pass 
 
 ---
 
+### `bumper-media-texture-had-no-resource` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)** · *the cause of ten blank-video builds*
+
+**The intro bumper decoded but drew white, for every build from 1.7.2 to 1.8.1.**
+
+`ue4.cpp` constructed a `UMediaTexture` through `GameplayStatics.SpawnObject`. A texture made that way
+has no rendering resource: the only thing that allocates one is `UTexture::UpdateResource`, a C++
+virtual that no UFunction exposes. Slate sampled a texture with nothing behind it and drew white.
+The control texture (`T-Icon-Logs`) proved the widget itself was fine, which is what finally isolated
+the texture.
+
+**1.8.0 tried to reach `UpdateResource` by walking vtable slots and checking `GetWidth() > 0`.** Slot
+88 returned width 2 — the video is 854 wide — and the check accepted it. An arbitrary virtual had been
+called, something was written that should not have been, and the game hung on the loading screen.
+Reverted in 1.8.1. The test was the flaw, not just the range: a verification that accepts a value it
+should reject converts "risky" into "worked" and ships it. **No vtable guessing, ever, in a DLL that
+runs in other people's game.**
+
+**Fix.** Use a texture the engine has already initialised: a pak asset goes through `PostLoad`, which
+calls `UpdateResource`. `tools/paklist.mjs` (new; reads pak indexes with the 7.40 key) showed 7.40
+ships `UI/Foundation/Movie/DefaultMediaTexture` + `DefaultMediaPlayer` — the machinery Fortnite's own
+movie widget draws the STW clips through — plus `FortniteGame/AssetRegistry.bin`. So the load is
+pure reflection: `AssetRegistryHelpers.GetAssetRegistry` → `AssetRegistry.GetAssetsByClass
+("MediaTexture")` → `AssetRegistryHelpers.GetAsset(FAssetData)` → `MediaTexture.SetMediaPlayer(ours)`.
+Every offset is read from the engine (UFunction parameters are properties outered to the function,
+so `OffsetInStruct(fn, "ParamName")` gives them), and the layout is sanity-checked before anything is
+loaded; a failure degrades to the old blank video, never to no widget.
+
+**Proof to look for in cobalt.log:** `[UE4] assets: N MediaTexture asset(s) in the registry`, the
+load line, and at teardown `texture reported 854 wide during playback`.
+
+### `bumper-off-switch-never-worked` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
+
+`BumperEnabled()` built the marker path as `L"\ProjectNova\bumper.off"`. `\P` is an invalid escape
+and `\b` is backspace, so it checked a garbled path and always answered "on". The compiler warned
+(C4129) and the warning was in the build output of every release since 1.7.2. Fixed with `\\`; the
+Settings switch that writes the marker (`bumper.rs`, new) lands in the same release, so this is the
+first build in which the switch can do anything.
+
+### `bumper-build-slept-on-the-game-thread` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
+
+The widget build ran on the game thread (via the ProcessEvent detour) and, finding no
+PlayerController, did `Sleep(3000)` up to 40 times — on the thread that creates the PlayerController.
+It did not deadlock in practice only because the task happened to be scheduled after the frontend was
+up. The wait now lives on the worker in `ShowBumper`: the game-thread pass returns `kBuildNoPlayer`
+and the worker reschedules it 3 s later.
+
+---
+
 ### `worldinventory-race-at-spawn` · CONFIRMED · **open — mitigated, not fixed**
 
 At every match spawn the client logs `ClientRestart_Implementation failed because WorldInventory is

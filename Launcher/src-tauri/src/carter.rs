@@ -980,6 +980,11 @@ pub async fn launch_fn(
             );
         }
     }
+    // The intro bumper's clip, put where Cobalt looks for it. Not fatal: a launch must never fail
+    // over a bumper, so a missing or uncopyable clip is reported and the game starts without it.
+    if let Err(e) = crate::bumper::stage_clip() {
+        eprintln!("[bumper] clip not staged (the game runs without it): {}", e);
+    }
 
     let base = std::path::PathBuf::from(path);
     let mut fort_ac_path = base.clone();

@@ -166,12 +166,18 @@ export default function Settings({ api }: { api: LauncherApi }) {
         {/* ── Gameplay ───────────────────────────────────────────────────────────────────────── */}
         <Card>
           <CardHeader title="Gameplay" />
-          <div className="px-5">
+          <div className="px-5 divide-y divide-hairline">
             <Switch
               checked={api.EOR}
               onChange={api.toggleEOR}
               label="Edit on release"
               description="Confirm a build edit the moment you let go of the edit key, instead of pressing again."
+            />
+            <Switch
+              checked={api.bumper}
+              onChange={api.toggleBumper}
+              label="Intro bumper"
+              description="Play the Nova bumper when you pick Battle Royale. It can’t be skipped while this is on; turn it off and it never plays."
             />
           </div>
         </Card>
