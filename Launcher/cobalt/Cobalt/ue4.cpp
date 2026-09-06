@@ -455,14 +455,51 @@ namespace Nova::UE4
         void* openFile = FindObject("/Script/MediaAssets.MediaPlayer.OpenFile");
         if (!openFile) { Cobalt::Log::WriteLine("[UE4] OpenFile function missing"); return; }
 
+        // RETRY, rather than calling once at a moment I chose.
+        //
+        // The first attempt failed and the engine said why, in FortniteGame.log:
+        //
+        //   LogMediaUtils: Error: Cannot play file://...bumper.mp4:
+        //   no media player plug-ins are installed and enabled in this project
+        //
+        // Which is not what it sounds like. WmfMedia IS mounted -- the plugin is enabled. But the
+        // module that REGISTERS the player factory loads much later than the media modules
+        // themselves: at shutdown the engine reports WmfMediaFactory as module 244 against
+        // MediaAssets 86 and WmfMedia 96. The call went out ~7 seconds into startup, when the
+        // factory list was still empty.
+        //
+        // That message also proved the path marshalling is right -- the engine echoed the exact
+        // file back as a file:// URL. So the only thing wrong was when.
+        //
+        // Rather than guess a better fixed moment (this subsystem has now cost three releases to
+        // exactly that mistake), keep asking. Bounded at two minutes; quiet except when the answer
+        // changes, because this runs while somebody is trying to play.
         struct OpenParams { FStringIn Path; bool Return; char pad[7]; };
-        OpenParams openParams{ FStringIn(path), false, {} };
-        if (!SafePE(player, openFile, &openParams))
+        bool opened = false;
+        for (int attempt = 1; attempt <= 24 && !opened; ++attempt)
         {
-            Cobalt::Log::WriteLine("[UE4] OpenFile faulted");
+            OpenParams openParams{ FStringIn(path), false, {} };
+            if (!SafePE(player, openFile, &openParams))
+            {
+                Cobalt::Log::WriteLine("[UE4] OpenFile faulted");
+                return;
+            }
+            opened = openParams.Return;
+            if (opened)
+            {
+                Cobalt::Log::WriteLine("[UE4] OpenFile SUCCEEDED on attempt " + std::to_string(attempt) +
+                                       " (~" + std::to_string(attempt * 5) + "s after the engine came up)");
+                break;
+            }
+            if (attempt == 1)
+                Cobalt::Log::WriteLine("[UE4] OpenFile refused - waiting for the media player factory to register");
+            Sleep(5000);
+        }
+        if (!opened)
+        {
+            Cobalt::Log::WriteLine("[UE4] OpenFile never succeeded in 2 minutes - the factory never registered");
             return;
         }
-        Cobalt::Log::WriteLine(std::string("[UE4] OpenFile returned: ") + (openParams.Return ? "TRUE" : "false"));
 
         // 4. Duration. Opening is asynchronous, so poll — reading once and concluding would report
         //    a failure that is really just "not yet".
