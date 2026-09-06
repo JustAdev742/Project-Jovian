@@ -721,46 +721,15 @@ namespace Nova::UE4
             return p.Return;
         }
 
-        bool CallVirtual(void* obj, int slot)
-        {
-            __try
-            {
-                void** vt = *(void***)obj;
-                if (!vt) return false;
-                using Fn = void(*)(void*);
-                reinterpret_cast<Fn>(vt[slot])(obj);
-                return true;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-        }
+        // CallVirtual lived here. It is deleted, not commented out: leaving a function that
+        // calls an arbitrary vtable slot in a DLL that ships to players is leaving a loaded gun on
+        // the table, and the next person to need "just one native call" would reach for it.
     }
 
-    bool AllocateTextureResource(void* tex)
+    bool AllocateTextureResource(void*)
     {
-        if (!Ready() || !tex) return false;
-
-        const int before = MediaTextureWidth(tex);
-        Cobalt::Log::WriteLine("[UE4] texture: width before = " + std::to_string(before));
-        if (before > 0)
-        {
-            Cobalt::Log::WriteLine("[UE4] texture: already has a resource - nothing to do");
-            return true;
-        }
-
-        // UTexture::UpdateResource sits among UObject's virtuals. The window below covers where it
-        // lands in 4.22 without wandering into unrelated slots.
-        for (int slot = 60; slot <= 110; ++slot)
-        {
-            if (!CallVirtual(tex, slot)) continue;
-            const int after = MediaTextureWidth(tex);
-            if (after > 0)
-            {
-                Cobalt::Log::WriteLine("[UE4] texture: RESOURCE ALLOCATED - slot " + std::to_string(slot) +
-                                       ", width now " + std::to_string(after));
-                return true;
-            }
-        }
-        Cobalt::Log::WriteLine("[UE4] texture: no vtable slot produced a resource - width still 0");
+        // Deliberately does nothing. See the note at the call site: the vtable search this used to
+        // perform hung the game, and the kept shape is a reminder rather than a switch to flip.
         return false;
     }
 
@@ -1080,8 +1049,23 @@ namespace Nova::UE4
             // or killed by this run rather than assumed.
             // UpdateResource is not at Texture.UpdateResource on this build -- try the places it
             // could be rather than assuming one and reporting nothing.
-            // Reflection cannot allocate it; the vtable can, and GetWidth verifies it.
-            AllocateTextureResource(gTexture);
+            // NO VTABLE SEARCH. It is removed, not disabled, and this comment is why.
+            //
+            // 1.8.0 walked vtable slots calling each one and checking GetWidth for a non-zero
+            // result. Slot 88 returned width 2 -- the video is 854 wide -- and the check passed
+            // anyway because it only asked "> 0" instead of "is this a plausible video width".
+            // So an arbitrary virtual was called, something was written that should not have been,
+            // and the game hung on the loading screen.
+            //
+            // The test was the problem, not just the range. A verification that accepts a value it
+            // should have rejected is worse than no verification: it turned "this is risky" into
+            // "this worked", and shipped.
+            //
+            // Calling arbitrary virtuals in a game other people run is not worth a bumper. The
+            // texture stays unallocated -- the video renders blank -- until there is a way to
+            // allocate it that does not involve guessing at code addresses.
+            Cobalt::Log::WriteLine("[UE4] texture: resource NOT allocated - the vtable search was"
+                                   " removed after it hung the game (see the comment in ue4.cpp)");
 
             // SIZE. The previous build read the viewport as 1x1 and then dutifully set the image to
             // 1x1 -- taking a 32-pixel square down to a single pixel. That was my bug, and the shape
