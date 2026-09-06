@@ -283,9 +283,44 @@ pub fn ts_ensure_firewall() -> Result<bool, String> {
         .output()
         .map_err(|e| format!("failed to run netsh (needs admin): {}", e))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        // NETSH REPORTS FAILURES ON STDOUT, NOT STDERR. Reading only stderr — as this did — yields
+        // an empty string for the most common failure of all ("The requested operation requires
+        // elevation"), so the caller got `Err("")`: an error carrying no information, which reads
+        // like a bug in our code rather than a missing privilege. Read both, prefer whichever spoke.
+        let so = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let se = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let msg = if !se.is_empty() { se } else if !so.is_empty() { so } else {
+            format!("netsh exited {} with no output", out.status)
+        };
+        return Err(msg);
     }
     Ok(true)
+}
+
+/// Run `ts_ensure_firewall` and say what happened. Returns None on success, or the reason on failure.
+///
+/// Both call sites used `let _ = ts_ensure_firewall();` — the result thrown away, one of them under
+/// a comment promising it would "report via status". So when the rule could not be added, which is
+/// the ordinary outcome without admin rights, nothing anywhere said so: Windows Firewall keeps
+/// blocking inbound UDP 7777 on the Tailscale adapter, peers cannot reach the Reboot gameserver, and
+/// hosting fails in a way that looks like the mesh being broken.
+///
+/// It is genuinely best-effort — it must not fail the mesh flow, since a machine that only ever
+/// JOINS does not need the rule at all. But best-effort is not the same as silent.
+fn ensure_firewall_reporting() -> Option<String> {
+    match ts_ensure_firewall() {
+        Ok(_) => {
+            crate::dbg_log("firewall: inbound UDP 7777 rule is in place");
+            None
+        }
+        Err(e) => {
+            crate::dbg_log(&format!(
+                "firewall: could NOT add the inbound UDP 7777 rule ({e}) - \
+                 this machine can join matches but peers may not be able to reach it if it hosts"
+            ));
+            Some(e)
+        }
+    }
 }
 
 // ── Machine capability (for host selection) ──────────────────────────────────
@@ -410,7 +445,7 @@ pub async fn mesh_bring_up(
     // Already connected? Just refresh the announcement.
     let status = ts_status();
     if status.connected {
-        let _ = ts_ensure_firewall();
+        ensure_firewall_reporting();
         let _ = mesh_announce(coordinator.clone(), account_id.clone(), None).await;
         return Ok(status);
     }
@@ -443,14 +478,23 @@ pub async fn mesh_bring_up(
         }
     };
 
-    let _ = ts_ensure_firewall(); // best-effort; report via status rather than failing the whole flow
+    // Best-effort, and now it actually does report via status - the comment here used to say so
+    // while discarding the result.
+    let firewall_problem = ensure_firewall_reporting();
     let _ = mesh_announce(coordinator.clone(), account_id, None).await;
 
     Ok(MeshStatus {
         installed: true,
         connected: ip.starts_with("100."),
         ip: if ip.is_empty() { None } else { Some(ip) },
-        detail: "mesh ready".into(),
+        // Say it here as well as in the log. The mesh IS ready — this machine can join matches
+        // normally — but if it is ever elected host, peers will not reach UDP 7777 through Windows
+        // Firewall, and that failure otherwise presents as "the mesh is broken" with nothing to act
+        // on. Naming it turns an invisible fault into "run the launcher as administrator once".
+        detail: match &firewall_problem {
+            None => "mesh ready".into(),
+            Some(e) => format!("mesh ready — but the firewall rule for hosting could not be added ({e})"),
+        },
         needs_restart: false,
     })
 }

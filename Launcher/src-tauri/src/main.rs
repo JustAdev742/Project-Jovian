@@ -177,8 +177,41 @@ fn start_backend(
         .ok()
         .and_then(|e| e.parent().map(|p| p.join("nova-agent.log")))
         .unwrap_or_else(|| std::path::PathBuf::from("nova-agent.log"));
-    let log = std::fs::File::create(&log_path)
+    // ── APPEND, DO NOT TRUNCATE ──────────────────────────────────────────────────────────────────
+    //
+    // This was `File::create`, which truncates. So every backend start erased the previous one's
+    // log — including the log of a backend that had just crashed and was being restarted. The
+    // evidence of a crash was destroyed by the very act of recovering from it, and the agent is a
+    // background process with no window, so that log is the only account of what it did.
+    // (`launcher-evidence-is-self-erasing` in KNOWN_ISSUES.)
+    //
+    // Rotated at 5MB rather than left to grow without bound: one file kept as `.1`, so a crash loop
+    // cannot fill the disk and the run before last is still readable.
+    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+    if std::fs::metadata(&log_path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        let rotated = log_path.with_extension("log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(&log_path, &rotated);
+    }
+
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
         .map_err(|e| format!("could not open {}: {}", log_path.display(), e))?;
+
+    // A separator, so appended runs can be told apart at a glance. Without it an appended log reads
+    // as one continuous session and a restart is invisible — which would trade one evidence problem
+    // for another.
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            log,
+            "\r\n==== nova agent starting (launcher {}) ====",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
     let log_err = log
         .try_clone()
         .map_err(|e| format!("could not open the backend log: {}", e))?;
