@@ -693,6 +693,77 @@ namespace Nova::UE4
         return true;
     }
 
+    // ── ALLOCATING THE TEXTURE'S RENDERING SURFACE ───────────────────────────────────────────────
+    //
+    // The class listing settled it: UMediaTexture exposes exactly six UFunctions --
+    // SetMediaPlayer, GetWidth, GetMediaPlayer, GetHeight, GetAspectRatio, ExecuteUbergraph --
+    // and UTexture exposes none. UpdateResource is a plain C++ virtual, so reflection cannot reach
+    // it, which is why the brush had nothing to sample and Slate drew white.
+    //
+    // It IS in the vtable, though, and MediaTexture gives us something almost no other case does:
+    // a way to CHECK. GetWidth returns 0 until a resource exists and the video's real width after.
+    // So the slot can be searched rather than guessed:
+    //
+    //   for each candidate slot -> call it -> ask GetWidth -> if it became non-zero, that was it.
+    //
+    // Every call is SEH-guarded and the search stops the moment it works. This is still the riskiest
+    // thing in this file by a distance -- calling an arbitrary virtual is calling arbitrary code --
+    // so the range is deliberately narrow and the whole thing is skipped if the width is already
+    // non-zero.
+    namespace
+    {
+        int MediaTextureWidth(void* tex)
+        {
+            static void* fn = FindObject("/Script/MediaAssets.MediaTexture.GetWidth");
+            if (!fn || !tex) return -1;
+            struct { int Return; } p{ 0 };
+            if (!SafePE(tex, fn, &p)) return -1;
+            return p.Return;
+        }
+
+        bool CallVirtual(void* obj, int slot)
+        {
+            __try
+            {
+                void** vt = *(void***)obj;
+                if (!vt) return false;
+                using Fn = void(*)(void*);
+                reinterpret_cast<Fn>(vt[slot])(obj);
+                return true;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+    }
+
+    bool AllocateTextureResource(void* tex)
+    {
+        if (!Ready() || !tex) return false;
+
+        const int before = MediaTextureWidth(tex);
+        Cobalt::Log::WriteLine("[UE4] texture: width before = " + std::to_string(before));
+        if (before > 0)
+        {
+            Cobalt::Log::WriteLine("[UE4] texture: already has a resource - nothing to do");
+            return true;
+        }
+
+        // UTexture::UpdateResource sits among UObject's virtuals. The window below covers where it
+        // lands in 4.22 without wandering into unrelated slots.
+        for (int slot = 60; slot <= 110; ++slot)
+        {
+            if (!CallVirtual(tex, slot)) continue;
+            const int after = MediaTextureWidth(tex);
+            if (after > 0)
+            {
+                Cobalt::Log::WriteLine("[UE4] texture: RESOURCE ALLOCATED - slot " + std::to_string(slot) +
+                                       ", width now " + std::to_string(after));
+                return true;
+            }
+        }
+        Cobalt::Log::WriteLine("[UE4] texture: no vtable slot produced a resource - width still 0");
+        return false;
+    }
+
     // ── DISPLAY ──────────────────────────────────────────────────────────────────────────────────
     //
     // A UUserWidget created from native code has no WidgetTree -- normally the blueprint's generated
@@ -1009,23 +1080,8 @@ namespace Nova::UE4
             // or killed by this run rather than assumed.
             // UpdateResource is not at Texture.UpdateResource on this build -- try the places it
             // could be rather than assuming one and reporting nothing.
-            static const char* kUpdatePaths[] = {
-                "/Script/Engine.Texture.UpdateResource",
-                "/Script/Engine.Texture2D.UpdateResource",
-                "/Script/MediaAssets.MediaTexture.UpdateResource",
-            };
-            bool updated = false;
-            for (const char* p : kUpdatePaths)
-            {
-                if (void* fn = FindObject(p))
-                {
-                    updated = SafePE(gTexture, fn, nullptr);
-                    Cobalt::Log::WriteLine(std::string("[UE4] display: UpdateResource via ") + p +
-                                           (updated ? " ok" : " faulted"));
-                    break;
-                }
-            }
-            if (!updated) Cobalt::Log::WriteLine("[UE4] display: no UpdateResource found on any known path");
+            // Reflection cannot allocate it; the vtable can, and GetWidth verifies it.
+            AllocateTextureResource(gTexture);
 
             // SIZE. The previous build read the viewport as 1x1 and then dutifully set the image to
             // 1x1 -- taking a 32-pixel square down to a single pixel. That was my bug, and the shape
@@ -1068,6 +1124,14 @@ namespace Nova::UE4
                     Cobalt::Log::WriteLine("[UE4] display: writing ImageSize faulted");
             }
 
+            // Added now but HIDDEN, so it is ready the instant Battle Royale is chosen rather than
+            // being built at the moment it is needed -- construction takes long enough that doing it
+            // on the trigger would show a gap.
+            if (void* vis = FindObject("/Script/UMG.UserWidget.SetVisibility"))
+            {
+                struct { unsigned char V; char pad[7]; } p{ 2, {} };   // ESlateVisibility::Hidden
+                SafePE(widget, vis, &p);
+            }
             if (void* addToViewport = FindObject("/Script/UMG.UserWidget.AddToViewport"))
             {
                 struct { int ZOrder; } p{ 9999 };
@@ -1086,29 +1150,7 @@ namespace Nova::UE4
             // onto the game thread. Ten seconds is long enough to notice the control and short
             // enough not to be annoying.
             gControlTex = control;
-            // ALTERNATE rather than swap once. A single swap to white is ambiguous -- it could be a
-            // blank video or a broken texture. Flipping back to a texture known to draw makes the
-            // difference visible without another release.
-            CreateThread(nullptr, 0, [](LPVOID) -> DWORD
-            {
-                for (int i = 0; i < 12; ++i)
-                {
-                    Sleep(8000);
-                    const bool showVideo = (i % 2) == 0;
-                    gShowVideoNext = showVideo;
-                    RunOnGameThread([]()
-                    {
-                        if (!gImage || !gSetBrush) return;
-                        void* tex = gShowVideoNext ? gTexture : gControlTex;
-                        if (!tex) return;
-                        struct { void* Texture; bool MatchSize; char pad[7]; } p{ tex, false, {} };
-                        Cobalt::Log::WriteLine(std::string("[UE4] display: showing ") +
-                                               (gShowVideoNext ? "VIDEO " : "CONTROL ") +
-                                               (SafePE(gImage, gSetBrush, &p) ? "ok" : "faulted"));
-                    });
-                }
-                return 0;
-            }, nullptr, 0, nullptr);
+            Cobalt::Log::WriteLine("[UE4] display: ready and hidden - waiting for Battle Royale");
         }
     }
 
@@ -1177,6 +1219,70 @@ namespace Nova::UE4
             }
         }
         Cobalt::Log::WriteLine("[UE4] cine: " + std::to_string(hits) + " cinematic-shaped item(s)");
+    }
+
+    bool BumperEnabled()
+    {
+        // A file, not a registry key or a config parser: the launcher writes or deletes it from the
+        // Settings switch, and Cobalt only has to answer "is it there". Absent means ON, so the
+        // feature works on a fresh install without the launcher having written anything.
+        wchar_t buf[MAX_PATH]{};
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return true;
+        const std::wstring off = std::wstring(buf) + L"\ProjectNova\bumper.off";
+        return GetFileAttributesW(off.c_str()) == INVALID_FILE_ATTRIBUTES;
+    }
+
+    void OnEnteredBattleRoyale()
+    {
+        static std::atomic<bool> fired{ false };
+        bool expected = false;
+        if (!fired.compare_exchange_strong(expected, true)) return;   // once per session
+
+        if (!BumperEnabled())
+        {
+            Cobalt::Log::WriteLine("[UE4] bumper: switched off in Settings - not playing");
+            return;
+        }
+        if (!gImage || !gSetBrush || !gTexture || !gWidget)
+        {
+            Cobalt::Log::WriteLine("[UE4] bumper: entered BR but the player is not ready yet");
+            return;
+        }
+
+        Cobalt::Log::WriteLine("[UE4] bumper: entered Battle Royale - playing");
+        RunOnGameThread([]()
+        {
+            // Restart from the top so it plays in full from this moment, not from wherever the
+            // warm-up left it.
+            if (void* rewind = FindObject("/Script/MediaAssets.MediaPlayer.Rewind")) {
+                struct { bool R; char pad[7]; } p{ false, {} }; SafePE(gPlayer, rewind, &p);
+            }
+            if (void* play = FindObject("/Script/MediaAssets.MediaPlayer.Play")) {
+                struct { bool R; char pad[7]; } p{ false, {} }; SafePE(gPlayer, play, &p);
+            }
+            struct { void* Texture; bool MatchSize; char pad[7]; } b{ gTexture, false, {} };
+            SafePE(gImage, gSetBrush, &b);
+            if (void* z = FindObject("/Script/UMG.UserWidget.SetVisibility")) {
+                struct { unsigned char V; char pad[7]; } p{ 0, {} };   // ESlateVisibility::Visible
+                SafePE(gWidget, z, &p);
+            }
+        });
+
+        // Remove it when the clip ends. Unskippable is the point, so nothing watches for input --
+        // the only way past it is the Settings switch, and the only way out is the clip finishing.
+        CreateThread(nullptr, 0, [](LPVOID) -> DWORD
+        {
+            Sleep(7200);   // 6.867s of video, plus a beat
+            RunOnGameThread([]()
+            {
+                if (void* remove = FindObject("/Script/UMG.UserWidget.RemoveFromViewport"))
+                    SafePE(gWidget, remove, nullptr);
+                if (void* stop = FindObject("/Script/MediaAssets.MediaPlayer.Close"))
+                    SafePE(gPlayer, stop, nullptr);
+                Cobalt::Log::WriteLine("[UE4] bumper: finished - back to the lobby");
+            });
+            return 0;
+        }, nullptr, 0, nullptr);
     }
 
     void SelfTest()

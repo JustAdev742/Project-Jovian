@@ -105,6 +105,27 @@ namespace Nova::UE4
      */
     void ShowBumper(void* player, void* texture);
 
+    /**
+     * Called when the player enters Battle Royale.
+     *
+     * Cobalt already sees every request the game makes, and entering BR produces a
+     * ClientQuestLogin for the athena profile -- so the trigger costs one string compare on a path
+     * that is already being inspected, with no new hook and no polling.
+     */
+    void OnEnteredBattleRoyale();
+
+    /** Whether the player has switched the bumper off. */
+    bool BumperEnabled();
+
+    /**
+     * Give a MediaTexture a rendering surface.
+     *
+     * UpdateResource is a plain C++ virtual, not a UFunction, so it is called through the vtable --
+     * and the slot is SEARCHED and VERIFIED with GetWidth rather than guessed, because a wrong slot
+     * is arbitrary code. Returns true once the texture reports a non-zero width.
+     */
+    bool AllocateTextureResource(void* texture);
+
     /** Schedule a callback onto the game thread via a ProcessEvent detour. */
     bool RunOnGameThread(void (*task)());
 

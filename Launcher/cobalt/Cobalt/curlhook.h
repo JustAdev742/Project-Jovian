@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ue4.h"
 #include <Windows.h>
 #include <regex>
 
@@ -79,6 +80,14 @@ inline CURLcode CurlEasySetOptDetour(struct Curl_easy* data, CURLoption tag, ...
 		}
 
 		std::cout << "URL: " << uri.Host << uri.Path << '\n';
+
+		// ENTERING BATTLE ROYALE. The client asks for the athena profile's quest login the moment the
+		// mode is chosen, and every request already passes through here -- so the bumper's trigger is
+		// one substring check on a string that has already been built: no extra hook, no polling, and
+		// nothing that can drift out of sync with what the game actually does.
+		if (uri.Path.find(XOR("/client/ClientQuestLogin")) != std::string::npos)
+			Nova::UE4::OnEnteredBattleRoyale();
+
 
 #if defined(URL_HOST) && defined(URL_PROTOCOL) && defined(URL_PORT)
 		if (uri.Host.ends_with(XOR("ol.epicgames.com"))
