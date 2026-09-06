@@ -702,6 +702,8 @@ namespace Nova::UE4
     {
         void* gPlayer = nullptr;
         void* gTexture = nullptr;
+        void* gImage = nullptr;
+        void* gSetBrush = nullptr;
 
         void BuildAndShow()
         {
@@ -736,15 +738,42 @@ namespace Nova::UE4
             SafeWritePtr(tree, rootOff, image);
             SafeWritePtr(widget, treeOff, tree);
 
-            // ProcessEvent does not type-check, so the MediaTexture goes straight into the brush's
-            // resource slot even though the parameter is declared UTexture2D*. Slate draws whatever
-            // the brush's ResourceObject is.
-            if (void* setBrush = FindObject("/Script/UMG.Image.SetBrushFromTexture"))
+            // A CONTROL TEXTURE FIRST.
+            //
+            // Every step has reported ok for two builds and nothing has appeared, which leaves two
+            // very different causes: the widget is not drawing at all, or it is drawing and a
+            // MediaTexture cannot be sampled through a Slate brush (it derives from UTexture, not
+            // UTexture2D, and SetBrushFromTexture only accepts the latter -- ProcessEvent does not
+            // type-check, so the call "succeeds" either way).
+            //
+            // Showing a known-good texture the game already has separates those in one run. If the
+            // control appears and the video does not, the widget is fine and the texture type is
+            // the problem. If neither appears, the widget never drew and the texture is innocent.
+            // Guessing between those without a control is how the last two builds were spent.
+            static const char* kControlTextures[] = {
+                "/Game/UI/Foundation/Textures/Icons/Items/T-Icon-S-Loot-Stone.T-Icon-S-Loot-Stone",
+                "/Game/UI/Foundation/Textures/Icons/Items/T-Icon-Logs.T-Icon-Logs",
+                "/Engine/EngineResources/DefaultTexture.DefaultTexture",
+                "/Engine/EngineResources/WhiteSquareTexture.WhiteSquareTexture",
+            };
+            void* control = nullptr;
+            for (const char* p : kControlTextures)
             {
-                struct { void* Texture; bool MatchSize; char pad[7]; } p{ gTexture, false, {} };
-                Cobalt::Log::WriteLine(std::string("[UE4] display: SetBrushFromTexture ") +
+                control = FindObject(p);
+                if (control) { Cobalt::Log::WriteLine(std::string("[UE4] display: control texture ") + p); break; }
+            }
+            if (!control) Cobalt::Log::WriteLine("[UE4] display: no control texture found - showing the video only");
+
+            void* setBrush = FindObject("/Script/UMG.Image.SetBrushFromTexture");
+            if (setBrush)
+            {
+                struct { void* Texture; bool MatchSize; char pad[7]; } p{ control ? control : gTexture, false, {} };
+                Cobalt::Log::WriteLine(std::string("[UE4] display: SetBrushFromTexture(") +
+                                       (control ? "CONTROL" : "video") + ") " +
                                        (SafePE(image, setBrush, &p) ? "ok" : "faulted"));
             }
+            gImage = image;
+            gSetBrush = setBrush;
 
             // ── SIZE, AND WHY NOTHING WAS DRAWN ──────────────────────────────────────────────
             //
@@ -759,23 +788,49 @@ namespace Nova::UE4
             //
             // The old ImageSize is logged before it is changed, so the 32x32 theory is confirmed
             // or killed by this run rather than assumed.
-            if (void* update = FindObject("/Script/Engine.Texture.UpdateResource"))
-                Cobalt::Log::WriteLine(std::string("[UE4] display: UpdateResource ") +
-                                       (SafePE(gTexture, update, nullptr) ? "ok" : "faulted"));
-            else
-                Cobalt::Log::WriteLine("[UE4] display: Texture.UpdateResource not found");
+            // UpdateResource is not at Texture.UpdateResource on this build -- try the places it
+            // could be rather than assuming one and reporting nothing.
+            static const char* kUpdatePaths[] = {
+                "/Script/Engine.Texture.UpdateResource",
+                "/Script/Engine.Texture2D.UpdateResource",
+                "/Script/MediaAssets.MediaTexture.UpdateResource",
+            };
+            bool updated = false;
+            for (const char* p : kUpdatePaths)
+            {
+                if (void* fn = FindObject(p))
+                {
+                    updated = SafePE(gTexture, fn, nullptr);
+                    Cobalt::Log::WriteLine(std::string("[UE4] display: UpdateResource via ") + p +
+                                           (updated ? " ok" : " faulted"));
+                    break;
+                }
+            }
+            if (!updated) Cobalt::Log::WriteLine("[UE4] display: no UpdateResource found on any known path");
 
-            // Viewport size, so the image covers the screen instead of sitting at a default.
+            // SIZE. The previous build read the viewport as 1x1 and then dutifully set the image to
+            // 1x1 -- taking a 32-pixel square down to a single pixel. That was my bug, and the shape
+            // of it matters: an unchecked value from the engine was trusted over an obviously sane
+            // default.
+            //
+            // So the result is now sanity-checked, and the size never shrinks: whatever the query
+            // says, the image is at least as big as it already was.
             float vw = 1920.f, vh = 1080.f;
             if (void* getVp = FindObject("/Script/UMG.WidgetLayoutLibrary.GetViewportSize"))
             {
                 if (void* lib = FindObject("/Script/UMG.Default__WidgetLayoutLibrary"))
                 {
                     struct { void* World; float X; float Y; } vp{ nullptr, 0.f, 0.f };
-                    if (SafePE(lib, getVp, &vp) && vp.X > 0.f && vp.Y > 0.f) { vw = vp.X; vh = vp.Y; }
+                    if (SafePE(lib, getVp, &vp))
+                    {
+                        Cobalt::Log::WriteLine("[UE4] display: viewport query returned " +
+                                               std::to_string((int)vp.X) + "x" + std::to_string((int)vp.Y));
+                        // 64 is the floor for "plausibly a screen". 1x1 is not a screen.
+                        if (vp.X >= 64.f && vp.Y >= 64.f) { vw = vp.X; vh = vp.Y; }
+                        else Cobalt::Log::WriteLine("[UE4] display: implausible - using 1920x1080 instead");
+                    }
                 }
             }
-            Cobalt::Log::WriteLine("[UE4] display: viewport " + std::to_string((int)vw) + "x" + std::to_string((int)vh));
 
             const int brushOff = OffsetOf(image, "Brush");
             void* slateBrushStruct = FindObject("/Script/SlateCore.SlateBrush");
@@ -800,7 +855,24 @@ namespace Nova::UE4
                 Cobalt::Log::WriteLine(std::string("[UE4] display: AddToViewport ") +
                                        (SafePE(widget, addToViewport, &p) ? "ok" : "faulted"));
             }
-            Cobalt::Log::WriteLine("[UE4] display: done - if the bumper is visible, this is it");
+            Cobalt::Log::WriteLine("[UE4] display: done - a CONTROL image should be on screen now;"
+                                   " the video replaces it in 10 seconds");
+
+            // Swap to the video on a timer, from a worker thread that only schedules the swap back
+            // onto the game thread. Ten seconds is long enough to notice the control and short
+            // enough not to be annoying.
+            CreateThread(nullptr, 0, [](LPVOID) -> DWORD
+            {
+                Sleep(10000);
+                RunOnGameThread([]()
+                {
+                    if (!gImage || !gSetBrush || !gTexture) return;
+                    struct { void* Texture; bool MatchSize; char pad[7]; } p{ gTexture, false, {} };
+                    Cobalt::Log::WriteLine(std::string("[UE4] display: swapped to the VIDEO texture ") +
+                                           (SafePE(gImage, gSetBrush, &p) ? "ok" : "faulted"));
+                });
+                return 0;
+            }, nullptr, 0, nullptr);
         }
     }
 
