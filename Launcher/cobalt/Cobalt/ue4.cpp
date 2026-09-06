@@ -1662,7 +1662,9 @@ namespace Nova::UE4
     //             "music" -- no cap, so the base class is always covered -- then push the mix. AND
     //             stop every AudioComponent that is actually playing music outright, so it goes
     //             silent even if the mix override is routed in a way that misses it.
-    //   at end:   restart the music from the top (Stop then Play(0)) and pop the mix.
+    //   at end:   restart from the top whatever the game STILL has playing, and pop the mix. What it
+    //             has moved on from -- the selector screen's loop, once the player is in the lobby --
+    //             stays stopped, or two tracks play at once.
     //
     // "Playing music" is judged by the sound's SoundClassObject, not by the track's name. The class
     // is the game's own routing and is the same whichever pack the player has equipped; a name test
@@ -1858,9 +1860,19 @@ namespace Nova::UE4
             void* acCls = FindObject("/Script/Engine.AudioComponent");
             const int startOff = play ? ParamOffset(play, "StartTime") : -1;
 
-            // What to restart: the components stopped on show, plus any music component that started
-            // DURING the bumper (silenced by the mix override, still to be reset to the top). Deduped.
-            std::vector<void*> targets = gStoppedMusic;
+            // WHAT TO RESTART: only what the game itself still has playing.
+            //
+            // 1.8.5 restarted everything it had stopped as well, and that brought the game-mode
+            // selector's loop (Menu_SubgameSelect_Screen_Loop_Cue) back on top of the lobby track
+            // the game had started during the bumper -- two tracks at once. That loop belongs to a
+            // screen the player has already left. The game had finished with it; stopping it was
+            // right, and putting it back was not.
+            //
+            // So the game's own state decides. Whatever it still considers active is restarted from
+            // the top; whatever it has moved on from stays stopped. The single exception is a silent
+            // end: if nothing at all is playing, what was stopped on show goes back, so this can
+            // never leave the lobby with no music.
+            std::vector<void*> targets;
             if (acCls && isPlaying)
             {
                 const int total = ObjectCount();
@@ -1875,6 +1887,11 @@ namespace Nova::UE4
                     if (!IsMusicComponent(o)) continue;
                     if (std::find(targets.begin(), targets.end(), o) == targets.end()) targets.push_back(o);
                 }
+            }
+            if (targets.empty() && !gStoppedMusic.empty())
+            {
+                targets = gStoppedMusic;
+                Cobalt::Log::WriteLine("[UE4] music: the game started nothing of its own - putting back what was stopped");
             }
 
             int restarted = 0;

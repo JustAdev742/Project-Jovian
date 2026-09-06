@@ -359,6 +359,30 @@ is restarted from the top and the mix popped.
 `music: stopped MusicPack_X_Cue [Fort_Music]` naming the class, then
 `music: restarted … from the top` and `mix popped ok`.
 
+**1.8.5 result: the silencing worked** — 20 classes overridden including `Fort_Music`, and
+`stopped Menu_SubgameSelect_Screen_Loop_Cue [Fort_Music_Menu_PSM]`. See the next entry for what it
+got wrong at the other end.
+
+### `bumper-restarted-music-the-game-had-finished-with` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.6)** · *two soundtracks at once*
+
+**1.8.5 ended the bumper with two tracks playing over each other:** the game-mode selector's loop
+and the lobby music.
+
+At the trigger only one thing was playing — `Menu_SubgameSelect_Screen_Loop_Cue`, the selector
+screen's loop — and it was correctly stopped. During the bumper's seven seconds the game moved on to
+the lobby and started `MusicPack_Default_Cue` of its own accord, silent under the mix. At teardown the
+restart list was **everything stopped on show, plus everything currently playing**, so both were
+played from the top. The selector's loop belongs to a screen the player had already left; the game
+had finished with it, and putting it back was the bug.
+
+**Fix.** The game's own state decides. The restart list is only what the game *still* has playing;
+anything it has moved on from stays stopped. One exception guards against a silent lobby: if nothing
+at all is playing at teardown, what was stopped on show goes back (logged as `the game started
+nothing of its own`).
+
+The general shape, worth remembering: it is safe to take something away from the game for a moment,
+and not safe to decide on the game's behalf that it should come back.
+
 ### `bumper-off-switch-never-worked` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
 
 `BumperEnabled()` built the marker path as `L"\ProjectNova\bumper.off"`. `\P` is an invalid escape
