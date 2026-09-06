@@ -64,6 +64,43 @@ The secret is passed by environment, not argv: command lines are world-readable 
 ---
 
 ### `nova-303-request-escape` · CONFIRMED · **now has a named endpoint** · open
+
+**2026-09-06 — what the git history rules OUT, and one candidate withdrawn.**
+
+**RETRACTED: the "null `CurlSetOpt`" candidate recorded earlier today does not hold.** The theory was
+that 1.4.3's detour called through a null `CurlSetOpt` on every invocation, which VEH masks (the hook
+is often unarmed) but an inline hook would not. `git show 69ac12f` kills it: **1.4.3 had the same
+three `CurlSetOpt` fallback signatures the code has now.** Redirection demonstrably works today, so
+that pointer resolves on 7.40, so it resolved in 1.4.3 too. Withdrawn rather than left standing —
+the fix it prompted (refusing to install when the setter is missing) is still correct on its own
+merits, but it does not explain this.
+
+**What the history DOES establish — the address is not the variable.**
+
+| | 1.4.3 (`69ac12f`) | today |
+|---|---|---|
+| address hooked | `CurlEasySetOpt`, the raw scan result | `CurlEasySetOpt`, the raw scan result |
+| `CurlSetOpt` resolution | 3 signatures, same order | 3 signatures, same order |
+| method | MinHook inline | VEH page-guard, deferred re-arm |
+
+They hook **the same address**. `FindFunctionEntry()` computes `entry` and only ever *logs* it —
+it is never passed to the hook — so all of `IsRcxSpill`, `SafeRead` and `FindFunctionEntry` are
+diagnostics, not behaviour. The byte dump that proved the scan point is the true entry therefore
+removed the only address-based explanation without changing what either version targeted.
+
+**So the remaining variable is the hooking method alone, at a correct entry.** Two theories were
+raised and both fail on inspection:
+
+- *Loader lock.* `DllMain` does `CreateThread(0, 0, Main, 0, 0, 0)` rather than working inline, and
+  that thread cannot run until the lock is released. MinHook's thread suspension is not fighting it.
+- *Mid-prologue patch.* Ruled out by the byte dump — the scan point is the first instruction.
+
+The live one, untested and explicitly not shipped: MinHook's `Freeze()` suspends every other thread
+and rewrites instruction pointers that land inside the relocated bytes. The Frontend map load is
+exactly when curl traffic peaks across threads. That is a hypothesis, not a finding.
+
+**Still: do not ship an inline hook without reproducing the crash.** The bar in the original comment
+was "understand it first", and narrowing the variable is not the same as understanding it.
 A request escapes Cobalt's redirect and reaches Epic's live servers. Observed 2026-08-15 07:48:55 in
 `FortniteGame.log`:
 
@@ -202,12 +239,12 @@ checks it**. Installing the detour with it unresolved calls through null on the 
 failure status and raises `VERSION_MISMATCH`. The game then runs unredirected and says why, which is
 recoverable; a null-deref inside a curl call is not, and looks like the game crashing on its own.
 
-**Bearing on `nova-303-request-escape`:** this is the first mechanism found that fits the unexplained
-1.4.3 inline-hook crash. Under VEH the detour is frequently unarmed, so a null `CurlSetOpt` is
-survivable-ish; an inline hook runs the detour on *every* call, turning the same latent null into an
-immediate hard crash while loading the Frontend map — which is the reported symptom. **Not asserted
-as the cause** (`CurlSetOpt` does resolve on 7.40 today, since redirection works), but recorded so
-the next attempt at an inline hook starts from a hypothesis rather than nothing.
+**Bearing on `nova-303-request-escape`: WITHDRAWN 2026-09-06, same day it was raised.** This was
+offered as a candidate explanation for the unexplained 1.4.3 inline-hook crash — a null `CurlSetOpt`
+being survivable under VEH but fatal under an inline hook. `git show 69ac12f` disproves it: 1.4.3
+carried the same three `CurlSetOpt` fallback signatures the code has now, and the pointer resolves on
+7.40 (redirection works), so it resolved then too. The guard stands on its own merits; it explains
+nothing about 1.4.3.
 
 ### `minhook-null-aliases-all-hooks` · CONFIRMED · **FIXED 2026-09-06**
 `MH_ALL_HOOKS` is `#define`d to `NULL` (`vendor/MinHook/MinHook.h:88`), so `MH_EnableHook(nullptr)`

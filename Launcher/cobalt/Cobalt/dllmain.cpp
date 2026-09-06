@@ -256,13 +256,15 @@ bool InitializeCurlHook()
         // recoverable and diagnosable. A null-deref inside a curl call is neither, and it looks
         // exactly like the game crashing for its own reasons.
         //
-        // Worth noting against `nova-303-request-escape`: this is a candidate explanation for the
-        // 1.4.3 inline-hook crash that KNOWN_ISSUES records as unexplained. Under VEH the detour is
-        // frequently unarmed, so a null CurlSetOpt is survivable-ish; an inline hook runs the detour
-        // on EVERY call, which would turn the same latent null into an immediate hard crash while
-        // loading the Frontend map. NOT asserted as the cause — CurlSetOpt does resolve on 7.40
-        // today, since redirection works — but it is the first mechanism found that fits the
-        // symptom, and it is recorded rather than lost.
+        // This was briefly offered as an explanation for the 1.4.3 inline-hook crash — a null
+        // CurlSetOpt being survivable under VEH (the detour is often unarmed) but fatal under an
+        // inline hook that runs it on every call. THAT IS WITHDRAWN: `git show 69ac12f` shows 1.4.3
+        // carried the same three CurlSetOpt fallback signatures this file has now, and the pointer
+        // demonstrably resolves on 7.40 since redirection works. It resolved in 1.4.3 too.
+        //
+        // The guard below stands on its own merits regardless — installing a detour that calls
+        // through a null pointer is wrong whatever explains 1.4.3. See KNOWN_ISSUES
+        // nova-303-request-escape for what the history does and does not rule out.
         std::cout << "Failed to find CurlSetOptAddr - REFUSING to install the curl hook.\n";
         std::cout << "  Every detour path calls it; installing now would null-deref on the first "
                      "curl call.\n";
