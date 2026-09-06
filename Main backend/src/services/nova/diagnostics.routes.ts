@@ -1,7 +1,10 @@
 import { FastifyInstance } from 'fastify';
 import { requireAuth } from '../../middleware/auth.middleware';
 import { Config } from '../../config';
-import { recordDiagnostic, getDiagnostics, getDiagnosticsSummary } from './diagnostics';
+import {
+  recordDiagnostic, getDiagnostics, getDiagnosticsSummary,
+  subscribeDiagnostics, diagnosticSubscriberCount,
+} from './diagnostics';
 import { parseBatch, LIMITS } from './diagnostics.schema';
 import { buildIncidents, incidentId } from './incidents';
 import { renderDashboard } from './dashboard';
@@ -287,6 +290,92 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     const incidents = buildIncidents(getDiagnostics({ limit: 400 }));
     reply.header('content-type', 'text/html; charset=utf-8');
     return reply.send(renderDashboard({ summary: getDiagnosticsSummary(), incidents }));
+  });
+
+  /**
+   * GET /nova/api/diagnostics/stream — Server-Sent Events, one message per diagnostic as it lands.
+   *
+   * ── WHY SSE AND NOT A WEBSOCKET, AND NOT POLLING ─────────────────────────────────────────────
+   *
+   * The traffic is one-directional: the server has news, the page listens. SSE is that exactly, it
+   * is plain HTTP so it survives the Cloudflare tunnel and any proxy in between without an upgrade
+   * negotiation, and browsers reconnect it automatically. A WebSocket would add a bidirectional
+   * channel nothing needs, and this backend's WS path is already shared with XMPP and matchmaking —
+   * see `ws-root-path-fabricates-matchmaking` in KNOWN_ISSUES for what happens when something
+   * unexpected connects there. Staying off that path entirely is the safer design.
+   *
+   * Polling was rejected on the brief's own terms: it cannot show WHEN something happened, only that
+   * a number changed between two samples, and the interesting case — a burst between polls — is
+   * exactly the one it loses.
+   *
+   * ── BOUNDED, AND IT SAYS SO WHEN IT IS FULL ──────────────────────────────────────────────────
+   *
+   * `subscribeDiagnostics` returns null at capacity rather than accepting a connection that would
+   * receive nothing. A 503 is visible; a silent dead stream is the failure mode this whole subsystem
+   * exists to eliminate.
+   *
+   * The heartbeat is not decoration: an idle SSE connection through a proxy is indistinguishable
+   * from a dead one, and both Cloudflare and most reverse proxies will close it. A comment frame
+   * every 20s keeps it open and lets the page tell "quiet" from "broken".
+   */
+  fastify.get('/nova/api/diagnostics/stream', async (request, reply) => {
+    if (!adminOk(request)) return adminRefused(reply);
+
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Cloudflare and nginx both buffer by default, which turns a live stream into a stalled one.
+      'x-accel-buffering': 'no',
+    });
+
+    const send = (event: string, data: unknown) => {
+      try {
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // The socket went away between the check and the write. Nothing to do and nothing to log —
+        // cleanup below handles it, and a disconnect is not a diagnostic.
+      }
+    };
+
+    const unsubscribe = subscribeDiagnostics((e) => send('diagnostic', e));
+    if (!unsubscribe) {
+      send('error', { error: 'too many live subscribers', limit: true });
+      reply.raw.end();
+      return;
+    }
+
+    // Tell the new subscriber where things stand, so a page that connects mid-incident is not blank
+    // until the next failure happens.
+    send('hello', {
+      summary: getDiagnosticsSummary(),
+      subscribers: diagnosticSubscriberCount(),
+      serverTime: new Date().toISOString(),
+    });
+
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(': keepalive\n\n');
+      } catch {
+        /* same as above — the cleanup path owns this */
+      }
+    }, 20_000);
+    heartbeat.unref?.();
+
+    // ONE cleanup path, registered for every way this can end. Leaking a listener per dropped
+    // connection would silently consume the subscriber budget until the stream stopped accepting
+    // anyone, and the symptom — "live updates stopped working" — would point nowhere near the cause.
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    request.raw.on('close', cleanup);
+    request.raw.on('error', cleanup);
+    reply.raw.on('close', cleanup);
+    reply.raw.on('error', cleanup);
   });
 }
 

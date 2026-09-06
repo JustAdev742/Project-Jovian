@@ -166,6 +166,26 @@ button{
 button[aria-pressed="true"]{background:var(--focus); color:#0F172A; border-color:var(--focus)}
 button:hover{background:#33405A}
 .filters{display:flex; gap:var(--s2); flex-wrap:wrap; margin-bottom:var(--s4)}
+
+/* Live tail. Deliberately quiet: it must not compete with the ranked incident list for attention,
+   and it is read on a phone in a dark room. */
+.live{background:var(--card); border:1px solid var(--border); border-radius:6px; padding:var(--s3) var(--s4); margin-bottom:var(--s4)}
+.live h2{font-size:13px; font-weight:600; margin:0 0 var(--s2); display:flex; align-items:center; gap:var(--s2); color:var(--fg-dim)}
+/* Connection state carries a SHAPE and a LABEL, never colour alone — the whole page follows that
+   rule so it stays readable for colour-blind users and in a washed-out phone screen. */
+.dot{width:8px; height:8px; border-radius:50%; flex:none; background:var(--fg-dim)}
+.dot.ok{background:#4ADE80}
+.dot.bad{background:#F87171; border-radius:1px}
+.dot.wait{background:#FBBF24; border-radius:2px}
+.feed{list-style:none; margin:0; padding:0; max-height:190px; overflow-y:auto; font-size:12px}
+.feed li{display:flex; gap:var(--s2); align-items:baseline; padding:3px 0; border-bottom:1px solid rgba(100,116,139,.18)}
+.feed li:last-child{border-bottom:0}
+.feed time{color:var(--fg-dim); font-variant-numeric:tabular-nums; flex:none}
+.feed b{font-weight:600; flex:none}
+.feed span{color:var(--fg-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.feed em{margin-left:auto; font-style:normal; color:var(--fg-dim); flex:none}
+.feed li.fresh b{color:var(--focus)}
+.live .hint{margin:var(--s2) 0 0; font-size:11px; color:var(--fg-dim)}
 @media (prefers-reduced-motion: reduce){ *{transition:none !important; animation:none !important} }
 @media (min-width:760px){ .row1{flex-wrap:nowrap} .title{font-size:15px} }
 `;
@@ -264,24 +284,74 @@ export function renderDashboard(data: DashboardData | null): string {
         .join('')
     : `<div class="empty">Nothing has failed. This is the correct and boring state.</div>`;
 
-  // The only script on the page: a client-side severity filter over already-rendered rows. No
-  // fetching, no polling — a reload is the refresh, and it cannot get stuck in a broken state.
+  // Two scripts, both inline and dependency-free for the same reason the page is server-rendered:
+  // it is read on a phone, over a tunnel, while something is on fire.
+  //
+  //   1. A severity filter over already-rendered rows.
+  //   2. A live tail on /nova/api/diagnostics/stream (SSE).
+  //
+  // THE LIVE TAIL IS ADDITIVE, NOT LOAD-BEARING. The server-rendered incident list below is the
+  // authoritative view and is complete without any script running at all. If the stream is refused,
+  // blocked by a proxy, or the browser has no EventSource, the page still shows everything it did
+  // before — it just stops saying "live". A dashboard whose content depends on a socket is a
+  // dashboard that shows nothing at the exact moment the network is the problem.
+  //
+  // Auth: EventSource cannot set headers, so the secret is carried the way the page itself was
+  // opened — from location.search. It is never written into the document, so it stays out of the
+  // rendered HTML and out of anything saved from it.
   const script = `
 <script>
 (function(){
   var list=document.getElementById('list');
-  if(!list) return;
-  document.querySelectorAll('[data-filter]').forEach(function(btn){
-    btn.addEventListener('click',function(){
-      var want=btn.getAttribute('data-filter');
-      document.querySelectorAll('[data-filter]').forEach(function(b){
-        b.setAttribute('aria-pressed', String(b===btn));
-      });
-      list.querySelectorAll('li.incident').forEach(function(li){
-        li.hidden = want!=='ALL' && li.querySelector('.sev').textContent.indexOf(want)===-1;
+  if(list){
+    document.querySelectorAll('[data-filter]').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        var want=btn.getAttribute('data-filter');
+        document.querySelectorAll('[data-filter]').forEach(function(b){
+          b.setAttribute('aria-pressed', String(b===btn));
+        });
+        list.querySelectorAll('li.incident').forEach(function(li){
+          li.hidden = want!=='ALL' && li.querySelector('.sev').textContent.indexOf(want)===-1;
+        });
       });
     });
+  }
+
+  var dot=document.getElementById('livedot'), lab=document.getElementById('livelabel'),
+      feed=document.getElementById('feed'), seen=0;
+  if(!feed||typeof EventSource==='undefined'){ if(lab) lab.textContent='live updates unavailable'; return; }
+
+  function state(cls,text){ if(dot) dot.className='dot '+cls; if(lab) lab.textContent=text; }
+
+  var qs=new URLSearchParams(location.search), secret=qs.get('secret');
+  var url='/nova/api/diagnostics/stream'+(secret?('?secret='+encodeURIComponent(secret)):'');
+  var es;
+  try{ es=new EventSource(url); }catch(e){ state('bad','live updates unavailable'); return; }
+
+  es.addEventListener('hello',function(){ state('ok','live'); });
+
+  es.addEventListener('diagnostic',function(m){
+    var d; try{ d=JSON.parse(m.data); }catch(e){ return; }
+    seen++;
+    var li=document.createElement('li');
+    // textContent throughout — never innerHTML. Every field here originates from a client-reported
+    // URL, and the server escapes for ITS render, not for ours.
+    var t=document.createElement('time'); t.textContent=new Date(d.at).toLocaleTimeString();
+    var c=document.createElement('b');    c.textContent=d.category;
+    var r=document.createElement('span'); r.textContent=d.method+' '+d.route;
+    var n=document.createElement('em');   n.textContent=d.isNew?'new':('x'+d.count);
+    li.appendChild(t); li.appendChild(c); li.appendChild(r); li.appendChild(n);
+    if(d.isNew) li.className='fresh';
+    feed.insertBefore(li,feed.firstChild);
+    // Bounded in the DOM as well as on the wire: an unbounded feed is a memory leak on a page that
+    // is meant to be left open for hours.
+    while(feed.childNodes.length>60) feed.removeChild(feed.lastChild);
+    state('ok','live · '+seen+' since load');
   });
+
+  // EventSource reconnects on its own; say so rather than looking dead. The incident list below
+  // remains valid throughout — it is server-rendered and does not depend on this connection.
+  es.onerror=function(){ state('bad','reconnecting…'); };
 })();
 </script>`;
 
@@ -294,6 +364,16 @@ export function renderDashboard(data: DashboardData | null): string {
     `<main>` +
     banner +
     `<div class="tiles">${tiles}</div>` +
+    // The live tail sits ABOVE the incident list because it answers a different question: the list
+    // says what is broken, this says what is happening right now. During an incident the second is
+    // what you watch.
+    `<section class="live" aria-live="polite">` +
+      `<h2><span class="dot wait" id="livedot"></span>` +
+      `<span id="livelabel">connecting…</span></h2>` +
+      `<ol class="feed" id="feed"></ol>` +
+      `<p class="hint">Newest first. The list below is server-rendered and stays correct even if ` +
+      `this stream drops — reload for a full recount.</p>` +
+    `</section>` +
     `<div class="filters">` +
       `<button data-filter="ALL" aria-pressed="true">All</button>` +
       (['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const)

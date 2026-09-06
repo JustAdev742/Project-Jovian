@@ -281,6 +281,74 @@ function userTag(accountId: string): string {
  * Record one diagnostic event. Cheap and non-throwing: this sits on the request path, so it must
  * never be the reason a request fails.
  */
+// ── LIVE SUBSCRIBERS ─────────────────────────────────────────────────────────────────────────────
+//
+// The dashboard was a static snapshot: an administrator watching for a problem had to keep hitting
+// reload, and anything that happened between reloads was only visible as a number that had moved.
+// Subscribers get told the moment a diagnostic lands, so the page can show the event itself.
+//
+// THREE THINGS THIS DELIBERATELY IS NOT:
+//
+//   * It is not a queue. There is no buffering, no replay and no delivery guarantee. A subscriber
+//     that is slow or gone simply misses events; the authoritative state is still `entries`, which
+//     the page can re-read at any time. Buffering per-subscriber is how a telemetry channel turns
+//     into a memory leak.
+//   * It is not allowed to fail a request. Every callback runs inside its own try/catch, so a
+//     broken subscriber cannot propagate an exception back into `recordDiagnostic` — which is
+//     called from error paths, where throwing would replace the error being recorded.
+//   * It is not unbounded. MAX_SUBSCRIBERS caps how many can attach at once; past that, new
+//     connections are refused rather than accepted and quietly starved.
+
+type DiagnosticListener = (event: LiveDiagnosticEvent) => void;
+
+/** What a subscriber is told. Deliberately small — the dashboard re-reads full state separately. */
+export interface LiveDiagnosticEvent {
+  category: string;
+  source: string;
+  method: string;
+  route: string;
+  version: string;
+  subsystem: string;
+  status?: number;
+  /** The running total for this key AFTER this occurrence, not the delta. */
+  count: number;
+  at: string;
+  /** True the first time a key is seen, so the UI can distinguish "new problem" from "again". */
+  isNew: boolean;
+}
+
+const MAX_SUBSCRIBERS = 16;
+const listeners = new Set<DiagnosticListener>();
+
+/**
+ * Attach a live listener. Returns an unsubscribe function, or null when at capacity.
+ *
+ * Returning null rather than throwing keeps the decision with the caller: the SSE route turns it
+ * into a 503 the administrator can see, instead of a connection that silently receives nothing.
+ */
+export function subscribeDiagnostics(fn: DiagnosticListener): (() => void) | null {
+  if (listeners.size >= MAX_SUBSCRIBERS) return null;
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+/** How many live subscribers are attached. Exposed so the dashboard can show its own plumbing. */
+export function diagnosticSubscriberCount(): number {
+  return listeners.size;
+}
+
+function emitLive(event: LiveDiagnosticEvent): void {
+  for (const fn of listeners) {
+    try {
+      fn(event);
+    } catch {
+      // A broken subscriber is the subscriber's problem. Swallowed on purpose and ONLY here:
+      // recordDiagnostic is called from error handlers, so an exception escaping this loop would
+      // destroy the very record it was reporting.
+    }
+  }
+}
+
 export function recordDiagnostic(input: DiagnosticInput): void {
   try {
     const route = normaliseRoute(input.url);
@@ -296,6 +364,7 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     const nowIso = new Date(nowMs).toISOString();
 
     let e = entries.get(key);
+    const isNew = !e;
     if (!e) {
       if (entries.size >= MAX_KEYS) evictOne(nowMs);
       e = {
@@ -334,6 +403,14 @@ export function recordDiagnostic(input: DiagnosticInput): void {
     // entries, which is enough for the severity model's growth term but far too short to establish
     // a BASELINE — and without a baseline "is this getting worse" is unanswerable. See incidents.ts.
     noteOccurrence(key, input.count ?? 1, nowMs);
+
+    // LAST, on purpose. Everything above has already been committed to `entries`, so a subscriber
+    // reacting to this event and re-reading state sees it — and a listener that misbehaves cannot
+    // leave the store half-updated, because there is nothing left to update.
+    emitLive({
+      category: input.category, source, method: input.method, route, version, subsystem,
+      status: input.status, count: e.count, at: nowIso, isNew,
+    });
   } catch {
     /* diagnostics must never break a request */
   }
