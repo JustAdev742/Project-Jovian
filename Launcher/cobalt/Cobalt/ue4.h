@@ -94,6 +94,18 @@ namespace Nova::UE4
     void TryDecodeBumper();
 
     /**
+     * Put a media texture on screen: build a widget tree by hand, point an Image at the texture,
+     * and add it to the viewport.
+     *
+     * Runs on the GAME THREAD. Constructing a MediaPlayer off-thread happened to work; Slate will
+     * not be so forgiving, and this DLL is in every player's client.
+     */
+    void ShowBumper(void* player, void* texture);
+
+    /** Schedule a callback onto the game thread via a ProcessEvent detour. */
+    bool RunOnGameThread(void (*task)());
+
+    /**
      * Log what resolved and which classes the bumper needs are actually live.
      *
      * THIS IS THE POINT OF THE FIRST BUILD. A binary scan can only say a string exists in the

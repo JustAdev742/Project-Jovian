@@ -5,6 +5,7 @@
 #include <vector>
 #include <atomic>
 #include <algorithm>
+#include <MinHook/MinHook.h>
 
 namespace Nova::UE4
 {
@@ -138,6 +139,10 @@ namespace Nova::UE4
 
         std::atomic<bool> gInitialised{ false };
         std::atomic<bool> gResolved{ false };
+
+        /** Set when the ProcessEvent detour is live; the trampoline back to the engine's own. */
+        bool gHookInstalled = false;
+        ProcessEventFn gProcessEventOriginal = nullptr;
     }
 
     bool Init()
@@ -545,6 +550,184 @@ namespace Nova::UE4
             SafePE(player, play, &pr);
             Cobalt::Log::WriteLine(std::string("[UE4] Play returned: ") + (pr.Return ? "TRUE" : "false"));
         }
+
+        // Decoding is proven. Hand it to the display step, which runs on the game thread.
+        if (tex) ShowBumper(player, tex);
+    }
+
+    // ── PROPERTY OFFSETS ─────────────────────────────────────────────────────────────────────────
+    //
+    // Needed because the display path has to WRITE two properties that no UFunction exposes:
+    // UUserWidget::WidgetTree and UWidgetTree::RootWidget. Everything up to now got by with
+    // functions alone.
+    //
+    // The walk is Reboot's, and it is small because StaticFindObject already does the hard part:
+    // a UProperty is an object whose Outer is the class that declares it, so finding one is the
+    // same lookup as finding anything else, with Class and Outer supplied.
+    //
+    // 4.22 layout, from Project Reboot/patterns.h: InternalOffset 0x44, SuperStruct 0x40.
+    namespace
+    {
+        constexpr int kOffset_InternalOffset = 0x44;
+        constexpr int kOffset_SuperStruct = 0x40;
+
+        void* SafeStaticFindIn(void* cls, void* outer, const wchar_t* name)
+        {
+            __try { return gStaticFindObject(cls, outer, name, false); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        }
+
+        void* SafeDeref(void* base, int off)
+        {
+            __try { return *(void**)((char*)base + off); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        }
+
+        int SafeReadInt(void* base, int off)
+        {
+            __try { return *(int*)((char*)base + off); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+        }
+
+        bool SafeWritePtr(void* base, int off, void* value)
+        {
+            __try { *(void**)((char*)base + off) = value; return true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+
+        /** Offset of a named property on an object's class, walking up the super chain. -1 if absent. */
+        int OffsetOf(void* obj, const std::string& member)
+        {
+            if (!Ready() || !obj) return -1;
+            static void* propClass = FindObject("/Script/CoreUObject.Property");
+            if (!propClass) return -1;
+
+            const std::wstring wide(member.begin(), member.end());
+            for (void* cls = SafeClassOf(obj); cls; cls = SafeDeref(cls, kOffset_SuperStruct))
+            {
+                if (void* prop = SafeStaticFindIn(propClass, cls, wide.c_str()))
+                    return SafeReadInt(prop, kOffset_InternalOffset);
+            }
+            return -1;
+        }
+    }
+
+    // ── GAME-THREAD HOP ──────────────────────────────────────────────────────────────────────────
+    //
+    // Constructing a MediaPlayer off-thread happened to work. Slate will not be so forgiving:
+    // building widgets and calling AddToViewport from a worker thread is the kind of thing that
+    // crashes a player's game rather than logging a failure, and this DLL is in everyone's client.
+    //
+    // ProcessEvent is called constantly and overwhelmingly from the game thread, so hooking it gives
+    // a cheap ride there. The detour is one relaxed atomic load in the common case; the task is run
+    // once and the flag cleared, so the steady-state cost after that is the same load returning
+    // false forever.
+    namespace
+    {
+        std::atomic<bool> gTaskPending{ false };
+        void (*gTask)() = nullptr;
+
+        void ProcessEventDetour(void* obj, void* fn, void* params)
+        {
+            if (gTaskPending.load(std::memory_order_relaxed))
+            {
+                // Clear FIRST. If the task faults, it must not be retried on every subsequent
+                // ProcessEvent call for the rest of the session.
+                bool expected = true;
+                if (gTaskPending.compare_exchange_strong(expected, false) && gTask)
+                {
+                    __try { gTask(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                }
+            }
+            gProcessEventOriginal(obj, fn, params);
+        }
+    }
+
+    bool RunOnGameThread(void (*task)())
+    {
+        if (!gResolved.load() || !task) return false;
+        if (!gHookInstalled)
+        {
+            if (MH_CreateHook((LPVOID)gProcessEvent, &ProcessEventDetour,
+                              (LPVOID*)&gProcessEventOriginal) != MH_OK) return false;
+            if (MH_EnableHook((LPVOID)gProcessEvent) != MH_OK) return false;
+            gHookInstalled = true;
+            Cobalt::Log::WriteLine("[UE4] game-thread hook installed");
+        }
+        gTask = task;
+        gTaskPending.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    // ── DISPLAY ──────────────────────────────────────────────────────────────────────────────────
+    //
+    // A UUserWidget created from native code has no WidgetTree -- normally the blueprint's generated
+    // class supplies one -- so it adds to the viewport and draws nothing. The tree and its root have
+    // to be built by hand, which is what the property offsets above are for.
+    namespace
+    {
+        void* gPlayer = nullptr;
+        void* gTexture = nullptr;
+
+        void BuildAndShow()
+        {
+            if (!gTexture) { Cobalt::Log::WriteLine("[UE4] display: no texture"); return; }
+
+            void* transient = FindObject("/Engine/Transient");
+            void* userWidgetCls = FindObject("/Script/UMG.UserWidget");
+            void* widgetTreeCls = FindObject("/Script/UMG.WidgetTree");
+            void* imageCls = FindObject("/Script/UMG.Image");
+            if (!transient || !userWidgetCls || !widgetTreeCls || !imageCls)
+            {
+                Cobalt::Log::WriteLine("[UE4] display: a UMG class is missing (UserWidget/WidgetTree/Image)");
+                return;
+            }
+
+            void* widget = SpawnObject(userWidgetCls, transient);
+            void* tree = widget ? SpawnObject(widgetTreeCls, widget) : nullptr;
+            void* image = tree ? SpawnObject(imageCls, tree) : nullptr;
+            Cobalt::Log::WriteLine(std::string("[UE4] display: widget=") + (widget ? "ok" : "FAIL") +
+                                   " tree=" + (tree ? "ok" : "FAIL") + " image=" + (image ? "ok" : "FAIL"));
+            if (!widget || !tree || !image) return;
+
+            const int treeOff = OffsetOf(widget, "WidgetTree");
+            const int rootOff = OffsetOf(tree, "RootWidget");
+            Cobalt::Log::WriteLine("[UE4] display: WidgetTree@" + std::to_string(treeOff) +
+                                   " RootWidget@" + std::to_string(rootOff));
+            if (treeOff < 0 || rootOff < 0)
+            {
+                Cobalt::Log::WriteLine("[UE4] display: could not locate the properties to wire the tree");
+                return;
+            }
+            SafeWritePtr(tree, rootOff, image);
+            SafeWritePtr(widget, treeOff, tree);
+
+            // ProcessEvent does not type-check, so the MediaTexture goes straight into the brush's
+            // resource slot even though the parameter is declared UTexture2D*. Slate draws whatever
+            // the brush's ResourceObject is.
+            if (void* setBrush = FindObject("/Script/UMG.Image.SetBrushFromTexture"))
+            {
+                struct { void* Texture; bool MatchSize; char pad[7]; } p{ gTexture, false, {} };
+                Cobalt::Log::WriteLine(std::string("[UE4] display: SetBrushFromTexture ") +
+                                       (SafePE(image, setBrush, &p) ? "ok" : "faulted"));
+            }
+
+            if (void* addToViewport = FindObject("/Script/UMG.UserWidget.AddToViewport"))
+            {
+                struct { int ZOrder; } p{ 9999 };
+                Cobalt::Log::WriteLine(std::string("[UE4] display: AddToViewport ") +
+                                       (SafePE(widget, addToViewport, &p) ? "ok" : "faulted"));
+            }
+            Cobalt::Log::WriteLine("[UE4] display: done - if the bumper is visible, this is it");
+        }
+    }
+
+    void ShowBumper(void* player, void* texture)
+    {
+        gPlayer = player;
+        gTexture = texture;
+        if (!RunOnGameThread(&BuildAndShow))
+            Cobalt::Log::WriteLine("[UE4] display: could not schedule onto the game thread");
     }
 
     void SelfTest()
