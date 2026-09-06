@@ -777,18 +777,40 @@ namespace Nova::UE4
             //
             // So: find the live World, get its local PlayerController, and let UMG's own factory
             // build the widget with that context instead of constructing it bare.
-            void* world = FindWorld();
+            // WAIT FOR A PLAYER, do not ask once.
+            //
+            // Last build found a World and no PlayerController, so Create returned null and it fell
+            // back to bare construction -- which has no world, so AddToViewport had nothing to add
+            // to. The display ran ~15s in, before the frontend map had even loaded; there was no
+            // local player yet.
+            //
+            // This is the third time in this subsystem that the answer was "too early" (the media
+            // factory, the UFunction probes, now this), so it retries rather than picking a moment.
+            // It also tries EVERY live World, because "the last World object in the array" is not
+            // necessarily the one the player is in.
+            void* world = nullptr;
             void* pc = nullptr;
-            if (world)
+            void* getPC = FindObject("/Script/Engine.GameplayStatics.GetPlayerController");
+            void* gs = FindObject("/Script/Engine.Default__GameplayStatics");
+            void* worldCls = FindObject("/Script/Engine.World");
+
+            for (int attempt = 1; attempt <= 40 && !pc; ++attempt)
             {
-                if (void* getPC = FindObject("/Script/Engine.GameplayStatics.GetPlayerController"))
+                if (worldCls && getPC && gs)
                 {
-                    if (void* gs = FindObject("/Script/Engine.Default__GameplayStatics"))
+                    const int total = ObjectCount();
+                    for (int i = 0; i < total && !pc; ++i)
                     {
-                        struct { void* World; int Index; char pad[4]; void* Return; } p{ world, 0, {}, nullptr };
-                        if (SafePE(gs, getPC, &p)) pc = p.Return;
+                        void* o = GetObjectByIndex(i);
+                        if (!o || SafeClassOf(o) != worldCls) continue;
+                        struct { void* World; int Index; char pad[4]; void* Return; } p{ o, 0, {}, nullptr };
+                        if (SafePE(gs, getPC, &p) && p.Return) { world = o; pc = p.Return; }
                     }
                 }
+                if (pc) break;
+                if (attempt == 1)
+                    Cobalt::Log::WriteLine("[UE4] display: no local player yet - waiting for the frontend");
+                Sleep(3000);
             }
             Cobalt::Log::WriteLine(std::string("[UE4] display: world=") + (world ? "found" : "MISSING") +
                                    " playerController=" + (pc ? "found" : "MISSING"));
@@ -987,6 +1009,65 @@ namespace Nova::UE4
             Cobalt::Log::WriteLine("[UE4] display: could not schedule onto the game thread");
     }
 
+    void EnumerateCinematics()
+    {
+        if (!Ready()) return;
+
+        // THE GAME ALREADY PLAYS LOCAL MP4s. FortniteGame/Content/Movies/Events/Winter2018.mp4 is
+        // the Season 7 intro, and it ships with subtitle files -- which is what FortMediaSubtitlesPlayer
+        // is for. So there IS a working local-video path in this build; four builds have been spent
+        // constructing a replacement for it instead of finding it.
+        //
+        // The movie filenames are absent from the executable because they are referenced from data
+        // assets inside the paks, not from C++ literals. So this looks for the machinery at runtime:
+        // the subtitles player, anything media-shaped Fortnite defines itself, and any live
+        // FileMediaSource or MediaPlayer ASSET (as opposed to the class defaults the census already
+        // reported).
+        static const char* kProbes[] = {
+            "/Script/FortniteGame.FortMediaSubtitlesPlayer",
+            "/Script/FortniteGame.Default__FortMediaSubtitlesPlayer",
+            "/Script/MediaAssets.MediaSource",
+            "/Script/MediaAssets.StreamMediaSource",
+            "/Script/MediaAssets.MediaSoundComponent",
+            "/Script/Engine.Default__GameViewportClient",
+        };
+        for (const char* p : kProbes)
+            Cobalt::Log::WriteLine(std::string("[UE4] cine: ") + (FindObject(p) ? "FOUND   " : "missing ") + p);
+
+        // Every class Fortnite itself declares whose name looks cinematic. One name lookup per
+        // distinct class, same as the media census.
+        void* fortMediaCls = FindObject("/Script/FortniteGame.FortMediaSubtitlesPlayer");
+        std::vector<void*> seen;
+        seen.reserve(4096);
+        int hits = 0;
+        const int total = ObjectCount();
+        for (int i = 0; i < total && hits < 25; ++i)
+        {
+            void* o = GetObjectByIndex(i);
+            if (!o) continue;
+            void* cls = SafeClassOf(o);
+            if (!cls) continue;
+            if (cls == fortMediaCls)
+            {
+                Cobalt::Log::WriteLine("[UE4] cine: LIVE FortMediaSubtitlesPlayer -> " +
+                                       GetName(reinterpret_cast<UObject*>(o)));
+                ++hits;
+                continue;
+            }
+            if (std::find(seen.begin(), seen.end(), cls) != seen.end()) continue;
+            seen.push_back(cls);
+            const std::string n = GetName(reinterpret_cast<UObject*>(cls));
+            if (n.empty()) continue;
+            if (n.find("Cine") != std::string::npos || n.find("Subtitle") != std::string::npos ||
+                (n.find("Fort") == 0 && n.find("Media") != std::string::npos))
+            {
+                Cobalt::Log::WriteLine("[UE4] cine: class " + n);
+                ++hits;
+            }
+        }
+        Cobalt::Log::WriteLine("[UE4] cine: " + std::to_string(hits) + " cinematic-shaped item(s)");
+    }
+
     void SelfTest()
     {
         if (!Ready())
@@ -1064,6 +1145,7 @@ namespace Nova::UE4
             {
                 Cobalt::Log::WriteLine("[UE4] everything the bumper needs is live - stopping probe");
                 EnumerateMedia();
+                EnumerateCinematics();
                 TryDecodeBumper();
                 return;
             }

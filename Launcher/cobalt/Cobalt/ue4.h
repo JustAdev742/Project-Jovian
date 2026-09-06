@@ -82,6 +82,9 @@ namespace Nova::UE4
      */
     void EnumerateMedia();
 
+    /** Find the game's OWN cinematic player -- it already plays local mp4s from Content/Movies. */
+    void EnumerateCinematics();
+
     /**
      * Try to actually decode the bumper: construct a MediaPlayer, open the file, bind a
      * MediaTexture, and report what happened.
