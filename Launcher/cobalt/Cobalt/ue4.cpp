@@ -738,6 +738,14 @@ namespace Nova::UE4
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
 
+        /** Walk the SuperStruct chain to test inheritance. */
+        bool IsSubclassOf(void* cls, void* base)
+        {
+            for (void* c = cls; c; c = SafeDeref(c, kOffset_SuperStruct))
+                if (c == base) return true;
+            return false;
+        }
+
         /** The live UWorld, found by walking the object array for one. */
         void* FindWorld()
         {
@@ -815,27 +823,77 @@ namespace Nova::UE4
             Cobalt::Log::WriteLine(std::string("[UE4] display: world=") + (world ? "found" : "MISSING") +
                                    " playerController=" + (pc ? "found" : "MISSING"));
 
+            // UUserWidget IS ABSTRACT, which is why Create kept returning null even once a
+            // PlayerController existed.
+            //
+            // UE4 declares it UCLASS(Abstract), and CreateWidgetInstance refuses any class with
+            // CLASS_Abstract. The bare-construction fallback DID produce an object -- SpawnObject
+            // does not check -- but an abstract base with none of the setup Create performs, which
+            // is exactly why AddToViewport has reported ok and drawn nothing for five builds. Every
+            // layer under it (world, player, GC, size) was a real bug and none of them was THE bug.
+            //
+            // So: find a concrete subclass the game already defines and let Create build that. The
+            // test is Create's own return value rather than reading class flags -- if it hands back
+            // a widget, the class was acceptable by definition, and that needs no offset for
+            // CLASS_Abstract and cannot disagree with the engine.
             void* widget = nullptr;
-            if (world)
+            void* usedClass = nullptr;
+            void* create = FindObject("/Script/UMG.WidgetBlueprintLibrary.Create");
+            void* lib = FindObject("/Script/UMG.Default__WidgetBlueprintLibrary");
+
+            if (world && create && lib)
             {
-                if (void* create = FindObject("/Script/UMG.WidgetBlueprintLibrary.Create"))
+                // Try the base first, purely to record that it is refused.
                 {
-                    if (void* lib = FindObject("/Script/UMG.Default__WidgetBlueprintLibrary"))
+                    struct { void* WorldContext; void* WidgetType; void* OwningPlayer; void* Return; }
+                        p{ world, userWidgetCls, pc, nullptr };
+                    if (SafePE(lib, create, &p) && p.Return) { widget = p.Return; usedClass = userWidgetCls; }
+                    Cobalt::Log::WriteLine(std::string("[UE4] display: Create(UserWidget base) ") +
+                                           (widget ? "ok" : "refused - class is abstract, as expected"));
+                }
+
+                // Then walk for concrete subclasses and take the first one Create accepts.
+                if (!widget)
+                {
+                    const int total = ObjectCount();
+                    std::vector<void*> tried;
+                    tried.reserve(64);
+                    int candidates = 0;
+                    for (int i = 0; i < total && !widget && candidates < 40; ++i)
                     {
+                        void* o = GetObjectByIndex(i);
+                        if (!o) continue;
+                        // A UClass whose own class is UClass, deriving from UUserWidget.
+                        void* meta = SafeClassOf(o);
+                        static void* classCls = FindObject("/Script/CoreUObject.Class");
+                        if (!meta || meta != classCls) continue;
+                        if (o == userWidgetCls || !IsSubclassOf(o, userWidgetCls)) continue;
+                        if (std::find(tried.begin(), tried.end(), o) != tried.end()) continue;
+                        tried.push_back(o);
+                        ++candidates;
+
                         struct { void* WorldContext; void* WidgetType; void* OwningPlayer; void* Return; }
-                            p{ world, userWidgetCls, pc, nullptr };
-                        if (SafePE(lib, create, &p)) widget = p.Return;
-                        Cobalt::Log::WriteLine(std::string("[UE4] display: WidgetBlueprintLibrary.Create ") +
-                                               (widget ? "ok" : "returned null"));
+                            p{ world, o, pc, nullptr };
+                        if (SafePE(lib, create, &p) && p.Return)
+                        {
+                            widget = p.Return;
+                            usedClass = o;
+                            Cobalt::Log::WriteLine("[UE4] display: Create succeeded with concrete class " +
+                                                   GetName(reinterpret_cast<UObject*>(o)));
+                        }
                     }
+                    if (!widget)
+                        Cobalt::Log::WriteLine("[UE4] display: tried " + std::to_string(candidates) +
+                                               " concrete widget classes, none accepted");
                 }
             }
             if (!widget)
             {
                 widget = SpawnObject(userWidgetCls, transient);
                 Cobalt::Log::WriteLine(std::string("[UE4] display: fell back to bare construction ") +
-                                       (widget ? "ok" : "FAIL"));
+                                       (widget ? "ok (this has never drawn)" : "FAIL"));
             }
+            (void)usedClass;
 
             void* tree = widget ? SpawnObject(widgetTreeCls, widget) : nullptr;
             void* image = tree ? SpawnObject(imageCls, tree) : nullptr;
