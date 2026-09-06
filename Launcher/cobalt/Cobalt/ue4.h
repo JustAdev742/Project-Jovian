@@ -83,6 +83,17 @@ namespace Nova::UE4
     void EnumerateMedia();
 
     /**
+     * Try to actually decode the bumper: construct a MediaPlayer, open the file, bind a
+     * MediaTexture, and report what happened.
+     *
+     * The first thing here that is not a probe. It stops short of drawing anything -- the census
+     * proved the game builds no media UI of its own, so a display surface has to be constructed
+     * too, and there is no point building one until the file is known to decode in-process.
+     * Reports the exact path used and the duration the engine read back.
+     */
+    void TryDecodeBumper();
+
+    /**
      * Log what resolved and which classes the bumper needs are actually live.
      *
      * THIS IS THE POINT OF THE FIRST BUILD. A binary scan can only say a string exists in the

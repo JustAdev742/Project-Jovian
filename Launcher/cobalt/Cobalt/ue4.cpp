@@ -363,6 +363,153 @@ namespace Nova::UE4
                                std::to_string(classesNamed) + " classes examined");
     }
 
+    namespace
+    {
+        /** FString as the engine lays it out: TArray<TCHAR>. */
+        struct FStringIn
+        {
+            const wchar_t* Data;
+            int32_t ArrayNum;
+            int32_t ArrayMax;
+            FStringIn() : Data(nullptr), ArrayNum(0), ArrayMax(0) {}
+            explicit FStringIn(const std::wstring& s)
+                : Data(s.c_str()), ArrayNum((int32_t)s.size() + 1), ArrayMax((int32_t)s.size() + 1) {}
+        };
+
+        /** GameplayStatics.SpawnObject(Class, Outer) — the reflection-reachable way to make one. */
+        void* SpawnObject(void* cls, void* outer)
+        {
+            if (!cls || !outer) return nullptr;
+            static void* gs = FindObject("/Script/Engine.Default__GameplayStatics");
+            static void* fn = FindObject("/Script/Engine.GameplayStatics.SpawnObject");
+            if (!gs || !fn) return nullptr;
+            struct { void* Class; void* Outer; void* Return; } p{ cls, outer, nullptr };
+            if (!SafePE(gs, fn, &p)) return nullptr;
+            return p.Return;
+        }
+
+        /** Where the bumper may live. Every candidate is reported, so a missing file is obvious. */
+        std::vector<std::wstring> BumperCandidates()
+        {
+            std::vector<std::wstring> out;
+            wchar_t buf[MAX_PATH]{};
+            if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH))
+            {
+                out.push_back(std::wstring(buf) + L"\\ProjectNova\\bumper.mp4");
+                out.push_back(std::wstring(buf) + L"\\FortniteGame\\bumper.mp4");
+            }
+            wchar_t exe[MAX_PATH]{};
+            if (GetModuleFileNameW(nullptr, exe, MAX_PATH))
+            {
+                std::wstring p(exe);
+                const size_t slash = p.find_last_of(L"\\");
+                if (slash != std::wstring::npos) out.push_back(p.substr(0, slash + 1) + L"bumper.mp4");
+            }
+            return out;
+        }
+
+        std::string Narrow(const std::wstring& w)
+        {
+            std::string s;
+            for (size_t i = 0; i < w.size(); ++i) s += (w[i] < 128 ? (char)w[i] : '?');
+            return s;
+        }
+    }
+
+    void TryDecodeBumper()
+    {
+        if (!Ready()) return;
+
+        // 1. The file. Nothing else matters if it is not on disk, and "no video appeared" is a
+        //    useless symptom when the real reason was a path.
+        std::wstring path;
+        std::vector<std::wstring> candidates = BumperCandidates();
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const DWORD attr = GetFileAttributesW(candidates[i].c_str());
+            const bool ok = attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+            Cobalt::Log::WriteLine(std::string("[UE4] bumper ") + (ok ? "FOUND  " : "absent ") + Narrow(candidates[i]));
+            if (ok && path.empty()) path = candidates[i];
+        }
+        if (path.empty())
+        {
+            Cobalt::Log::WriteLine("[UE4] no bumper.mp4 in any candidate location - copy the file to one of the above");
+            return;
+        }
+
+        // 2. Construct a player. The transient package is what engine code uses for objects that
+        //    must not be saved with a level.
+        void* transientPkg = FindObject("/Engine/Transient");
+        void* playerCls = FindObject("/Script/MediaAssets.MediaPlayer");
+        if (!transientPkg || !playerCls)
+        {
+            Cobalt::Log::WriteLine("[UE4] transient package or MediaPlayer class missing - cannot construct");
+            return;
+        }
+
+        void* player = SpawnObject(playerCls, transientPkg);
+        Cobalt::Log::WriteLine(std::string("[UE4] MediaPlayer construct: ") + (player ? "ok" : "FAILED"));
+        if (!player) return;
+
+        // 3. Open it. This is the moment WmfMedia either decodes an mp4 in this process or does not.
+        void* openFile = FindObject("/Script/MediaAssets.MediaPlayer.OpenFile");
+        if (!openFile) { Cobalt::Log::WriteLine("[UE4] OpenFile function missing"); return; }
+
+        struct OpenParams { FStringIn Path; bool Return; char pad[7]; };
+        OpenParams openParams{ FStringIn(path), false, {} };
+        if (!SafePE(player, openFile, &openParams))
+        {
+            Cobalt::Log::WriteLine("[UE4] OpenFile faulted");
+            return;
+        }
+        Cobalt::Log::WriteLine(std::string("[UE4] OpenFile returned: ") + (openParams.Return ? "TRUE" : "false"));
+
+        // 4. Duration. Opening is asynchronous, so poll — reading once and concluding would report
+        //    a failure that is really just "not yet".
+        void* getDuration = FindObject("/Script/MediaAssets.MediaPlayer.GetDuration");
+        if (getDuration)
+        {
+            bool got = false;
+            for (int i = 0; i < 20 && !got; ++i)
+            {
+                Sleep(250);
+                struct { long long Ticks; } dur{ 0 };
+                if (!SafePE(player, getDuration, &dur)) break;
+                if (dur.Ticks > 0)
+                {
+                    // FTimespan ticks are 100ns.
+                    const double seconds = (double)dur.Ticks / 10000000.0;
+                    Cobalt::Log::WriteLine("[UE4] DECODED - duration " + std::to_string(seconds) + "s");
+                    got = true;
+                }
+            }
+            if (!got) Cobalt::Log::WriteLine("[UE4] duration stayed 0 after 5s - opened but not decoding");
+        }
+
+        // 5. Bind a texture. Proves the frames have somewhere to land; drawing it is the next step.
+        void* texCls = FindObject("/Script/MediaAssets.MediaTexture");
+        void* tex = texCls ? SpawnObject(texCls, transientPkg) : nullptr;
+        Cobalt::Log::WriteLine(std::string("[UE4] MediaTexture construct: ") + (tex ? "ok" : "FAILED"));
+        if (tex)
+        {
+            void* setPlayer = FindObject("/Script/MediaAssets.MediaTexture.SetMediaPlayer");
+            if (setPlayer)
+            {
+                struct { void* Player; } sp{ player };
+                Cobalt::Log::WriteLine(std::string("[UE4] SetMediaPlayer: ") +
+                    (SafePE(tex, setPlayer, &sp) ? "ok" : "faulted"));
+            }
+        }
+
+        void* play = FindObject("/Script/MediaAssets.MediaPlayer.Play");
+        if (play)
+        {
+            struct { bool Return; char pad[7]; } pr{ false, {} };
+            SafePE(player, play, &pr);
+            Cobalt::Log::WriteLine(std::string("[UE4] Play returned: ") + (pr.Return ? "TRUE" : "false"));
+        }
+    }
+
     void SelfTest()
     {
         if (!Ready())
@@ -440,6 +587,7 @@ namespace Nova::UE4
             {
                 Cobalt::Log::WriteLine("[UE4] everything the bumper needs is live - stopping probe");
                 EnumerateMedia();
+                TryDecodeBumper();
                 return;
             }
         }
