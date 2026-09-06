@@ -694,23 +694,48 @@ export async function socialRoutes(fastify: FastifyInstance): Promise<void> {
   //  CHAT ROOMS (prevents [UNHANDLED] log spam)
   // ═══════════════════════════════════════════════
 
-  /** Reserve general chat rooms — client expects a valid chatroom response */
-  fastify.post('/fortnite/api/game/v2/chat/:accountId/reserveGeneralChatRooms/:subGame/:platform', async (request, reply) => {
-    const { accountId } = request.params as { accountId: string };
-    return reply.send({
-      globalChatRooms: [
-        {
-          roomName: `Fortnite_Nova_global_${accountId.substring(0, 8)}`,
-          currentMembersCount: 1,
-          maxMembersCount: 100,
-          publicFacingShortName: 'Nova Global',
-          ownerAccountId: accountId,
-          locale: 'en',
-          description: 'Nova General Chat',
-          members: [],
-        },
-      ],
-      foundationChatRooms: [],
-    });
+  /**
+   * Reserve general chat rooms — the client expects a valid chatroom response.
+   *
+   * REGISTERED FOR BOTH GET AND POST, BECAUSE THE METHOD IS GENUINELY UNKNOWN.
+   *
+   * 7.40 calls this 81 times a session — it is the 9th busiest endpoint in the observed surface —
+   * and nothing available establishes which verb it uses:
+   *
+   *   - `cobalt.log` records 81 of these, but Cobalt hooks `curl_easy_setopt(CURLOPT_URL, ...)`,
+   *     which carries the URL and NOT the method. So the observed data cannot say.
+   *   - VERSION_COMPATIBILITY.md §2 prints it as `GET`. That column was inferred, not measured —
+   *     corrected there 2026-09-06.
+   *   - The endpoint corpus does not document this route at all.
+   *
+   * It was registered POST-only. If the client actually sends GET, all 81 calls 404 every session,
+   * and the failure is quiet: the client logs chat trouble, not a routing error.
+   *
+   * The handler is read-only — it returns a static descriptor and touches no state — so answering
+   * both verbs cannot break the case that already works and removes the risk of the other. That is
+   * the right trade when the cost of guessing wrong is 81 failed calls and the cost of covering both
+   * is one line. Narrow it if a capture ever settles the method.
+   */
+  fastify.route({
+    method: ['GET', 'POST'],
+    url: '/fortnite/api/game/v2/chat/:accountId/reserveGeneralChatRooms/:subGame/:platform',
+    handler: async (request, reply) => {
+      const { accountId } = request.params as { accountId: string };
+      return reply.send({
+        globalChatRooms: [
+          {
+            roomName: `Fortnite_Nova_global_${accountId.substring(0, 8)}`,
+            currentMembersCount: 1,
+            maxMembersCount: 100,
+            publicFacingShortName: 'Nova Global',
+            ownerAccountId: accountId,
+            locale: 'en',
+            description: 'Nova General Chat',
+            members: [],
+          },
+        ],
+        foundationChatRooms: [],
+      });
+    },
   });
 }

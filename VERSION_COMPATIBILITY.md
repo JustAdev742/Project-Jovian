@@ -39,6 +39,31 @@ This is the single most useful negative result available right now, and it redir
 > **7.40 does not fail because an endpoint is missing.** Any remaining 7.40 problem is a *response
 > correctness*, *state*, or *transport* problem — not a coverage problem.
 
+> ### The METHOD column is INFERRED, not observed — corrected 2026-09-06
+>
+> This section is headed "as observed — CONFIRMED", and the paths and call counts are exactly that.
+> **The methods are not.** Their only source is `cobalt.log`, and Cobalt hooks
+> `curl_easy_setopt(CURLOPT_URL, ...)` — which carries the URL and never the verb. Every `GET`,
+> `POST` and `DELETE` printed below was supplied by whoever built the table.
+>
+> **This is not pedantry; it hid a live bug.** The conclusion under this table — *"Every one of them
+> is routed. Zero unrouted"* — was reached by matching **paths** against registered routes. A route
+> registered POST-only therefore counted as routed even when the client sends GET. That is precisely
+> what `reserveGeneralChatRooms` was: registered POST-only, **81 calls a session**, 404ing every one
+> of them. It was found by driving the session flow (`Main backend/e2e-probe.ts`), not by this table,
+> because this table cannot see it.
+>
+> `node tools/method-audit.mjs` now checks every row's method against what is actually registered.
+> Current state: **33 families, 0 unrouted, 0 method mismatches.**
+>
+> So read the claim as: **every observed path is routed, and every one now answers the method we
+> believe the client uses.** Two rows have been corrected against that stronger check:
+>
+> | row | was | now | why |
+> |---|---|---|---|
+> | `reserveGeneralChatRooms` | `GET` | `GET` *(code fixed)* | the route now answers **both** verbs, since nothing establishes which one the client sends and the handler is read-only |
+> | `matchmakingservice/ticket/player` | `POST` | `GET` | the table was wrong. This is the matchmaking path at 35 calls a session; if the client sent POST it would 404 and matchmaking could never work. It does work, so the registered method is the one in use |
+
 | # | endpoint (normalised) | calls | backend route | subsystem |
 |---|---|---:|---|---|
 | 1 | `POST /datarouter/api/v1/public/data` | 706 | `/datarouter/api/v1/public/data` | telemetry |
@@ -71,7 +96,7 @@ This is the single most useful negative result available right now, and it redir
 | 28 | `GET /fortnite/api/cloudstorage/system/DefaultRuntimeOptions.ini` | 48 | `…/system/:filename` | cloudstorage |
 | 29 | `GET /fortnite/api/cloudstorage/system/DefaultInput.ini` | 48 | `…/system/:filename` | cloudstorage |
 | 30 | `GET /api/v1/events/Fortnite/download/{acct}` | 37 | parameterised | other |
-| 31 | `POST /fortnite/api/game/v2/matchmakingservice/ticket/player/{acct}` | 35 | parameterised | matchmaking |
+| 31 | `GET /fortnite/api/game/v2/matchmakingservice/ticket/player/{acct}` | 35 | parameterised | matchmaking |
 | 32 | `GET /fortnite/api/cloudstorage/user/{acct}/ClientSettings.Sav` | 35 | `…/user/:acct/:filename` | cloudstorage |
 | 33 | `POST /fortnite/api/game/v2/profile/{acct}/client/EquipBattleRoyaleCustomization` | 33 | `…/client/:operation` | mcp |
 | 34 | `GET/POST /fortnite/api/matchmaking/session/{uuid}[/join]`, `…/game/v2/matchmaking/account/{acct}/session/{uuid}`, `statsv2/*` | 1 each | parameterised | matchmaking / stats |
