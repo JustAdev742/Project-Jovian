@@ -1645,17 +1645,33 @@ namespace Nova::UE4
     // Choosing Battle Royale starts the lobby music, and the bumper covers the next seven seconds,
     // so the two overlapped and the music was already mid-track when the clip ended. The bumper's
     // own sound goes through Windows (winmm), not the engine, so the engine's music can be silenced
-    // underneath it without touching the bumper:
+    // underneath it without touching the bumper.
     //
-    //   on show:  a SoundMix override at volume 0 on every SoundClass with "Music" in its name,
-    //             children included, pushed -- the same mechanism the game's own audio settings use.
-    //             Class-level, so music that starts DURING the bumper is covered too.
-    //   at end:   restart whatever music component is playing (Stop, then Play from 0), then pop
-    //             the mix. The music starts from the top as the bumper ends, which is the point.
+    // WHAT THE FIRST ATTEMPT (1.8.4) GOT WRONG, from the log: it muted at most eight SoundClasses,
+    // and the eight it happened to reach first were all stingers and `_PSM` variants
+    // (Fort_Music_Menu_PSM, Fort_Cine_Music_Stinger, ...). It never reached the base class the lobby
+    // cue actually plays through, so MusicPack_Default_Cue was still audible and was merely restarted
+    // at the end. And keying on the TRACK is wrong anyway -- the equipped music pack changes the cue
+    // (MusicPack_ClassicRemix_Cue, MusicPack_Spooky_Cue, ...), so nothing may assume a name.
+    //
+    // The pak index (Sounds/FortSoundClassesAndModes/) shows the game's music lives under SoundClasses
+    // named with "Music": Fort_Music (the base), Fort_Combat_Music, Fort_Exploration_Music,
+    // Fort_DanceMusic, the *_PSM point-source classes, and so on. So:
+    //
+    //   on show:  override to volume 0, children included, on EVERY SoundClass whose name contains
+    //             "music" -- no cap, so the base class is always covered -- then push the mix. AND
+    //             stop every AudioComponent that is actually playing music outright, so it goes
+    //             silent even if the mix override is routed in a way that misses it.
+    //   at end:   restart the music from the top (Stop then Play(0)) and pop the mix.
+    //
+    // "Playing music" is judged by the sound's SoundClassObject, not by the track's name. The class
+    // is the game's own routing and is the same whichever pack the player has equipped; a name test
+    // would be a guess at every pack there is and every one a later season adds.
     namespace
     {
         void* gMusicMix = nullptr;   // our USoundMix, rooted; created on first use
         int   gMutedClasses = 0;
+        std::vector<void*> gStoppedMusic;   // components stopped on show, replayed at end; rooted
 
         /** The world with a local player in it; failing that, the last World object. */
         void* LiveWorld()
@@ -1684,8 +1700,52 @@ namespace Nova::UE4
             return s;
         }
 
+        /** The USoundBase an AudioComponent is playing, or null. */
+        void* SoundOf(void* comp)
+        {
+            const int soundOff = OffsetOf(comp, "Sound");
+            return soundOff >= 0 ? SafeDeref(comp, soundOff) : nullptr;
+        }
+
+        /** The USoundClass a sound is routed through (USoundBase::SoundClassObject), or null. */
+        void* SoundClassOf(void* sound)
+        {
+            if (!sound) return nullptr;
+            const int clsOff = OffsetOf(sound, "SoundClassObject");
+            return clsOff >= 0 ? SafeDeref(sound, clsOff) : nullptr;
+        }
+
+        /** "MusicPack_Default_Cue [Fort_Music]" -- for the log, so the routing is visible. */
+        std::string SoundLabelOf(void* comp)
+        {
+            void* snd = SoundOf(comp);
+            if (!snd) return "(no sound)";
+            const std::string name = GetName(reinterpret_cast<UObject*>(snd));
+            void* sc = SoundClassOf(snd);
+            const std::string cls = sc ? GetName(reinterpret_cast<UObject*>(sc)) : std::string();
+            return cls.empty() ? name : name + " [" + cls + "]";
+        }
+
+        /**
+         * Is this component playing music?
+         *
+         * By its SOUND CLASS first. The class is the game's own routing and does not change when the
+         * player equips a different music pack, which is the whole point -- matching the track name
+         * would mean guessing at every pack (MusicPack_Spooky_Cue, MusicPack_Twist_Cue, and whatever
+         * a later season adds). The sound's own name is only a fallback for a sound with no class.
+         */
+        bool IsMusicComponent(void* comp)
+        {
+            void* snd = SoundOf(comp);
+            if (!snd) return false;
+            if (void* sc = SoundClassOf(snd))
+                return Lower(GetName(reinterpret_cast<UObject*>(sc))).find("music") != std::string::npos;
+            return Lower(GetName(reinterpret_cast<UObject*>(snd))).find("music") != std::string::npos;
+        }
+
         void MuteMusic()
         {
+            gStoppedMusic.clear();
             void* world = LiveWorld();
             void* gs = FindObject("/Script/Engine.Default__GameplayStatics");
             void* setOverride = FindObject("/Script/Engine.GameplayStatics.SetSoundMixClassOverride");
@@ -1698,80 +1758,79 @@ namespace Nova::UE4
                 Cobalt::Log::WriteLine(std::string("[UE4] music: cannot mute -") + (world ? "" : " no world") +
                                        (setOverride ? "" : " no SetSoundMixClassOverride") + (push ? "" : " no PushSoundMixModifier") +
                                        (mixCls ? "" : " no SoundMix class") + (classCls ? "" : " no SoundClass class"));
-                return;
             }
-            if (!gMusicMix)
+            else
             {
-                gMusicMix = SpawnObject(mixCls, transient);
-                if (!gMusicMix) { Cobalt::Log::WriteLine("[UE4] music: could not construct a SoundMix"); return; }
-                AddToRoot(gMusicMix);
-            }
-
-            const int oWorld = ParamOffset(setOverride, "WorldContextObject");
-            const int oMix   = ParamOffset(setOverride, "InSoundMixModifier");
-            const int oCls   = ParamOffset(setOverride, "InSoundClass");
-            const int oVol   = ParamOffset(setOverride, "Volume");
-            const int oPitch = ParamOffset(setOverride, "Pitch");
-            const int oFade  = ParamOffset(setOverride, "FadeInTime");
-            const int oKids  = ParamOffset(setOverride, "bApplyToChildren");
-            const int pWorld = ParamOffset(push, "WorldContextObject");
-            const int pMix   = ParamOffset(push, "InSoundMixModifier");
-            if (oWorld < 0 || oMix < 0 || oCls < 0 || oVol < 0 || oPitch < 0 || oFade < 0 || oKids < 0 || pWorld < 0 || pMix < 0)
-            {
-                Cobalt::Log::WriteLine("[UE4] music: SoundMix parameter layout did not resolve");
-                return;
-            }
-
-            // Every SoundClass named like music. Names are logged so the next person knows what the
-            // game actually calls them.
-            gMutedClasses = 0;
-            const int total = ObjectCount();
-            for (int i = 0; i < total && gMutedClasses < 8; ++i)
-            {
-                void* o = GetObjectByIndex(i);
-                if (!o || SafeClassOf(o) != classCls) continue;
-                const std::string n = GetName(reinterpret_cast<UObject*>(o));
-                if (Lower(n).find("music") == std::string::npos) continue;
-                Params p;
-                p.at<void*>(oWorld) = world;
-                p.at<void*>(oMix)   = gMusicMix;
-                p.at<void*>(oCls)   = o;
-                p.at<float>(oVol)   = 0.f;
-                p.at<float>(oPitch) = 1.f;
-                p.at<float>(oFade)  = 0.f;
-                p.at<bool>(oKids)   = true;
-                if (SafePE(gs, setOverride, p.bytes))
+                if (!gMusicMix)
                 {
-                    ++gMutedClasses;
-                    Cobalt::Log::WriteLine("[UE4] music: muting sound class " + n);
+                    gMusicMix = SpawnObject(mixCls, transient);
+                    if (gMusicMix) AddToRoot(gMusicMix);
+                    else Cobalt::Log::WriteLine("[UE4] music: could not construct a SoundMix");
+                }
+                const int oWorld = ParamOffset(setOverride, "WorldContextObject");
+                const int oMix   = ParamOffset(setOverride, "InSoundMixModifier");
+                const int oCls   = ParamOffset(setOverride, "InSoundClass");
+                const int oVol   = ParamOffset(setOverride, "Volume");
+                const int oPitch = ParamOffset(setOverride, "Pitch");
+                const int oFade  = ParamOffset(setOverride, "FadeInTime");
+                const int oKids  = ParamOffset(setOverride, "bApplyToChildren");
+                const int pWorld = ParamOffset(push, "WorldContextObject");
+                const int pMix   = ParamOffset(push, "InSoundMixModifier");
+                const bool layout = gMusicMix && oWorld >= 0 && oMix >= 0 && oCls >= 0 && oVol >= 0 &&
+                                    oPitch >= 0 && oFade >= 0 && oKids >= 0 && pWorld >= 0 && pMix >= 0;
+                if (!layout)
+                {
+                    Cobalt::Log::WriteLine("[UE4] music: SoundMix parameter layout did not resolve - relying on component stops");
+                }
+                else
+                {
+                    // EVERY SoundClass named like music, no cap -- the base class must be covered.
+                    // Children included, so a class named for a pack is reached through its parent too.
+                    gMutedClasses = 0;
+                    const int total = ObjectCount();
+                    for (int i = 0; i < total && gMutedClasses < 64; ++i)
+                    {
+                        void* o = GetObjectByIndex(i);
+                        if (!o || SafeClassOf(o) != classCls) continue;
+                        const std::string n = GetName(reinterpret_cast<UObject*>(o));
+                        if (Lower(n).find("music") == std::string::npos) continue;
+                        Params p;
+                        p.at<void*>(oWorld) = world;
+                        p.at<void*>(oMix)   = gMusicMix;
+                        p.at<void*>(oCls)   = o;
+                        p.at<float>(oVol)   = 0.f;
+                        p.at<float>(oPitch) = 1.f;
+                        p.at<float>(oFade)  = 0.f;
+                        p.at<bool>(oKids)   = true;
+                        if (SafePE(gs, setOverride, p.bytes))
+                        {
+                            if (gMutedClasses < 12) Cobalt::Log::WriteLine("[UE4] music: muting sound class " + n);
+                            ++gMutedClasses;
+                        }
+                    }
+                    if (gMutedClasses > 0)
+                    {
+                        Params q;
+                        q.at<void*>(pWorld) = world;
+                        q.at<void*>(pMix)   = gMusicMix;
+                        Cobalt::Log::WriteLine("[UE4] music: overrode " + std::to_string(gMutedClasses) +
+                                               " music sound class(es); mix pushed " +
+                                               (SafePE(gs, push, q.bytes) ? "ok" : "FAULTED"));
+                    }
+                    else Cobalt::Log::WriteLine("[UE4] music: no SoundClass with 'music' in its name");
                 }
             }
-            if (gMutedClasses == 0)
-            {
-                Cobalt::Log::WriteLine("[UE4] music: no SoundClass with 'music' in its name - nothing muted");
-                return;
-            }
-            Params q;
-            q.at<void*>(pWorld) = world;
-            q.at<void*>(pMix)   = gMusicMix;
-            Cobalt::Log::WriteLine(std::string("[UE4] music: mix pushed ") + (SafePE(gs, push, q.bytes) ? "ok" : "FAULTED"));
-        }
 
-        void RestartMusicAndUnmute()
-        {
-            // 1. Restart. Any playing AudioComponent whose sound is named like music: Stop, and if
-            //    nothing else started it again in response, Play from the top. The playing sounds
-            //    are logged so a music track under another name is findable next time.
+            // The guarantee: stop every music component that is actually playing right now. This is
+            // what makes it silent regardless of how the mix is routed, and it is by the sound's
+            // name so it is independent of which pack is equipped.
             void* acCls = FindObject("/Script/Engine.AudioComponent");
             void* isPlaying = FindObject("/Script/Engine.AudioComponent.IsPlaying");
             void* stop = FindObject("/Script/Engine.AudioComponent.Stop");
-            void* play = FindObject("/Script/Engine.AudioComponent.Play");
-            int seen = 0, restarted = 0;
-            if (acCls && isPlaying && stop && play)
+            if (acCls && isPlaying && stop)
             {
-                const int startOff = ParamOffset(play, "StartTime");
                 const int total = ObjectCount();
-                for (int i = 0; i < total && restarted < 4; ++i)
+                for (int i = 0; i < total; ++i)
                 {
                     void* o = GetObjectByIndex(i);
                     if (!o) continue;
@@ -1779,28 +1838,62 @@ namespace Nova::UE4
                     if (!cls || !IsSubclassOf(cls, acCls)) continue;
                     struct { bool R; char pad[7]; } ip{ false, {} };
                     if (!SafePE(o, isPlaying, &ip) || !ip.R) continue;
-                    const int soundOff = OffsetOf(o, "Sound");
-                    void* snd = soundOff >= 0 ? SafeDeref(o, soundOff) : nullptr;
-                    const std::string sn = snd ? GetName(reinterpret_cast<UObject*>(snd)) : std::string("(no sound)");
-                    if (++seen <= 12) Cobalt::Log::WriteLine("[UE4] music: playing at bumper end: " + sn);
-                    if (Lower(sn).find("music") == std::string::npos) continue;
+                    const std::string label = SoundLabelOf(o);
+                    if (!IsMusicComponent(o)) continue;
                     SafePE(o, stop, nullptr);
-                    struct { bool R; char pad[7]; } again{ false, {} };
-                    SafePE(o, isPlaying, &again);
-                    if (!again.R)
-                    {
-                        Params pp;
-                        if (startOff >= 0) pp.at<float>(startOff) = 0.f;
-                        SafePE(o, play, pp.bytes);
-                    }
-                    ++restarted;
-                    Cobalt::Log::WriteLine("[UE4] music: restarted " + sn + (again.R ? " (the game restarted it itself)" : ""));
+                    AddToRoot(o);                    // keep it valid so it can be replayed at the end
+                    gStoppedMusic.push_back(o);
+                    Cobalt::Log::WriteLine("[UE4] music: stopped " + label);
                 }
             }
-            Cobalt::Log::WriteLine("[UE4] music: " + std::to_string(seen) + " sound(s) playing, " +
-                                   std::to_string(restarted) + " music track(s) restarted from the top");
+            Cobalt::Log::WriteLine("[UE4] music: " + std::to_string(gStoppedMusic.size()) +
+                                   " music component(s) stopped for the bumper");
+        }
 
-            // 2. Unmute: pop the mix. The music comes up over the mix's own fade-out.
+        void RestartMusicAndUnmute()
+        {
+            void* isPlaying = FindObject("/Script/Engine.AudioComponent.IsPlaying");
+            void* stop = FindObject("/Script/Engine.AudioComponent.Stop");
+            void* play = FindObject("/Script/Engine.AudioComponent.Play");
+            void* acCls = FindObject("/Script/Engine.AudioComponent");
+            const int startOff = play ? ParamOffset(play, "StartTime") : -1;
+
+            // What to restart: the components stopped on show, plus any music component that started
+            // DURING the bumper (silenced by the mix override, still to be reset to the top). Deduped.
+            std::vector<void*> targets = gStoppedMusic;
+            if (acCls && isPlaying)
+            {
+                const int total = ObjectCount();
+                for (int i = 0; i < total; ++i)
+                {
+                    void* o = GetObjectByIndex(i);
+                    if (!o) continue;
+                    void* cls = SafeClassOf(o);
+                    if (!cls || !IsSubclassOf(cls, acCls)) continue;
+                    struct { bool R; char pad[7]; } ip{ false, {} };
+                    if (!SafePE(o, isPlaying, &ip) || !ip.R) continue;
+                    if (!IsMusicComponent(o)) continue;
+                    if (std::find(targets.begin(), targets.end(), o) == targets.end()) targets.push_back(o);
+                }
+            }
+
+            int restarted = 0;
+            if (play && stop)
+            {
+                for (void* o : targets)
+                {
+                    const std::string label = SoundLabelOf(o);
+                    SafePE(o, stop, nullptr);        // silence any resume, so Play starts from the top
+                    Params pp;
+                    if (startOff >= 0) pp.at<float>(startOff) = 0.f;
+                    if (SafePE(o, play, pp.bytes)) ++restarted;
+                    Cobalt::Log::WriteLine("[UE4] music: restarted " + label + " from the top");
+                }
+            }
+            Cobalt::Log::WriteLine("[UE4] music: " + std::to_string(restarted) + " music track(s) restarted");
+            gStoppedMusic.clear();
+
+            // Unmute: pop the mix so any music that plays after this is at full volume.
             if (!gMusicMix || gMutedClasses == 0) return;
             void* world = LiveWorld();
             void* gs = FindObject("/Script/Engine.Default__GameplayStatics");
@@ -1809,7 +1902,7 @@ namespace Nova::UE4
             const int pMix   = pop ? ParamOffset(pop, "InSoundMixModifier") : -1;
             if (!world || !gs || !pop || pWorld < 0 || pMix < 0)
             {
-                Cobalt::Log::WriteLine("[UE4] music: cannot pop the mix - the music stays muted this session");
+                Cobalt::Log::WriteLine("[UE4] music: cannot pop the mix - music stays muted this session");
                 return;
             }
             Params q;

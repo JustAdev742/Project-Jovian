@@ -325,6 +325,40 @@ resolves a call; the hide is applied before and after `AddToViewport`, to the im
 `GetVisibility` is read back and logged (`visibility read back 2 … after`). A silent `if` around a
 lookup that can fail is the pattern to watch for: the log said "hidden" without ever checking.
 
+### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.5)** · *1.8.4 silenced nothing that mattered*
+
+**1.8.4 was supposed to silence the lobby music under the bumper. The music played straight through
+it and was merely restarted at the end.**
+
+The mute loop was written `for (i = 0; i < total && gMutedClasses < 8; ++i)` — an arbitrary cap of
+eight, added as a safety bound with no reason behind the number. The eight SoundClasses it reached
+first were all stingers and point-source variants:
+
+```
+Fort_Cine_Music_Stinger   Fort_Music_Stinger_PSM     Fort_Music_Menu_PSM
+Fort_Music_Boss_Stinger   Fort_Victory_Music_PSM     Fort_SubMenu_Music
+Fort_PointSource_Music_PSM                           Fort_Music_MissionCritical_PSM
+```
+
+It stopped there, so `Fort_Music` — the base class the lobby cue actually routes through, per
+`Sounds/FortSoundClassesAndModes/` in the pak index — never got the override. The `mix pushed ok`
+line was true and meaningless: the mix contained nothing that was playing.
+
+**The second flaw was matching the TRACK.** The component-restart step keyed on the sound's name
+containing "music", which happens to hold for `MusicPack_Default_Cue` but is a guess at every pack a
+player might equip (`MusicPack_Spooky_Cue`, `MusicPack_Twist_Cue`, …) and at whatever a later season
+adds.
+
+**Fix, both halves.** The class override is uncapped, so the base class is always covered. On top of
+it, every AudioComponent actually playing music is stopped outright, so the result does not depend on
+how the mix is routed. And "playing music" is judged by `USoundBase::SoundClassObject` — the game's
+own routing, identical whichever pack is equipped — never by the track's name. At teardown the music
+is restarted from the top and the mix popped.
+
+**Proof to look for:** `music: overrode N music sound class(es)` with N well above 8,
+`music: stopped MusicPack_X_Cue [Fort_Music]` naming the class, then
+`music: restarted … from the top` and `mix popped ok`.
+
 ### `bumper-off-switch-never-worked` · CONFIRMED · **FIXED 2026-09-06 (ships in 1.8.2)**
 
 `BumperEnabled()` built the marker path as `L"\ProjectNova\bumper.off"`. `\P` is an invalid escape
