@@ -164,7 +164,21 @@ if (missing.length) {
 const isForbiddenFile = (name) =>
   name === '.env' ||
   /\.(db|db-wal|db-shm|sqlite|sqlite3|log)$/i.test(name) ||
-  /\.(key|pem|pfx)$/i.test(name);
+  /\.(key|pem|pfx)$/i.test(name) ||
+  // DefaultEngine.ini must NOT be bundled — it must be GENERATED.
+  //
+  // It carries the XMPP address, and `seedCloudstorageDefaults()` writes it from the port the
+  // backend is actually listening on. That function deliberately never overwrites an existing file,
+  // so a bundled copy wins permanently and the generated-from-the-real-port guarantee is void.
+  //
+  // The bundled copy said `ServerPort=3596`. Nothing listens there in either mode — standalone is
+  // 3551, agent mode 3552 — so in standalone/LAN the client got an XMPP address pointing at nothing
+  // and force-logged-out ~400ms after a successful login, reporting "Fortnite was not started
+  // correctly". That exact symptom has been chased twice before from two different causes; see the
+  // comment on seedCloudstorageDefaults.
+  //
+  // The other three hotfix .ini files carry no port and are fine to ship.
+  name === 'DefaultEngine.ini';
 
 const resources = path.join(ROOT, 'Launcher', 'src-tauri', 'resources');
 const leaked = [];
@@ -183,8 +197,15 @@ const scanForLeaks = (dir, depth = 0) => {
 };
 scanForLeaks(resources);
 if (leaked.length) {
-  console.error('[stage-backend] REFUSING TO SHIP — live data found in the payload:');
-  for (const l of leaked) console.error(`  - ${l}`);
+  console.error('[stage-backend] REFUSING TO SHIP — files that must not be in the payload:');
+  for (const l of leaked) {
+    // Two different reasons land here and they need different remedies, so say which.
+    const why = path.basename(l) === 'DefaultEngine.ini'
+      ? 'must be GENERATED from the live port by seedCloudstorageDefaults(), not bundled — delete it'
+      : 'live data or a secret — delete it and check how it got there';
+    console.error(`  - ${l}`);
+    console.error(`      ${why}`);
+  }
   process.exit(1);
 }
 
