@@ -45,6 +45,14 @@ const EXACT = new Set([
   '/nova/api/dashboard',
   '/nova/api/diagnostics',
   '/nova/api/incidents',
+  // The live SSE tail. Omitted from the first version of this list, which is why the dashboard's
+  // stream 404ed through the tunnel while working perfectly on the box — the allowlist did its job
+  // and blocked a path nobody had told it about. Adding a route to the backend is not enough; it
+  // has to be added here too, and that is the intended friction.
+  '/nova/api/diagnostics/stream',
+  // The SSE fallback. Cloudflare's free tunnel buffers event streams to nothing, so the dashboard
+  // reads the same events by sequence number instead when the stream stays silent.
+  '/nova/api/diagnostics/since',
 ]);
 const INCIDENT_ID = /^\/nova\/api\/incidents\/[A-Za-z0-9_-]{1,64}$/;
 
@@ -83,6 +91,9 @@ const server = http.createServer((req, res) => {
     },
     (up) => {
       res.writeHead(up.statusCode || 502, up.headers);
+      // pipe() streams, which is what an event stream needs — nothing here waits for the response
+      // to end. Buffering the body would turn the live tail into a connection that delivers
+      // everything at once when it finally closes, i.e. never.
       up.pipe(res);
     },
   );

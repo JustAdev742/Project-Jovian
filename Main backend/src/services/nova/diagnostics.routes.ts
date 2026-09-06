@@ -3,7 +3,7 @@ import { requireAuth } from '../../middleware/auth.middleware';
 import { Config } from '../../config';
 import {
   recordDiagnostic, getDiagnostics, getDiagnosticsSummary,
-  subscribeDiagnostics, diagnosticSubscriberCount,
+  subscribeDiagnostics, diagnosticSubscriberCount, diagnosticsSince,
 } from './diagnostics';
 import { parseBatch, LIMITS } from './diagnostics.schema';
 import { buildIncidents, incidentId } from './incidents';
@@ -290,6 +290,34 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
     const incidents = buildIncidents(getDiagnostics({ limit: 400 }));
     reply.header('content-type', 'text/html; charset=utf-8');
     return reply.send(renderDashboard({ summary: getDiagnosticsSummary(), incidents }));
+  });
+
+  /**
+   * GET /nova/api/diagnostics/since?seq=N — the SSE fallback, for transports that buffer.
+   *
+   * NOT a "refresh the page every few seconds" loop, which the brief rules out and rightly so. It
+   * serves the SAME event objects the SSE stream emits, addressed by sequence number, so a client
+   * gets exactly the events it has not seen and can tell when it has fallen behind. The event model
+   * is identical; only the carrier differs.
+   *
+   * IT EXISTS BECAUSE SSE IS MEASURABLY BLOCKED ON THE ROUTE THAT MATTERS. Direct from the backend
+   * and through the path-allowlist proxy, the stream delivers correctly — 445 bytes of `hello` plus
+   * live `diagnostic` frames. Through Cloudflare's free `trycloudflare` tunnel it delivers ZERO
+   * bytes, because that edge buffers the body. The public dashboard link goes through exactly that
+   * tunnel, so without this the live tail is dead precisely where it is read from.
+   *
+   * `missed` tells a client that has been away longer than the 200-event ring how much it lost,
+   * rather than handing it a window and letting it assume continuity.
+   */
+  fastify.get('/nova/api/diagnostics/since', async (request, reply) => {
+    if (!adminOk(request)) return adminRefused(reply);
+    const raw = Number((request.query as any)?.seq);
+    const seq = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+    const { events, head, missed } = diagnosticsSince(seq);
+    // no-store: an intermediary caching this would make the fallback stale in the same way the
+    // tunnel made the stream silent, and for the same invisible reasons.
+    reply.header('cache-control', 'no-store');
+    return reply.send({ events, head, missed, subscribers: diagnosticSubscriberCount() });
   });
 
   /**

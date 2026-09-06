@@ -113,3 +113,38 @@ describe('live diagnostic stream', () => {
     assert.ok(!serialised.includes('abcdef0123456789'), `account id leaked: ${serialised}`);
   });
 });
+
+describe('the polling fallback carries the same events', () => {
+  // It exists because SSE is measurably blocked through Cloudflare's free tunnel — 445 bytes direct
+  // and through the proxy, 0 through the tunnel. Same event model, different carrier.
+  test('since(0) returns what was recorded, with a head cursor', async () => {
+    const { diagnosticsSince } = (await import('./diagnostics')) as any;
+    recordDiagnostic({ category: 'FAILED', method: 'GET', url: '/poll/one', status: 500 });
+    recordDiagnostic({ category: 'FAILED', method: 'GET', url: '/poll/two', status: 500 });
+    const r = diagnosticsSince(0);
+    assert.ok(r.events.length >= 2, 'nothing came back from the replay ring');
+    assert.ok(r.head >= 2, 'head cursor did not advance');
+    assert.ok(r.events.every((e: any) => typeof e.seq === 'number'), 'events must carry a seq');
+  });
+
+  test('a cursor returns ONLY what is new — no repeats, no gaps', async () => {
+    // The property that makes this not-a-refresh-loop: a poller sees each event exactly once.
+    const { diagnosticsSince } = (await import('./diagnostics')) as any;
+    const start = diagnosticsSince(0).head;
+    recordDiagnostic({ category: 'FAILED', method: 'GET', url: '/poll/three', status: 500 });
+    const after = diagnosticsSince(start);
+    assert.equal(after.events.length, 1, `expected exactly 1 new event, got ${after.events.length}`);
+    assert.equal(after.events[0].route, '/poll/three');
+    assert.equal(diagnosticsSince(after.head).events.length, 0, 'polling again re-delivered events');
+  });
+
+  test('falling behind the ring is REPORTED, not silently hidden', async () => {
+    // A poller handed a window it cannot tell is partial would infer continuity that is not there.
+    const { diagnosticsSince } = (await import('./diagnostics')) as any;
+    for (let i = 0; i < 260; i++) {
+      recordDiagnostic({ category: 'FAILED', method: 'GET', url: `/poll/flood/${i}`, status: 500 });
+    }
+    const r = diagnosticsSince(1);
+    assert.ok(r.missed > 0, 'a caller far behind the 200-event ring was not told it missed anything');
+  });
+});

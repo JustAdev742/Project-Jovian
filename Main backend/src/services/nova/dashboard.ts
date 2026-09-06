@@ -324,14 +324,11 @@ export function renderDashboard(data: DashboardData | null): string {
   function state(cls,text){ if(dot) dot.className='dot '+cls; if(lab) lab.textContent=text; }
 
   var qs=new URLSearchParams(location.search), secret=qs.get('secret');
-  var url='/nova/api/diagnostics/stream'+(secret?('?secret='+encodeURIComponent(secret)):'');
-  var es;
-  try{ es=new EventSource(url); }catch(e){ state('bad','live updates unavailable'); return; }
+  var auth=secret?('secret='+encodeURIComponent(secret)):'';
 
-  es.addEventListener('hello',function(){ state('ok','live'); });
-
-  es.addEventListener('diagnostic',function(m){
-    var d; try{ d=JSON.parse(m.data); }catch(e){ return; }
+  // ONE renderer for both carriers. The event objects are identical whichever way they arrive, so
+  // there is exactly one place that knows how to draw one.
+  function push(d){
     seen++;
     var li=document.createElement('li');
     // textContent throughout — never innerHTML. Every field here originates from a client-reported
@@ -343,15 +340,67 @@ export function renderDashboard(data: DashboardData | null): string {
     li.appendChild(t); li.appendChild(c); li.appendChild(r); li.appendChild(n);
     if(d.isNew) li.className='fresh';
     feed.insertBefore(li,feed.firstChild);
-    // Bounded in the DOM as well as on the wire: an unbounded feed is a memory leak on a page that
-    // is meant to be left open for hours.
+    // Bounded in the DOM as well as on the wire: an unbounded feed is a memory leak on a page meant
+    // to be left open for hours.
     while(feed.childNodes.length>60) feed.removeChild(feed.lastChild);
-    state('ok','live · '+seen+' since load');
-  });
+  }
 
-  // EventSource reconnects on its own; say so rather than looking dead. The incident list below
-  // remains valid throughout — it is server-rendered and does not depend on this connection.
-  es.onerror=function(){ state('bad','reconnecting…'); };
+  var mode='', es=null, pollTimer=null, cursor=null;
+
+  // ── FALLBACK: SAME EVENTS, DIFFERENT CARRIER ────────────────────────────────────────────────
+  // Not a page-refresh loop. It reads the same event objects the stream emits, addressed by
+  // sequence number, so nothing is missed or double-counted — and the missed count tells us when the ring
+  // has moved past us rather than letting the feed imply continuity it does not have.
+  function poll(){
+    var u='/nova/api/diagnostics/since?'+auth+(cursor!==null?('&seq='+cursor):'');
+    fetch(u,{cache:'no-store'}).then(function(r){ return r.ok?r.json():null; }).then(function(j){
+      if(!j) { state('bad','updates unavailable'); return; }
+      if(cursor===null){ cursor=j.head; state('ok','live (polling) · connected'); return; }
+      if(j.missed>0){
+        var li=document.createElement('li');
+        var w=document.createElement('b'); w.textContent='GAP';
+        var s=document.createElement('span'); s.textContent=j.missed+' event(s) scrolled out before this page read them';
+        li.appendChild(w); li.appendChild(s); feed.insertBefore(li,feed.firstChild);
+      }
+      (j.events||[]).forEach(function(d){ push(d); cursor=d.seq; });
+      if(typeof j.head==='number') cursor=Math.max(cursor,j.head);
+      state('ok','live (polling) · '+seen+' since load');
+    }).catch(function(){ state('bad','updates unavailable'); });
+  }
+
+  function startPolling(why){
+    if(mode==='poll') return;
+    mode='poll';
+    if(es){ try{ es.close(); }catch(e){} es=null; }
+    state('wait','falling back ('+why+')…');
+    poll();
+    // 3s: fast enough to feel live, slow enough that a page left open all day is ~1,200 requests
+    // against a route that returns an empty array when nothing is wrong.
+    pollTimer=setInterval(poll,3000);
+  }
+
+  // SSE FIRST — it is the correct transport and it works on any direct or SSH-forwarded connection.
+  // Measured: it delivers correctly from the backend and through the path-allowlist proxy, and
+  // delivers NOTHING through Cloudflare's free tunnel, which buffers the body. Hence the timer.
+  if(typeof EventSource==='undefined'){ startPolling('no EventSource'); return; }
+  try{ es=new EventSource('/nova/api/diagnostics/stream'+(auth?('?'+auth):'')); }
+  catch(e){ startPolling('stream refused'); return; }
+
+  var helloTimer=setTimeout(function(){ if(mode!=='sse') startPolling('stream silent'); },4000);
+
+  es.addEventListener('hello',function(){
+    mode='sse'; clearTimeout(helloTimer); state('ok','live (stream)');
+  });
+  es.addEventListener('diagnostic',function(m){
+    var d; try{ d=JSON.parse(m.data); }catch(e){ return; }
+    push(d); state('ok','live (stream) · '+seen+' since load');
+  });
+  es.onerror=function(){
+    // EventSource retries by itself, so an error is only fatal if it never connected. If we never
+    // saw the hello frame, the transport is the problem — switch rather than retry into the same wall.
+    if(mode!=='sse') startPolling('stream error');
+    else state('bad','reconnecting…');
+  };
 })();
 </script>`;
 

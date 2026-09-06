@@ -320,6 +320,44 @@ export interface LiveDiagnosticEvent {
 const MAX_SUBSCRIBERS = 16;
 const listeners = new Set<DiagnosticListener>();
 
+// ── THE REPLAY RING, AND WHY IT HAD TO EXIST ─────────────────────────────────────────────────────
+//
+// SSE is the right transport and it works: measured 445 bytes of `hello` + `diagnostic` frames
+// direct from the backend and through the path-allowlist proxy. It delivers ZERO bytes through
+// Cloudflare's free `trycloudflare` tunnel, which buffers the response body — so on the one route an
+// operator actually uses from a phone, the live tail is dead.
+//
+// The brief permits polling "only if justified". This is the justification, and it is measured
+// rather than assumed. So: SSE stays primary, and a page that gets no `hello` falls back to reading
+// this ring by sequence number. Same event model, same data, different carrier — not a page that
+// blindly reloads itself and calls that live.
+//
+// Bounded and lossy on purpose. A poller that has been away longer than the ring is told so via
+// `missed`, rather than being handed a false impression of continuity.
+const REPLAY_SIZE = 200;
+const replay: Array<LiveDiagnosticEvent & { seq: number }> = [];
+let nextSeq = 1;
+
+/**
+ * Events after `sinceSeq`, newest last, plus the current head.
+ *
+ * `missed` is the count this ring has already discarded past the caller's position — the honest
+ * answer to "did I lose anything", which a plain array of results cannot express.
+ */
+export function diagnosticsSince(sinceSeq: number): {
+  events: Array<LiveDiagnosticEvent & { seq: number }>;
+  head: number;
+  missed: number;
+} {
+  const head = nextSeq - 1;
+  if (replay.length === 0) return { events: [], head, missed: 0 };
+  const oldest = replay[0].seq;
+  // A caller asking from before the ring's oldest entry has a gap. Report its size instead of
+  // pretending the window it can see is everything that happened.
+  const missed = sinceSeq > 0 && sinceSeq < oldest - 1 ? oldest - 1 - sinceSeq : 0;
+  return { events: replay.filter((e) => e.seq > sinceSeq), head, missed };
+}
+
 /**
  * Attach a live listener. Returns an unsubscribe function, or null when at capacity.
  *
@@ -338,6 +376,11 @@ export function diagnosticSubscriberCount(): number {
 }
 
 function emitLive(event: LiveDiagnosticEvent): void {
+  // Ring first, listeners second. A poller must be able to see an event even if every SSE
+  // subscriber is broken, and the ring write cannot throw.
+  replay.push({ ...event, seq: nextSeq++ });
+  if (replay.length > REPLAY_SIZE) replay.splice(0, replay.length - REPLAY_SIZE);
+
   for (const fn of listeners) {
     try {
       fn(event);
