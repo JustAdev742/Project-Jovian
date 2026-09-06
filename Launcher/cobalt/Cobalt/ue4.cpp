@@ -595,6 +595,40 @@ namespace Nova::UE4
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
 
+        /**
+         * Read the old ImageSize and write the new one. Split out because MSVC forbids __try in a
+         * function that also needs C++ object unwinding (C2712), and the caller builds log strings.
+         */
+        bool SwapImageSize(void* addr, float w, float h, float outBefore[2])
+        {
+            __try
+            {
+                float* p = (float*)addr;
+                outBefore[0] = p[0];
+                outBefore[1] = p[1];
+                p[0] = w;
+                p[1] = h;
+                return true;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        }
+
+        /**
+         * Offset of a property declared directly on a UScriptStruct.
+         *
+         * OffsetOf walks an OBJECT's class chain, which is the wrong lookup for FSlateBrush --
+         * that is a struct, and its properties are outered to the UScriptStruct itself.
+         */
+        int OffsetInStruct(void* scriptStruct, const std::string& member)
+        {
+            if (!Ready() || !scriptStruct) return -1;
+            static void* propClass = FindObject("/Script/CoreUObject.Property");
+            if (!propClass) return -1;
+            const std::wstring wide(member.begin(), member.end());
+            void* prop = SafeStaticFindIn(propClass, scriptStruct, wide.c_str());
+            return prop ? SafeReadInt(prop, kOffset_InternalOffset) : -1;
+        }
+
         /** Offset of a named property on an object's class, walking up the super chain. -1 if absent. */
         int OffsetOf(void* obj, const std::string& member)
         {
@@ -710,6 +744,54 @@ namespace Nova::UE4
                 struct { void* Texture; bool MatchSize; char pad[7]; } p{ gTexture, false, {} };
                 Cobalt::Log::WriteLine(std::string("[UE4] display: SetBrushFromTexture ") +
                                        (SafePE(image, setBrush, &p) ? "ok" : "faulted"));
+            }
+
+            // ── SIZE, AND WHY NOTHING WAS DRAWN ──────────────────────────────────────────────
+            //
+            // Every step reported ok last build and the engine logged no Slate complaint, which
+            // rules out "the widget was rejected" and leaves "the widget drew nothing visible".
+            // Two causes, both addressed here rather than guessed between:
+            //
+            //   1. A UImage's desired size comes from its brush's ImageSize, which defaults to
+            //      32x32. A 32-pixel square in a 1080p menu is indistinguishable from nothing.
+            //   2. A freshly constructed UMediaTexture has no rendering resource until
+            //      UpdateResource() allocates one, so the brush would have had nothing to sample.
+            //
+            // The old ImageSize is logged before it is changed, so the 32x32 theory is confirmed
+            // or killed by this run rather than assumed.
+            if (void* update = FindObject("/Script/Engine.Texture.UpdateResource"))
+                Cobalt::Log::WriteLine(std::string("[UE4] display: UpdateResource ") +
+                                       (SafePE(gTexture, update, nullptr) ? "ok" : "faulted"));
+            else
+                Cobalt::Log::WriteLine("[UE4] display: Texture.UpdateResource not found");
+
+            // Viewport size, so the image covers the screen instead of sitting at a default.
+            float vw = 1920.f, vh = 1080.f;
+            if (void* getVp = FindObject("/Script/UMG.WidgetLayoutLibrary.GetViewportSize"))
+            {
+                if (void* lib = FindObject("/Script/UMG.Default__WidgetLayoutLibrary"))
+                {
+                    struct { void* World; float X; float Y; } vp{ nullptr, 0.f, 0.f };
+                    if (SafePE(lib, getVp, &vp) && vp.X > 0.f && vp.Y > 0.f) { vw = vp.X; vh = vp.Y; }
+                }
+            }
+            Cobalt::Log::WriteLine("[UE4] display: viewport " + std::to_string((int)vw) + "x" + std::to_string((int)vh));
+
+            const int brushOff = OffsetOf(image, "Brush");
+            void* slateBrushStruct = FindObject("/Script/SlateCore.SlateBrush");
+            const int sizeOff = OffsetInStruct(slateBrushStruct, "ImageSize");
+            Cobalt::Log::WriteLine("[UE4] display: Brush@" + std::to_string(brushOff) +
+                                   " ImageSize@" + std::to_string(sizeOff));
+            if (brushOff >= 0 && sizeOff >= 0)
+            {
+                float before[2] = { -1.f, -1.f };
+                const bool wrote = SwapImageSize((char*)image + brushOff + sizeOff, vw, vh, before);
+                if (wrote)
+                    Cobalt::Log::WriteLine("[UE4] display: ImageSize was " +
+                                           std::to_string((int)before[0]) + "x" + std::to_string((int)before[1]) +
+                                           ", set to " + std::to_string((int)vw) + "x" + std::to_string((int)vh));
+                else
+                    Cobalt::Log::WriteLine("[UE4] display: writing ImageSize faulted");
             }
 
             if (void* addToViewport = FindObject("/Script/UMG.UserWidget.AddToViewport"))
