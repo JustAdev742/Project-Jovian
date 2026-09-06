@@ -34,7 +34,29 @@ export interface XmppClient {
 export const Clients: XmppClient[] = [];
 
 /** MUC rooms */
-export const MUCs: Record<string, { members: { accountId: string }[] }> = {};
+/**
+ * Chat rooms, and who is in them.
+ *
+ * OCCUPANCY IS KEYED BY (accountId, resource) — BY THE FULL JID, NOT THE ACCOUNT.
+ *
+ * It used to be the account alone, and that is wrong twice over. An XMPP occupant IS a full JID, and
+ * on this build ONE account routinely holds two connections at once: when a player hosts, the client
+ * and the headless gameserver are the same Fortnite account with different resources (the same fact
+ * the bind-time eviction comment further down is about).
+ *
+ * The cost was measured, not theorised. `Fortnite_Nova_global_<id>` is joined by both processes; the
+ * second one matched the first's accountId in `members`, the handler treated that as "already in,
+ * nothing to do" and returned WITHOUT SENDING ANYTHING — and a MUC join that is never answered stays
+ * pending forever. In the 2026-09-06 session the client logged `IsInChatRoom: 0` and
+ * `MUC: JoinPublicRoom failed. Another operation already pending` on every retry for the whole
+ * match, 2.5 minutes after the first attempt, and the chat manager re-queried the room list on a
+ * growing backoff (159s, 216s, 265s) for the entire session. Global chat never worked.
+ */
+export const MUCs: Record<string, { members: { accountId: string; resource: string }[] }> = {};
+
+/** One occupant, identified the way XMPP identifies one. */
+const sameOccupant = (m: { accountId: string; resource: string }, accountId: string, resource: string) =>
+  m.accountId === accountId && m.resource === resource;
 
 function makeID(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -151,7 +173,7 @@ function dropExistingClient(accountId: string, resource: string): void {
   for (const roomName of existing.joinedMUCs) {
     const room = MUCs[roomName];
     if (!room) continue;
-    const mi = room.members.findIndex(m => m.accountId === existing.accountId);
+    const mi = room.members.findIndex(m => sameOccupant(m, existing.accountId, existing.resource));
     if (mi !== -1) room.members.splice(mi, 1);
     if (room.members.length === 0) delete MUCs[roomName];
   }
@@ -382,7 +404,10 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
           const muc = MUCs[roomName];
           if (!muc || !muc.members.find(m => m.accountId === accountId)) return;
           muc.members.forEach(member => {
-            const cd = Clients.find(c => c.accountId === member.accountId);
+            // Deliver to the exact session that occupies the room. Matching on account alone sent
+            // the message twice to whichever of a hosting player's two connections came first in
+            // the list, and never to the other one.
+            const cd = Clients.find(c => c.accountId === member.accountId && c.resource === member.resource);
             if (!cd) return;
             cd.ws.send(`<message to="${cd.jid}" from="${getMUCmember(roomName, displayName, accountId, resource)}" xmlns="jabber:client" type="groupchat"><body>${escapeXml(body)}</body></message>`);
           });
@@ -415,7 +440,7 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
           if (to.includes(`@${MUC_DOMAIN}`) && to.toLowerCase().startsWith('party-')) {
             const roomName = to.split('@')[0];
             if (!MUCs[roomName]) return;
-            const idx = MUCs[roomName].members.findIndex(m => m.accountId === accountId);
+            const idx = MUCs[roomName].members.findIndex(m => sameOccupant(m, accountId, resource));
             if (idx !== -1) {
               MUCs[roomName].members.splice(idx, 1);
               // splice(-1, 1) would delete the LAST element — i.e. drop an unrelated room the
@@ -436,16 +461,36 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
         if (hasMucX && msg.root.attributes.to) {
           const roomName = msg.root.attributes.to.split('@')[0];
           if (!MUCs[roomName]) MUCs[roomName] = { members: [] };
-          if (MUCs[roomName].members.find(m => m.accountId === accountId)) return;
-          MUCs[roomName].members.push({ accountId });
-          joinedMUCs.push(roomName);
+
+          // A JOIN IS ALWAYS ANSWERED, even when this occupant is already in the room.
+          //
+          // The previous line here was `if (members.find(m => m.accountId === accountId)) return;`
+          // — a bare return, sending nothing. XMPP has no way to express that: the client has an
+          // outstanding join and simply waits, forever. Every later attempt then fails with
+          // "Another operation already pending", which is the client refusing to open a second join
+          // for a room whose first one never resolved. That is a deadlock we created, and it took
+          // global chat out for the whole session.
+          //
+          // Re-answering is also correct XMPP: a join for a room you already occupy returns the
+          // occupant's own presence. Making it idempotent means a duplicate, a retry, or a stale
+          // membership left by a socket that died without saying goodbye all resolve instead of
+          // wedging.
+          const already = MUCs[roomName].members.some(m => sameOccupant(m, accountId, resource));
+          if (!already) {
+            MUCs[roomName].members.push({ accountId, resource });
+            joinedMUCs.push(roomName);
+          }
           ws.send(
             `<presence to="${jid}" from="${getMUCmember(roomName, displayName, accountId, resource)}" xmlns="jabber:client">` +
             `<x xmlns="http://jabber.org/protocol/muc#user"><item nick="${encodeURIComponent(displayName)}:${accountId}:${resource}" jid="${jid}" role="participant" affiliation="none"/>` +
             `<status code="110"/><status code="100"/><status code="170"/><status code="201"/></x></presence>`
           );
           MUCs[roomName].members.forEach(member => {
-            const cd = Clients.find(c => c.accountId === member.accountId);
+            // Resolve the exact session. Matching on account alone returned whichever of a hosting
+            // player's two connections happened to be first in the list, so the roster could
+            // announce the gameserver's resource as the occupant and the client's own presence
+            // would never come back to it.
+            const cd = Clients.find(c => c.accountId === member.accountId && c.resource === member.resource);
             if (!cd) return;
             ws.send(`<presence from="${getMUCmember(roomName, cd.displayName, cd.accountId, cd.resource)}" to="${jid}" xmlns="jabber:client"><x xmlns="http://jabber.org/protocol/muc#user"><item nick="${encodeURIComponent(cd.displayName)}:${cd.accountId}:${cd.resource}" jid="${cd.jid}" role="participant" affiliation="none"/></x></presence>`);
             if (cd.accountId !== accountId) {
@@ -612,7 +657,7 @@ function removeClient(ws: WebSocket, accountId: string, joinedMUCs: string[]): v
   // Clean up MUC rooms
   for (const roomName of joinedMUCs) {
     if (MUCs[roomName]) {
-      const mi = MUCs[roomName].members.findIndex(m => m.accountId === client.accountId);
+      const mi = MUCs[roomName].members.findIndex(m => sameOccupant(m, client.accountId, client.resource));
       if (mi !== -1) MUCs[roomName].members.splice(mi, 1);
       if (MUCs[roomName].members.length === 0) delete MUCs[roomName]; // don't leak empty rooms
     }

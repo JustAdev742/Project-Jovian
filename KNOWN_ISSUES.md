@@ -223,6 +223,82 @@ or one test launch with a candidate key and a check of whether the request lands
 
 ## Fixed in the tree, NOT yet on any player's machine
 
+### `muc-join-answered-with-silence` · CONFIRMED · **FIXED 2026-09-06** · *found by the dashboard, in a played session*
+
+**Global chat did not work for an entire match, and the backend looked healthy the whole time.**
+
+`xmpp.server.ts` keyed chat-room occupancy by ACCOUNT. The join handler's first act was
+`if (members.find(m => m.accountId === accountId)) return;` — a bare return that sent nothing. XMPP
+has no way to express "nothing to do" for a join: the client has an outstanding request and waits on
+it forever.
+
+**Why an account was already in the room.** On this build one account routinely holds two XMPP
+connections. When a player hosts, the client and the headless gameserver sign in as the same account
+with different resources — the same fact the bind-time eviction note in that file is about. The
+second to join matched the first's accountId and was answered with silence.
+
+**Measured, 2026-09-06 session:**
+
+```
+05:06:16.309  Attempting to join room Fortnite_Nova_global_03eebb6c
+05:08:49.411  JoinChatRoom - InRoomId: Fortnite_Nova_global_03eebb6c, IsInChatRoom: 0   <- 2.5 min later
+05:08:49.411  MUC: JoinPublicRoom failed. Another operation already pending for room ...
+05:08:49.411  FOnlineChatMcp::JoinPublicRoom - failure - user(03eebb6c...) room()
+              Will try requesting chatroom recommendations again in 159s / 216s / 265s
+```
+
+`IsInChatRoom: 0` two and a half minutes after the join is the tell: the first request never
+resolved, so every later one collided with it.
+
+**Fix.** Occupancy is keyed by `(accountId, resource)` — by the full JID, which is what an XMPP
+occupant actually is — and a join is ALWAYS answered, including when the occupant is already in the
+room. Re-answering is correct XMPP (a join for a room you occupy returns your own presence) and it
+means a duplicate, a retry, or a membership left behind by a socket that died without saying goodbye
+all resolve instead of wedging. Message delivery and the occupant roster resolve the exact session
+too; matching on account alone sent a hosting player's messages twice to one connection and never to
+the other.
+
+**Tested by driving a real WebSocket through a real handshake** (`muc-join.test.ts`), because the
+behaviour under test is what the server SENDS — a unit test of the membership array would have passed
+against the broken code, since the array was updated correctly and only the response was missing.
+Verified against the old code: 3 of the 5 tests fail before the fix, all 5 pass after.
+
+---
+
+### `worldinventory-race-at-spawn` · CONFIRMED · **open — mitigated, not fixed**
+
+At every match spawn the client logs `ClientRestart_Implementation failed because WorldInventory is
+invalid` — **342 times in a 3.5-second burst**, then stops. The six
+`AFortQuickBars::AddItemInternal could not find Item with GUID` errors land in the same millisecond
+the burst ends, so they are the tail of the same event rather than a separate bug.
+
+`helper.cpp:705` already mitigates it: the controller's WorldInventory is `ForceNetUpdate`d before
+`Possess`, because Possess fires `ClientRestart`. That is not sufficient — the inventory is a separate
+actor on its own channel, and the client cannot resolve the controller's pointer until that channel
+has opened.
+
+**Why it is not being changed blind.** It is the spawn path. It self-heals in 3.5 seconds, and a
+wrong change there means players do not spawn at all. Fixing it properly needs a way to reproduce and
+measure in-match, not a plausible-looking edit.
+
+---
+
+### Findings from the same session that are NOT ours
+
+Recorded so they are not re-investigated. All were captured by the dashboard and traced to source.
+
+| symptom | count | verdict |
+|---|---:|---|
+| `SendToParty failure` / `UpdateParty request failure` | 10 | **Client startup race.** Both clusters fire ~400 ms BEFORE `OnLoggedIntoXmpp`, which then updates party data successfully. The client attempts a party config update before its own XMPP login completes. |
+| `AFortPoiVolume::PostInitializeComponents … GetBrushComponent(): None` | 115 | **Headless-server artifact.** 115 on the gameserver, **0 on the client** — consistent with `-nullrhi`, which does not build brush components. A consequence of using the game client as a server. |
+| `Couldn't find file for package …LootQuotaData` / `…LootPackages_Client` / `…GgAbilityModifier_Alt` | 12 | **Absent from the build.** Nothing of ours references them — grepped both the backend and Reboot. The client asks on its own and continues. |
+| `unable to load AthenaProfile` | 1 | Once, 33 s into startup, before the profile had been fetched. Transient ordering. |
+| `Invalid chunk size` / `Requested read of -N bytes` | 64 | Corrupt local replay files on that machine. Client-side, cosmetic. |
+
+**And the headline the dashboard earned:** across a full played session, **BACKEND-source failures: 0**.
+No 4xx, no 5xx, no unrouted path. Every diagnostic on the board came from the game engine.
+
+
 ### `curl-setopt-null-deref` · CONFIRMED · **FIXED 2026-09-06** · *new, found while fixing the above*
 `InitializeCurlHook()` printed **"Failed to find CurlSetOptAddr! But we will go ahead.."** and
 installed the detour anyway. That was not a degraded mode, it was a guaranteed crash:
