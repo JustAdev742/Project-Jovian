@@ -13,6 +13,46 @@ anything unverified as a lead.
 
 ## Open — P1
 
+### `processevent-signature-misses-on-7.40` · CONFIRMED · **open — hosting is down on 7.40**
+Hosting aborts before the lobby opens, with a message box: *"Unable to find ProcessEventAddress
+aborting.."*. The gameserver starts, Cobalt initialises inside it, Reboot is injected — and then the
+process stops there. The client is unaffected; this is the host path only.
+
+**The evidence.** From a played session, 2026-09-18:
+
+| Signal | Value |
+|---|---|
+| `Base Address` | `0x7ff778270000` |
+| `ProcessEventAddress` | `0xffff800887d90000` |
+| `Fortnite_Version` | `7.4` (detected correctly) |
+| every other pattern | resolved — `InitHost 0x4655e0`, `TickFlush 0x29fc860`, 23 more |
+
+`patterns.h` prints `Address - Base`, and `0 - 0x7ff778270000` is exactly `0xffff800887d90000`, so
+the address is **zero**: `Memory::FindPattern(ProcessEventPattern)` found nothing. Version detection
+is fine, the 4.22 block ran, and precisely one signature fails to land.
+
+**The function is there.** Cobalt, in the same process, resolves it without trouble and logs
+`[UE4] ProcessEvent=ok StaticFindObject=ok Objects=ok`. It uses Memcury rather than this signature.
+
+**Not a regression.** Suspicion first fell on the 1.8.7 Reboot rebuild. It is not that:
+the DLL extracted from the published v1.8.1 installer and a build from reverted source carry
+**byte-identical ProcessEvent signatures** (all five variants), and the two binaries differ by 32
+bytes out of 801,792 — the PE timestamp, checksum and debug GUID. 1.8.1 aborts the same way. This
+has been broken for as long as the signature has been wrong; it surfaces only when someone hosts.
+
+**Static verification is not available.** The shipping exe's code is packed on disk and only decrypts
+in memory: a byte scan of the file fails to find even the patterns that demonstrably resolve at
+runtime, so a candidate signature cannot be checked without launching the game.
+
+**Attempted, then reverted deliberately.** Reboot resolves ProcessEvent from one signature and
+aborts if it misses, despite already shipping four others for neighbouring engine versions that are
+never tried. A fallback chain through them builds clean and cannot do worse than aborting — but an
+unverified signature that lands on the *wrong* function is worse than a clean abort, so it was kept
+out of 1.8.8. It is preserved and is a two-line reinstatement.
+
+**The fix that does not guess:** port Cobalt's Memcury-based resolution, which is already proven on
+this exact build, rather than adding another hand-written signature.
+
 ### `gameserver-register-unauthenticated` · CONFIRMED · accepted open
 `matchmaking.routes.ts:953,1001` gate registration on
 `if (Config.REGISTER_SECRET && b.secret !== Config.REGISTER_SECRET)`, and `config.ts:110` defaults
