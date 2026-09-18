@@ -1,11 +1,11 @@
 {
-  "version": "1.8.8",
-  "notes": "Removes Fly Pilot from the shipped build.\n\n1.8.7 shipped it as an experimental toggle before it was ready. It was also inert: the call that reads its config never made it into the DLL, so the switch wrote a file nothing consumed. Every shipped file is back to its pre-1.8.7 state, and the rebuilt game-server DLL differs from the one in 1.8.1 only by its build timestamp and checksum.\n\nEverything from 1.8.2 to 1.8.6 is unchanged and still included, so if you are coming from 1.8.1 you still get the whole bumper chain:\n- The intro bumper draws through the game's own media texture instead of a guessed vtable.\n- The bumper stays hidden until Battle Royale, and has sound.\n- The lobby music waits for the bumper instead of talking over it.\n- All music stops for the bumper, by sound class.\n- One soundtrack after the bumper, not two.\n\nKnown issue, not fixed by this update: hosting on 7.40 aborts with \"Unable to find ProcessEventAddress\". That is a signature in the game-server DLL that misses on this build. It is not new and not caused by 1.8.7 - the 1.8.1 DLL fails identically - and it only shows up when your machine is elected host.",
-  "pub_date": "2026-09-18T12:10:51Z",
+  "version": "1.8.1",
+  "notes": "**Fixes the freeze 1.8.0 caused. Take this update.**\n\n1.8.0 tried to reach a piece of the engine that is not normally reachable, by trying possibilities\nuntil one appeared to work. One of them appeared to work and did not — it reported the video as 2\npixels wide — and the check accepted that instead of rejecting it as obvious nonsense. The game\nthen hung on the loading screen. That was my mistake and it is removed, not disabled.\n\nEverything else stays: the video still loads and plays, the overlay is still built and waiting for\nBattle Royale, and the off switch still works. The video itself will render blank until there is a\nsafe way to give it a drawing surface — which is a real remaining problem, not a solved one.\n\nIf 1.8.0 left your game stuck, this update clears it.",
+  "pub_date": "2026-09-06T09:36:20Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVhub2wrSXlwNW5zRVRUbVZ5YmpuS3ZUbGNpWWhJKzhaZmdHUEE0SjhiOVpya2U5VXlsM2NVcHVCSVkyR2Y5UGM3Uk5ad3A1c3F6cFdUcFFsNzRpNlE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NzMzNDMzCWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjguOF94NjQtc2V0dXAubnNpcy56aXAKb0t3ekt2TnZKNkhlM2Uwa2dxUkdXY0ZPM0lLU3YyRHRwMU9jWUJ0eU5jYzNjbzNKdlY3R1RBbmd2RnJhRjFLUFhIYmZJMVlIU0FoWmlUM0pIc0MyQ1E9PQo=",
-      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.8.8/Project.Launcher_1.8.8_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVNXbU55RUZXMUlqL1FUMWtmL0twaFpVdW1pK1ZQdDFxRmtSb29KRDVGZ1VMb0ZlTnZHaFp2dTRTd0Q5d21oVE8xOE40cGliSlZsMkZsUnorK1diZWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4Njg3MzU3CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjguMV94NjQtc2V0dXAubnNpcy56aXAKU1pZRTlVYUlVTHQ2V2szMDN0dHEyTlNwdVVwUVlOcTZNMGcyaVJzaElmM2puaDVhekJSVTVQbVlsZHIxQ00vUWFpZEd6anR3bXg5Y0t4K1M4aUNJQVE9PQo=",
+      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.8.1/Project.Launcher_1.8.1_x64-setup.nsis.zip"
     }
   }
 }
