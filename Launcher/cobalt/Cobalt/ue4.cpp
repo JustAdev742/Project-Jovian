@@ -189,6 +189,13 @@ namespace Nova::UE4
         return (gResolved.load() && gObjects) ? gObjects->NumElements : 0;
     }
 
+    void* ProcessEventAddress()
+    {
+        // Captured at Init, BEFORE the game-thread detour is installed. The detour rewrites the
+        // first bytes of the function but never moves it, so this is the real entry either way.
+        return gResolved.load() ? reinterpret_cast<void*>(gProcessEvent) : nullptr;
+    }
+
     namespace
     {
         /**
@@ -2150,4 +2157,26 @@ namespace Nova::UE4
         }
         Cobalt::Log::WriteLine("[UE4] probe finished with items still unresolved (see the last pass)");
     }
+}
+
+// ── PUBLISHED TO PROJECT REBOOT ──────────────────────────────────────────────────────────────────
+//
+// Reboot scans the game's memory for ProcessEvent's opening bytes and aborts hosting outright when
+// it finds nothing: "Unable to find ProcessEventAddress aborting..".
+//
+// That scan is INTERMITTENT on 7.40, and the evidence is in one afternoon's cobalt.log: the scan
+// missed at 21:42 and 21:52, resolved three times running at 22:01-22:02, then missed again at 22:14
+// and 22:34 -- same machine, same game build, same base address, and a pattern that is byte-identical
+// in both copies of Reboot's source. It is not a regression from any particular build; it is a race
+// nobody was winning reliably.
+//
+// Cobalt, in the same process, resolves the very same pattern in EVERY logged session -- and then
+// proves the address is right by making thousands of calls through it (every GetName, every
+// SpawnObject, the whole bumper). So rather than have Reboot re-derive what is already known good
+// here, Cobalt publishes it and Reboot prefers it, keeping its own scan as the fallback.
+//
+// Exported with a Nova-specific name so nothing in the game can collide with it.
+extern "C" __declspec(dllexport) unsigned long long NovaGetProcessEventAddress()
+{
+    return reinterpret_cast<unsigned long long>(Nova::UE4::ProcessEventAddress());
 }

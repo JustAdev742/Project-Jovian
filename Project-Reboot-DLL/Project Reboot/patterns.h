@@ -687,6 +687,56 @@ static bool InitializePatterns()
 	StaticFindObjectAddress = Memory::FindPattern(StaticFindObjectPattern);
 	StaticLoadObjectAddress = Memory::FindPattern(StaticLoadObjectPattern);
 	ProcessEventAddress = Memory::FindPattern(ProcessEventPattern);
+
+	// ASK COBALT WHEN THE SCAN MISSES.
+	//
+	// The scan above is INTERMITTENT on 7.40, and a miss aborts hosting outright with a message
+	// box ("Unable to find ProcessEventAddress aborting.."). One afternoon's cobalt.log has it
+	// missing at 21:42 and 21:52, resolving three times running at 22:01-22:02, then missing again
+	// at 22:14 and 22:34 -- same machine, same game build, same base address. The pattern is not
+	// wrong: it is byte-identical in both copies of this source, and it is the same one Cobalt uses.
+	//
+	// Cobalt is already in this process -- the game loads it as GFSDK_Aftermath_Lib.x64.dll -- it
+	// resolves this pattern in EVERY logged session, and it proves the address by calling through
+	// it thousands of times before Reboot is ever injected. So when our scan comes up empty, take
+	// what Cobalt found rather than refusing to host.
+	//
+	// The address is range-checked against this module instead of being trusted on sight: calling
+	// a wrong address would be far worse than a clean abort, which is the whole reason a guessed
+	// signature was never added here.
+	if (!ProcessEventAddress)
+	{
+		if (auto CobaltModule = GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll"))
+		{
+			if (auto GetPublished = (unsigned long long(*)())GetProcAddress(CobaltModule, "NovaGetProcessEventAddress"))
+			{
+				const auto Published = GetPublished();
+				const auto ModuleBase = (uintptr_t)GetModuleHandleW(0);
+				const auto DosHeader = (PIMAGE_DOS_HEADER)ModuleBase;
+				const auto NtHeaders = (PIMAGE_NT_HEADERS)(ModuleBase + DosHeader->e_lfanew);
+				const auto ImageSize = NtHeaders->OptionalHeader.SizeOfImage;
+
+				if (Published >= ModuleBase && Published < ModuleBase + ImageSize)
+				{
+					ProcessEventAddress = Published;
+					std::cout << std::format("ProcessEvent: our scan found nothing; using Cobalt's 0x{:x}\n", Published - ModuleBase);
+				}
+				else if (Published)
+				{
+					std::cout << std::format("ProcessEvent: Cobalt offered 0x{:x}, outside this module - ignored\n", Published);
+				}
+				else
+				{
+					std::cout << "ProcessEvent: Cobalt is loaded but has not resolved it yet\n";
+				}
+			}
+		}
+		else
+		{
+			std::cout << "ProcessEvent: scan found nothing and Cobalt is not loaded in this process\n";
+		}
+	}
+
 	SetWorldAddress = Memory::FindPattern(SetWorldPattern);
 	PauseBeaconRequestsAddress = Memory::FindPattern(PauseBeaconRequestsPattern);
 	ObjectsAddress = Memory::FindPattern(ObjectsPattern, false, 7, true);

@@ -13,7 +13,7 @@ anything unverified as a lead.
 
 ## Open — P1
 
-### `processevent-signature-misses-on-7.40` · CONFIRMED · **open — hosting is down on 7.40**
+### `processevent-signature-misses-on-7.40` · CONFIRMED · **FIXED 2026-09-18 (ships in 1.8.9)** · *was: hosting is down on 7.40*
 Hosting aborts before the lobby opens, with a message box: *"Unable to find ProcessEventAddress
 aborting.."*. The gameserver starts, Cobalt initialises inside it, Reboot is injected — and then the
 process stops there. The client is unaffected; this is the host path only.
@@ -52,6 +52,55 @@ out of 1.8.8. It is preserved and is a two-line reinstatement.
 
 **The fix that does not guess:** port Cobalt's Memcury-based resolution, which is already proven on
 this exact build, rather than adding another hand-written signature.
+---
+
+**RESOLVED 2026-09-18 — and two claims above were wrong.** Re-examined with the full cobalt.log,
+which records every attempt rather than the one that was in front of us:
+
+| time | result |
+|---|---|
+| 21:42:55 | miss (`0xffff800887d90000`, i.e. 0) |
+| 21:52:30 | miss |
+| 22:01:02 | **resolved `0x38e340`** |
+| 22:01:53 | **resolved `0x38e340`** |
+| 22:02:45 | **resolved `0x38e340`** |
+| 22:14:29 | miss |
+| 22:34:54 | miss |
+
+So it is **intermittent, not permanently broken** — same machine, same game build, same base
+address `0x7ff778270000`. "This has been broken for as long as the signature has been wrong" was
+wrong: the signature resolves, just not reliably.
+
+The second wrong claim was that Cobalt "uses Memcury rather than this signature". It does not.
+`ue4.cpp`'s `kProcessEvent` is character-for-character the pattern `patterns.h` sets in the
+`Engine_Version == 422` block, and Cobalt's `FindPattern` is a port of Reboot's `Memory::FindPattern`
+— same base, same `SizeOfImage` range, same wildcard handling. Both copies of the Reboot source
+were also confirmed byte-identical apart from line endings. **Nothing about the pattern or the
+scanner differs.** Two suspects were raised and killed by the log rather than by argument:
+
+- *Cobalt's MinHook detour rewrites ProcessEvent's opening bytes, so the scan can no longer match.*
+  Plausible, and false: the processes that started at 22:00:19, 22:01:11 and 22:02:02 each logged
+  `game-thread hook installed` ~21 s in and **then** resolved the pattern ~19 s later. A destroyed
+  pattern would have failed every time.
+- *The 1.8.7 → 1.8.8 Reboot rebuild caused it.* Also false — misses bracket the successes on both
+  sides, and `patterns.h` has never been modified in this repo's history.
+
+**The fix, which needs none of that settled.** Cobalt resolves this address in *every* logged
+session and then proves it by making thousands of calls through it — every `GetName`, every
+`SpawnObject`, the whole bumper — long before Reboot is injected. So Cobalt publishes it
+(`NovaGetProcessEventAddress`, exported; captured at Init, before its own detour is installed) and
+Reboot prefers it whenever its own scan returns nothing. The scan is kept as the first attempt, so
+behaviour is unchanged whenever it works.
+
+Reboot **range-checks the published address against its own module** before using it. That was the
+stated reason a guessed signature was never added — an address that lands on the wrong function is
+worse than a clean abort — and it still applies to a value handed over by another DLL.
+
+If Cobalt is absent the behaviour is exactly as before, so nothing depends on load order.
+
+**Proof to look for** in cobalt.log when hosting: `ProcessEvent: our scan found nothing; using
+Cobalt's 0x38e340` — and no message box. A session where the scan works logs nothing new.
+
 
 ### `gameserver-register-unauthenticated` · CONFIRMED · accepted open
 `matchmaking.routes.ts:953,1001` gate registration on

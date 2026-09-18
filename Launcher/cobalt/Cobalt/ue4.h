@@ -68,6 +68,14 @@ namespace Nova::UE4
     /** How many objects the engine currently holds. 0 before the array is up. */
     int ObjectCount();
 
+    /**
+     * The ProcessEvent address resolved at Init, before any hook was installed. Null until then.
+     *
+     * Published to Project Reboot through the `NovaGetProcessEventAddress` export -- see the note at
+     * the bottom of ue4.cpp for why hosting depends on it.
+     */
+    void* ProcessEventAddress();
+
     /** An object's name, via KismetSystemLibrary.GetObjectName. Empty when unavailable. */
     std::string GetName(UObject* object);
 
