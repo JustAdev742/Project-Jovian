@@ -2,6 +2,7 @@
 
 #include "patterns.h"
 #include "server.h"
+#include "flypilot.h"
 #include "loot.h"
 #include <intrin.h>
 #include "team.h"
@@ -1170,6 +1171,10 @@ void Server::Hooks::TickFlush(UObject* thisNetDriver, float DeltaSeconds)
 			}
 		}
 	}
+
+	// [Nova] Experimental fly pilot. No-op unless flypilot.json enables it; the network runs on
+	// its own thread, so this only builds a small view and applies the last command it produced.
+	FlyPilot::OnTick(DeltaSeconds);
 
 	return Defines::TickFlush(thisNetDriver, DeltaSeconds);
 }

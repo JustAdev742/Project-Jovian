@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "ai.h"
+#include "flypilot.h"
 #include "patterns.h"
 #include "server.h"
 #include "helper.h"

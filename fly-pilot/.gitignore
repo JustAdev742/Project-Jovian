@@ -1,0 +1,11 @@
+# Connectome downloads (~1.1 GB) and everything derived from them. All of it is
+# regenerable with the commands in README.md, and none of it belongs in git.
+data/
+brain/
+dist/
+native/*.dll
+native/*.lib
+native/*.exp
+native/*.obj
+__pycache__/
+results-*.json
