@@ -139,12 +139,6 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
   // The intro bumper. Owned by a marker file the game-side shim reads, not by localStorage — the
   // launcher asks the backend for the truth rather than remembering its own version of it.
   const [bumper, setBumper] = useState(true);
-  // Fly pilot. Experimental: a simulation of a real fly's connectome flies a pawn inside the
-  // server. Owned by flypilot.json next to the game exe, and useless without the ~121 MB brain
-  // blob, so the status reports the two independently.
-  const [flyPilot, setFlyPilot] = useState(false);
-  const [flyPilotBlob, setFlyPilotBlob] = useState<{ present: boolean; mb: number }>(
-    { present: false, mb: 0 });
 
   const [status, setStatus] = useState<string>("");
   const [role, setRole] = useState<MeshRole>("offline");
@@ -194,14 +188,6 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     invoke<{ enabled: boolean; clip_present: boolean }>("bumper_status")
       .then((s) => setBumper(s.enabled))
       .catch(() => { /* default stays on, which is what the game assumes too */ });
-
-    const savedForFly = localStorage.getItem("buildPath");
-    if (savedForFly) {
-      invoke<{ enabled: boolean; blob_present: boolean; blob_mb: number }>(
-        "flypilot_status", { path: savedForFly })
-        .then((s) => { setFlyPilot(s.enabled); setFlyPilotBlob({ present: s.blob_present, mb: s.blob_mb }); })
-        .catch(() => { /* no build picked yet; the switch stays off and says why */ });
-    }
 
     const savedBuilds = localStorage.getItem("ProjectMP.builds");
     if (savedBuilds) {
@@ -919,19 +905,6 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     });
   }, [notify]);
 
-  const toggleFlyPilot = useCallback((next: boolean) => {
-    if (!path) {
-      notify({ kind: "error", title: "Pick your Fortnite build first",
-               body: "The fly pilot setting is written next to the game, so the launcher needs to know where that is." });
-      return;
-    }
-    setFlyPilot(next);
-    invoke("flypilot_set_enabled", { path, enabled: next }).catch((e) => {
-      setFlyPilot(!next);
-      notify({ kind: "error", title: "Couldn’t change the fly pilot setting", body: String(e) });
-    });
-  }, [path, notify]);
-
   /* Poll the coordinator so the banner reflects now, not whenever Play was last pressed.
      30s is a compromise: fast enough that a player who alt-tabs back sees the truth, slow enough
      that it is not a meaningful load on a home-hosted box. Only runs in P2P mode — a single-PC
@@ -992,9 +965,9 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
   return {
     // state
-    path, setPath, builds, isLaunching, EOR, p2pMode, bumper, flyPilot, flyPilotBlob, status, role, injecting, playitAddr, mesh, health,
+    path, setPath, builds, isLaunching, EOR, p2pMode, bumper, status, role, injecting, playitAddr, mesh, health,
     // actions
     launch, injectServer, registerHost, launchClient, addBuild, removeBuild,
-    setPlayitAddr, toggleEOR, toggleP2p, toggleBumper, toggleFlyPilot,
+    setPlayitAddr, toggleEOR, toggleP2p, toggleBumper,
   };
 }

@@ -7,7 +7,6 @@ use tauri::{AppHandle, Manager, Window};
 mod anticheat;
 mod bumper;
 mod diagnostics;
-mod flypilot;
 mod diagreport;
 mod net;
 mod carter;
@@ -380,8 +379,6 @@ async fn main() {
             ue4log::ue4_log_ingest_now,
             bumper::bumper_status,
             bumper::bumper_set_enabled,
-            flypilot::flypilot_status,
-            flypilot::flypilot_set_enabled,
             host::p2p_fetch_register_secret,
             host::p2p_register_host,
             host::p2p_unregister_host,

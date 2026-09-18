@@ -181,23 +181,6 @@ export default function Settings({ api }: { api: LauncherApi }) {
             />
           </div>
         </Card>
-
-        {/* ── Experimental ──────────────────────────────────────────── */}
-        <Card>
-          <CardHeader title="Experimental" />
-          <div className="px-5 divide-y divide-hairline">
-            <Switch
-              checked={api.flyPilot}
-              onChange={api.toggleFlyPilot}
-              label="Fly pilot"
-              description={
-                api.flyPilotBlob.present
-                  ? "Hand a bot over to a simulation of a real fly’s brain — 168,730 neurons from the Janelia male CNS connectome, running on the server. It is a research toy, not an opponent."
-                  : "Needs the brain data file, which isn’t installed. Build it with fly-pilot/flypilot/export_blob.py and put flybrain.bin in your build’s Reboot Resources folder."
-              }
-            />
-          </div>
-        </Card>
       </div>
     </div>
   );

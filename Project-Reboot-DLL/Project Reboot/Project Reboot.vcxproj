@@ -160,7 +160,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="flypilot.cpp" />
     <ClCompile Include="..\other\inc\ImGui\imgui.cpp" />
     <ClCompile Include="..\other\inc\ImGui\imgui_demo.cpp" />
     <ClCompile Include="..\other\inc\ImGui\imgui_draw.cpp" />
@@ -198,7 +197,6 @@
     <ClCompile Include="zone.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="flypilot.h" />
     <ClInclude Include="abilities.h" />
     <ClInclude Include="diagnostics.h" />
     <ClInclude Include="ai.h" />
