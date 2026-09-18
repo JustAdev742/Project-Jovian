@@ -1,11 +1,11 @@
 {
-  "version": "1.8.1",
-  "notes": "**Fixes the freeze 1.8.0 caused. Take this update.**\n\n1.8.0 tried to reach a piece of the engine that is not normally reachable, by trying possibilities\nuntil one appeared to work. One of them appeared to work and did not — it reported the video as 2\npixels wide — and the check accepted that instead of rejecting it as obvious nonsense. The game\nthen hung on the loading screen. That was my mistake and it is removed, not disabled.\n\nEverything else stays: the video still loads and plays, the overlay is still built and waiting for\nBattle Royale, and the off switch still works. The video itself will render blank until there is a\nsafe way to give it a drawing surface — which is a real remaining problem, not a solved one.\n\nIf 1.8.0 left your game stuck, this update clears it.",
-  "pub_date": "2026-09-06T09:36:20Z",
+  "version": "1.8.9",
+  "notes": "Hosting works again.\n\nHosting had been failing with \"Unable to find ProcessEventAddress aborting..\". The game server looks for a particular piece of the engine by scanning memory for it, and that search was unreliable on 7.40 — the same build found it three times in a row one minute and came up empty the next, and a miss stops hosting dead.\n\nCobalt, which is already running inside the same game, finds that same piece every single time and then uses it thousands of times over, so it is known to be right. It now hands the answer to the game server, which uses it whenever its own search comes up empty. The address is checked before it is used, so a bad one is ignored rather than trusted.\n\nThis release also tidies up the version numbering. 1.8.7 and 1.8.8 were withdrawn, so this is the first release after 1.8.6 — installing it will bring you up to date from any of them.",
+  "pub_date": "2026-09-18T12:56:49Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVNXbU55RUZXMUlqL1FUMWtmL0twaFpVdW1pK1ZQdDFxRmtSb29KRDVGZ1VMb0ZlTnZHaFp2dTRTd0Q5d21oVE8xOE40cGliSlZsMkZsUnorK1diZWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4Njg3MzU3CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjguMV94NjQtc2V0dXAubnNpcy56aXAKU1pZRTlVYUlVTHQ2V2szMDN0dHEyTlNwdVVwUVlOcTZNMGcyaVJzaElmM2puaDVhekJSVTVQbVlsZHIxQ00vUWFpZEd6anR3bXg5Y0t4K1M4aUNJQVE9PQo=",
-      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.8.1/Project.Launcher_1.8.1_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVZFenBEeHM1NnFjZnNJN0RRUFhkeE1GOHAwOW5MV3JhbFhiZTVhaXVKT1cwRGRKRUl1TkRaZGpnZFY0YnV1Tk9MOHNOTm9oMTlCR0ZTcnJ4Zm12bUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NzM2MTk3CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjguOV94NjQtc2V0dXAubnNpcy56aXAKeWxuTzRRbHNZV205Ni9aNzd6dGhNVFZmczZjbHlOYXdwdUdSWXNmc1g5TzZYaEJYZjQyOW8wSjN3bHV5cnlLTklYZzR6MTBZMWZIc0hReS9KSURuQUE9PQo=",
+      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.8.9/Project.Launcher_1.8.9_x64-setup.nsis.zip"
     }
   }
 }
