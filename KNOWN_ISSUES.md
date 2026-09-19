@@ -13,7 +13,7 @@ anything unverified as a lead.
 
 ## Open — P1
 
-### `processevent-signature-misses-on-7.40` · CONFIRMED · **FIXED 2026-09-18 (ships in 1.8.9)** · *was: hosting is down on 7.40*
+### `processevent-signature-misses-on-7.40` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-19 (1.8.9)** · *was: hosting is down on 7.40*
 Hosting aborts before the lobby opens, with a message box: *"Unable to find ProcessEventAddress
 aborting.."*. The gameserver starts, Cobalt initialises inside it, Reboot is injected — and then the
 process stops there. The client is unaffected; this is the host path only.
@@ -100,6 +100,20 @@ If Cobalt is absent the behaviour is exactly as before, so nothing depends on lo
 
 **Proof to look for** in cobalt.log when hosting: `ProcessEvent: our scan found nothing; using
 Cobalt's 0x38e340` — and no message box. A session where the scan works logs nothing new.
+
+**Confirmed in play 2026-09-19.** The handoff fired and hosting completed end to end:
+
+```
+ProcessEvent: our scan found nothing; using Cobalt's 0x1b4b0d0
+ProcessEventAddress: 0x1b4b0d0          <- every other pattern resolved on its own
+Listening on port: 7777 / Players may join now! / Ready to start match!
+[HostRunner] Gameserver is READY — now joinable
+```
+
+Note the address differs from the 0x38e340 in the earlier session: the scan is not merely flaky, the
+function moves between runs, which is consistent with the packed executable decrypting into different
+layouts. That is another reason a hand-written signature was the wrong fix and asking the process
+what it found was the right one.
 
 
 ### `gameserver-register-unauthenticated` · CONFIRMED · accepted open
@@ -413,6 +427,49 @@ call sat inside an `if`, and the hide silently never happened — in 1.8.1 as we
 resolves a call; the hide is applied before and after `AddToViewport`, to the image as well, and
 `GetVisibility` is read back and logged (`visibility read back 2 … after`). A silent `if` around a
 lookup that can fail is the pattern to watch for: the log said "hidden" without ever checking.
+
+### `host-demand-ignored-region` · CONFIRMED · **FIXED 2026-09-19 (ships in 1.9.0)** · *global self-hosting was region-blind*
+
+**One gameserver anywhere in the world made every other region look served**, so no second host was
+ever elected and distant players were routed across the planet.
+
+`getHostDemand` decides whether a region needs a host, and it asks `hasLiveGameServer`, which asked
+`resolveGameServer`. That function's last fallback is `pickBest(ready)` — deliberately region-blind,
+because routing a player who is already on their way must never come back empty; a 300ms match beats
+a dead connect. Correct for routing, and wrong for the demand question, which was reusing it.
+
+The result is the kind of bug that reads as working code: the election in the same file weights
+proximity at 65% and is carefully argued, and it was never reached, because the demand it reacts to
+had already been answered by a server on another continent.
+
+**Fix.** `resolveGameServer` takes a `regionStrict` flag. Strict callers still fall back past the
+playlist, but only within the region; routing is untouched and still never returns null. Only
+`hasLiveGameServer` — the "do we need a host here?" question — is strict.
+
+Callers that send no region are unaffected: `regionOk` waves everything through when there is nothing
+to match against, which is exactly what launchers from before regions existed send.
+
+**Verified by tests that fail without the fix.** `regions-election.test.ts` (new, 13 tests) covers the
+distance maths, lobby scoring, the election's own claim that a nearby mid-range PC beats a distant
+powerhouse, and this regression. Against the old code the two region-demand tests fail and the other
+eleven pass; with the fix all thirteen pass, inside a suite of 258.
+
+### `solo-lobby-waited-the-full-warmup` · CONFIRMED · **FIXED 2026-09-19 (ships in 1.9.0)**
+
+**A solo self-host sat in an empty lobby for the full 45s warmup**, which was the largest single slice
+of the reported "two minutes to load" — and none of it was waiting for anything.
+
+Measured from a played session (2026-09-19 01:27): game boot to injectable ~40s, injection to
+joinable 13.2s, join to warmup ~11s, then a fixed 45s hold. About 110s in total.
+
+The hold exists to cover the gap between the first player arriving and the last, so the honest signal
+is whether anyone is still arriving — not a fixed number of seconds. `WarmupWaitSeconds` is now a
+ceiling: each join re-arms `WarmupIdleSeconds` (15s), and the bus leaves when that runs out or the
+ceiling hits, whichever is first. A lobby that keeps filling still runs to the full 45s.
+
+Player count comes from `AGameModeBase::NumPlayers` via a tolerant offset lookup — on a build without
+that property the count stays 0, the early start can never fire, and the behaviour is exactly the
+fixed hold it was before.
 
 ### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.5)** · *1.8.4 silenced nothing that mattered*
 

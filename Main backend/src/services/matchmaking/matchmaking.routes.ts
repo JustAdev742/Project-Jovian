@@ -279,7 +279,8 @@ function pickBest(list: GameServerEntry[]): GameServerEntry | undefined {
 function resolveGameServer(
   playlist?: string,
   region?: string,
-  requireJoinable = false
+  requireJoinable = false,
+  regionStrict = false,
 ): { address: string; port: number; entry?: GameServerEntry } {
   const pl = (playlist || '').toLowerCase();
   const rg = (region || '').toUpperCase();
@@ -293,7 +294,21 @@ function resolveGameServer(
   const byPlaylist = pl ? ready.filter(e => e.playlist === pl && regionOk(e)) : [];
   const anyPlaylist = ready.filter(e => e.playlist === '*' && regionOk(e));
 
-  const pick = pickBest(byPlaylist) || pickBest(anyPlaylist) || pickBest(ready);
+  /* ── THE LAST FALLBACK IGNORES REGION, AND WHO ASKS DECIDES WHETHER THAT IS RIGHT ────────────────
+   *
+   * Routing an ALREADY-PLACED player must never come back empty, so for them the final fallback
+   * takes any ready server at all — a 300ms match beats a dead connect.
+   *
+   * Asking "do we already have a server for these players?" is the opposite question, and answering
+   * it region-blind broke global self-hosting outright: hasLiveGameServer feeds getHostDemand, so a
+   * single joinable server ANYWHERE made needsHost false for EVERY region. No second host was ever
+   * elected, every distant player was routed across the planet, and the election's 65% proximity
+   * weighting never got a say — the demand it reacts to had already been answered.
+   *
+   * So a strict caller still falls back past the playlist, but only within the region.
+   */
+  const lastResort = regionStrict ? ready.filter(regionOk) : ready;
+  const pick = pickBest(byPlaylist) || pickBest(anyPlaylist) || pickBest(lastResort);
   if (pick) return { address: pick.address, port: pick.port, entry: pick };
 
   // No registered server → config single-server fallback (localhost by default).
@@ -440,7 +455,12 @@ export function hasLiveGameServer(playlist?: string, region?: string): boolean {
   // Deliberately JOINABLE, not merely live. The MMS handler uses this to decide when to release a
   // waiting player into the match — releasing them into a full or already-started server is exactly
   // the case we're trying to avoid. When this is false, decideHost() elects a new host instead.
-  return !!resolveGameServer(playlist, region, true).entry;
+  //
+  // And deliberately REGION-STRICT: this is the "do we need a host here?" question, so a server on
+  // another continent must not answer it. See the fallback note in resolveGameServer. A caller that
+  // passes no region is unaffected — regionOk waves everything through when there is nothing to
+  // match against, which is exactly what older launchers send.
+  return !!resolveGameServer(playlist, region, true, true).entry;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -503,7 +523,7 @@ function waitingRegions(playlist: string, region: string): string[] {
  * WHEN EVERYONE IS IN ONE REGION — the normal case today — every candidate gets proximity 100 and
  * this collapses to the old hardware ranking, scaled. Existing single-country setups are unaffected.
  */
-function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
+export function electionScore(c: MeshCandidate, waiterRegions: string[]): number {
   const prox = lobbyProximityScore(c.region, waiterRegions);
   const base = usefulHardware(c.score) * 0.35 + prox * 0.65;
   return Math.round(base * failurePenalty(c.accountId) * 100) / 100;

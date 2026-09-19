@@ -826,10 +826,52 @@ void Server::Hooks::TickFlush(UObject* thisNetDriver, float DeltaSeconds)
 			{
 				auto Now = Helper::GetTimeSeconds();
 
-				if (Now >= Defines::WarmupHoldUntil)
+				// Is the lobby still filling? See Defines::WarmupIdleSeconds for why this is the
+				// question rather than "has the timer run out".
+				int Players = 0;
+
+				if (auto GameMode = Helper::GetGameMode())
 				{
-					// Expired: stop interfering so the normal Warmup -> Aircraft transition happens.
-					std::cout << "[Warmup] hold finished - starting the match\n";
+					// AGameModeBase::NumPlayers -- players who have finished joining, which is
+					// precisely what the hold is waiting for. The tolerant lookup matters: on a
+					// build without this property Players stays 0, the early start can never fire,
+					// and the behaviour is exactly the fixed hold it was before.
+					static auto NumPlayersOffset = GameMode->GetOffset("NumPlayers", false, false, false);
+
+					if (NumPlayersOffset)
+						Players = *Get<int>(GameMode, NumPlayersOffset);
+				}
+
+				if (Players > Defines::WarmupSeenPlayers)
+				{
+					Defines::WarmupSeenPlayers = Players;
+					Defines::WarmupLastJoinAt = Now;
+
+					std::cout << "[Warmup] " << Players << " player(s) in - holding "
+					          << Defines::WarmupIdleSeconds << "s more in case anyone else is coming\n";
+				}
+
+				const bool bStoppedFilling =
+					Players > 0 && Defines::WarmupLastJoinAt > 0.f &&
+					(Now - Defines::WarmupLastJoinAt) >= Defines::WarmupIdleSeconds;
+
+				if (Now >= Defines::WarmupHoldUntil || bStoppedFilling)
+				{
+					std::cout << (bStoppedFilling
+						? "[Warmup] nobody else is joining - starting the match early\n"
+						: "[Warmup] hold finished - starting the match\n");
+
+					// Starting EARLY means bringing the bus forward, and the clamp below only ever
+					// pushes it back -- so it has to be pulled in explicitly here. This is the one
+					// place allowed to shorten a lobby, and only once it has stopped filling.
+					if (bStoppedFilling)
+					{
+						auto EndTime = Get<float>(GameState, WarmupCountdownEndTimeOffset);
+
+						if (*EndTime > Now)
+							*EndTime = Now;
+					}
+
 					Defines::WarmupHoldUntil = 0.f;
 				}
 				else

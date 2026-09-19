@@ -477,6 +477,11 @@ bool ServerReadyToStartMatch(UObject* PlayerController, UFunction* Function, voi
 					*Get<float>(GameState, WarmupCountdownStartTimeOffset) = Now;
 
 				Defines::WarmupHoldUntil = Now + Defines::WarmupWaitSeconds;
+
+				// Arm the fill tracking for this match. Players joining from here on decide whether
+				// the hold runs its full length.
+				Defines::WarmupSeenPlayers = 0;
+				Defines::WarmupLastJoinAt = 0.f;
 				*Get<float>(GameState, WarmupCountdownEndTimeOffset) = Defines::WarmupHoldUntil;
 
 				// Make the countdown VISIBLE for the whole hold. The HUD only draws numbers once the
@@ -1647,6 +1652,8 @@ static DWORD WINAPI MatchRestartThread(LPVOID)
 
 	// Clear per-match state so the next match warms up properly.
 	Defines::WarmupHoldUntil = 0.f;
+	Defines::WarmupSeenPlayers = 0;
+	Defines::WarmupLastJoinAt = 0.f;
 
 	Server::Restart();
 

@@ -77,7 +77,8 @@ export function estimateRttMs(from: string, to: string): number {
 /**
  * 0-100 for "how good would this host feel to this player".
  *
- * 100 at same-region, ~60 by 100ms, 0 at 250ms and beyond. Under ~50ms a shooter feels immediate;
+ * ~94 at same-region (which is modelled as 15ms, not 0), ~60 by 100ms, 0 at 250ms and beyond. Under
+ * ~50ms a shooter feels immediate;
  * past ~150ms it is visibly bad; past 250ms there is nothing left to distinguish, so the curve
  * flattens to zero rather than continuing to differentiate between "bad" and "worse".
  */
@@ -95,8 +96,9 @@ export function proximityScore(hostRegion: string, playerRegion: string): number
  * prefers hosts that are good for everybody and still lets a match happen when the lobby genuinely
  * spans continents.
  *
- * With no waiters — or with everyone in the host's own region, which is the normal case today — this
- * returns 100 for every candidate, so hardware decides exactly as it did before.
+ * With no waiters this returns 100, and with everyone in the host's own region — the normal case
+ * today — it returns the same 94 for every candidate. Either way proximity separates nobody and
+ * hardware decides exactly as it did before; the value only has to be equal, not maximal.
  */
 export function lobbyProximityScore(hostRegion: string, playerRegions: string[]): number {
   if (playerRegions.length === 0) return 100;
