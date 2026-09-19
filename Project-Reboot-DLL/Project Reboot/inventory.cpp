@@ -166,17 +166,70 @@ __int64* Inventory::GetEntryFromWeapon(UObject* Controller, UObject* Weapon)
 
 UObject* GetQuickBars(UObject* Controller)
 {
-	static auto QuickBarsOffset = Controller->GetOffset("QuickBars");
-
-	// If this build doesn't expose a "QuickBars" property, GetOffset returns 0 ("Failed to find3
-	// QuickBars"). Reading *(Controller + 0) would hand back the controller's vtable pointer — a
-	// NON-NULL garbage "QuickBars" that passes every `if (QuickBars)` guard and then crashes the
-	// next ProcessEvent (this was the ServerReadyToStartMatch -> GiveItem -> Update load-in crash,
-	// EXCEPTION_ACCESS_VIOLATION at inventory.cpp:455). Treat a missing offset as "no quickbars".
-	if (!QuickBarsOffset)
+	if (!Controller)
 		return nullptr;
 
-	return *(UObject**)(__int64(Controller) + QuickBarsOffset);
+	/* ── 7.40 DOES NOT CALL THIS PROPERTY "QuickBars" ───────────────────────────────────────────
+	 *
+	 * This asked for "QuickBars" and nothing else, got 0 on 7.40, and correctly refused to read
+	 * *(Controller + 0) -- but then returned null, which meant ServerAddItemInternal below was
+	 * never called for a single item. Nothing mapped an item GUID to a quickbar slot, so the
+	 * client answered every one of them with
+	 *
+	 *     AFortQuickBars::AddItemInternal could not find Item with GUID ...
+	 *
+	 * and sat on the loading screen with an inventory it could not build. The server log said only
+	 * "Failed to find property 'QuickBars'", twice, which read like a harmless probe.
+	 *
+	 * The giveaway was already in this file: the rep notify Update() calls is
+	 * FortPlayerController.OnRep_QuickBar -- SINGULAR. A UE4 rep notify is named after the
+	 * property it belongs to, so on this build the property is "QuickBar".
+	 *
+	 * All three routes are kept rather than just correcting the spelling, because the NAME is the
+	 * thing that has already been wrong once. The last route finds the actor by its owner, which
+	 * cannot be misspelled at all.
+	 */
+	static auto QuickBarsClass = FindObject("/Script/FortniteGame.FortQuickBars");
+	static int Offset = 0;
+	static bool bResolved = false;
+
+	if (!bResolved)
+	{
+		bResolved = true;
+
+		// Quietly -- a miss on the first name is expected on 7.40 and is not worth a warning.
+		Offset = Controller->GetOffset("QuickBars", false, false, false);
+
+		if (!Offset)
+			Offset = Controller->GetOffset("QuickBar", false, false, false);
+
+		std::cout << (Offset
+			? "[QuickBars] controller property found at offset " + std::to_string(Offset) + "\n"
+			: std::string("[QuickBars] no QuickBars/QuickBar property - looking the actor up by owner\n"));
+	}
+
+	if (Offset)
+	{
+		auto Candidate = *(UObject**)(__int64(Controller) + Offset);
+
+		// CHECKED, not assumed. A property that happens to sit at this offset but is not a
+		// FortQuickBars would be handed straight to ProcessEvent -- the same class of crash the
+		// original comment here was written about. If it is not what we expect, fall through.
+		if (Candidate && (!QuickBarsClass || Candidate->IsA(QuickBarsClass)))
+			return Candidate;
+	}
+
+	if (!QuickBarsClass)
+		return nullptr;
+
+	// The engine spawns one of these per controller and owns it to that controller.
+	for (auto Object : Helper::GetAllObjectsOfClass(QuickBarsClass))
+	{
+		if (Object && Helper::GetOwner(Object) == Controller)
+			return Object;
+	}
+
+	return nullptr;
 }
 
 void Inventory::Update(UObject* Controller, bool bAddOrRemove, FFastArraySerializerItem* ModifiedItem) // TODO: add eFortquickbars bars and thenm update accoridng to that

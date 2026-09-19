@@ -499,7 +499,7 @@ wait on the CLIENT being able to render, which nothing on the server can current
 experience. This change was shipped on a server-side measurement and only a screenshot of a loading
 screen revealed it.
 
-### `client-stuck-on-loading-screen` · CONFIRMED · **open — the real cost of the "two minute" load**
+### `client-stuck-on-loading-screen` · CONFIRMED · **CAUSE FOUND — fixed 2026-09-19 (ships in 1.9.2)**
 
 The client reaches the match (`Join succeeded`, `EnterAircraft`, `ExitAircraft` all present) while
 still showing the loading screen, because it is still streaming the island. On the reported machine
@@ -513,8 +513,40 @@ Two related symptoms sit alongside it and are NOT yet ruled in or out as causes:
   returns null rather than the controller's vtable pointer), but it means the player's quickbars are
   never set up on this build.
 
-Not diagnosed further: it needs someone watching the screen while the log is read, and the fix is in
-the spawn path, which `worldinventory-race-at-spawn` already records as dangerous to change blind.
+**The cause was the QuickBars lookup, and the log had been saying so quietly for months.**
+
+`Inventory::GetQuickBars` asked the controller for a property named `QuickBars`. On 7.40 there is no
+such property, so it returned null — correctly refusing to read `*(Controller + 0)`, which an older
+version of this code did and crashed on. But returning null meant `ServerAddItemInternal` was never
+called for a single item, so nothing ever mapped an item GUID to a quickbar slot. The client said so
+plainly, once per item:
+
+```
+AFortQuickBars::AddItemInternal could not find Item with GUID 092FF850...
+World Inventory received                     <- the inventory itself arrived fine
+Attempting to add harvesting tool ... to quickbar 2 in slot -3.
+```
+
+Then nothing. The player sat on the loading screen waiting for an inventory that could never be
+built, while the server-side log showed only `Failed to find property 'QuickBars'` twice — which
+reads like a harmless probe.
+
+**The name was the bug, and the answer was already in the same file.** `Inventory::Update` calls
+`FortPlayerController.OnRep_QuickBar` — **singular**. A UE4 rep notify is named after the property it
+belongs to, so on this build the property is `QuickBar`.
+
+**Fix (`inventory.cpp`).** Three routes, because the NAME is the thing that has already been wrong
+once: `QuickBars`, then `QuickBar`, then the actor found by its owner — which cannot be misspelled.
+The property result is checked with `IsA(FortQuickBars)` before use, so an offset that happens to
+hold something else is ignored rather than handed to `ProcessEvent`; that is precisely the crash the
+original comment in this function was written about. The first two lookups are quiet, and one line
+records which route won, so the next log says what this build actually calls it.
+
+**What this does NOT explain.** The `WorldInventory is invalid` burst is unrelated and self-heals —
+`World Inventory received` appears right after it. And the client genuinely is slow to stream the
+island; that part is real and unchanged. See `worldinventory-race-at-spawn`, still open.
+
+**Not verified in play yet** — it needs a match.
 
 ### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.5)** · *1.8.4 silenced nothing that mattered*
 
