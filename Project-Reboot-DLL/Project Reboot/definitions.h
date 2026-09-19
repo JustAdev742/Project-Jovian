@@ -75,7 +75,7 @@ namespace Defines
 	// Absolute world time the warmup hold expires. 0 = not warming up. Set when warmup begins.
 	inline float WarmupHoldUntil = 0.f;
 
-	// ADAPTIVE WARMUP: the seconds above are a CEILING, not a target.
+	// WARMUP FILL TRACKING (instrumentation only -- it does NOT shorten the hold).
 	//
 	// A solo self-host sat through the entire hold with nobody else coming -- the player joined a
 	// second or two in and then watched an empty lobby until the timer ran out. That was the single
@@ -86,9 +86,9 @@ namespace Defines
 	// the bus leaves when that timer runs out, or at the ceiling above, whichever comes first. A
 	// lobby that keeps filling keeps waiting. One that has stopped filling stops waiting.
 	//
-	// 15s comfortably covers a player who is mid-connect when someone else finishes loading (a join
-	// is matchmaking plus a map load on a server that is already listening), and it is re-armed by
-	// every join, so a steadily filling lobby still runs to the full ceiling.
+	// How long after the last arrival the lobby is considered settled. Logged, not acted on -- see
+	// the long note in server.cpp for why ending the hold on this made the wait WORSE for the
+	// player rather than better.
 	inline float WarmupIdleSeconds = 15.f;
 
 	// Highest player count seen this warmup, and when it last went up. Reset per match.

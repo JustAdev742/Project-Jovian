@@ -851,27 +851,36 @@ void Server::Hooks::TickFlush(UObject* thisNetDriver, float DeltaSeconds)
 					          << Defines::WarmupIdleSeconds << "s more in case anyone else is coming\n";
 				}
 
-				const bool bStoppedFilling =
-					Players > 0 && Defines::WarmupLastJoinAt > 0.f &&
-					(Now - Defines::WarmupLastJoinAt) >= Defines::WarmupIdleSeconds;
-
-				if (Now >= Defines::WarmupHoldUntil || bStoppedFilling)
+				/* ── WHY THE BUS NO LONGER LEAVES EARLY ──────────────────────────────────────────
+				 *
+				 * It did, for exactly one release, and it was wrong. Ending the hold once the lobby
+				 * "stopped filling" measured the wrong thing: a player COUNTS the moment their
+				 * connection is accepted, and their client then spends a long time streaming the
+				 * Athena map before it can show them anything. The warmup is most of that head
+				 * start.
+				 *
+				 * Measured on one machine, same build, back to back:
+				 *
+				 *     45s hold  ->  joined 01:28:02, bus 01:28:55  ->  53s of loading before the bus
+				 *     15s hold  ->  joined 02:12:41, bus 02:12:59  ->  18s
+				 *
+				 * Both reached EnterAircraft, so nothing looked broken server-side. On screen the
+				 * second one was still on the loading screen through the whole aircraft phase, and
+				 * the player quit. Shortening the hold did not make the match start sooner for the
+				 * person playing it -- it just moved the waiting somewhere they could not see a
+				 * countdown.
+				 *
+				 * ServerReadyToStartMatch is not the fix either: it arrived ~20s before the bus in
+				 * that same session and the client was still streaming well after landing.
+				 *
+				 * So the hold stays a fixed length. The count below is kept because it is genuinely
+				 * useful in the log, and because it is the thing a real fix would need -- but a real
+				 * fix has to wait on the CLIENT being able to render, which nothing here can see
+				 * yet.
+				 */
+				if (Now >= Defines::WarmupHoldUntil)
 				{
-					std::cout << (bStoppedFilling
-						? "[Warmup] nobody else is joining - starting the match early\n"
-						: "[Warmup] hold finished - starting the match\n");
-
-					// Starting EARLY means bringing the bus forward, and the clamp below only ever
-					// pushes it back -- so it has to be pulled in explicitly here. This is the one
-					// place allowed to shorten a lobby, and only once it has stopped filling.
-					if (bStoppedFilling)
-					{
-						auto EndTime = Get<float>(GameState, WarmupCountdownEndTimeOffset);
-
-						if (*EndTime > Now)
-							*EndTime = Now;
-					}
-
+					std::cout << "[Warmup] hold finished - starting the match\n";
 					Defines::WarmupHoldUntil = 0.f;
 				}
 				else

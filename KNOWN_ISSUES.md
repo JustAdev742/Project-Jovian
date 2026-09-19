@@ -454,7 +454,7 @@ distance maths, lobby scoring, the election's own claim that a nearby mid-range 
 powerhouse, and this regression. Against the old code the two region-demand tests fail and the other
 eleven pass; with the fix all thirteen pass, inside a suite of 258.
 
-### `solo-lobby-waited-the-full-warmup` · CONFIRMED · **FIXED 2026-09-19 (ships in 1.9.0)**
+### `solo-lobby-waited-the-full-warmup` · **REVERTED 2026-09-19 in 1.9.1 — the fix was worse than the problem**
 
 **A solo self-host sat in an empty lobby for the full 45s warmup**, which was the largest single slice
 of the reported "two minutes to load" — and none of it was waiting for anything.
@@ -470,6 +470,51 @@ ceiling hits, whichever is first. A lobby that keeps filling still runs to the f
 Player count comes from `AGameModeBase::NumPlayers` via a tolerant offset lookup — on a build without
 that property the count stays 0, the early start can never fire, and the behaviour is exactly the
 fixed hold it was before.
+
+**REVERTED, and the measurement that prompted it was measuring the wrong thing.** `NumPlayers` counts
+a player the moment their connection is accepted. Their client then spends a long time streaming the
+Athena map before it can render anything, and the warmup hold is most of that head start. Ending the
+hold when the lobby "stopped filling" therefore did not make the match start sooner for the person
+playing it — it moved the wait to a screen with no countdown on it.
+
+Same machine, same build, back to back:
+
+| hold | joined | bus | client head start |
+|---|---|---|---|
+| 45s (old) | 01:28:02 | 01:28:55 | **53s** — player went on to play |
+| 15s (1.9.0) | 02:12:41 | 02:12:59 | **18s** — still loading through the whole flight, player quit |
+
+Both reached `EnterAircraft` and `ExitAircraft`, so nothing looked wrong server-side; the difference
+was only visible on screen. That is the trap: the server-side sequence was identical and healthy in
+both, and the regression was entirely in what the player experienced.
+
+`ServerReadyToStartMatch` is not a usable substitute either — it arrived ~20s before the bus in that
+session and the client was demonstrably still streaming well after landing.
+
+**What the load time actually is.** Dominated by client-side map streaming, which no server-side
+timer can shorten. The player-count tracking is kept as instrumentation because a real fix needs to
+wait on the CLIENT being able to render, which nothing on the server can currently observe.
+
+**Lesson worth keeping:** a healthy-looking server log is not evidence that the player had a good
+experience. This change was shipped on a server-side measurement and only a screenshot of a loading
+screen revealed it.
+
+### `client-stuck-on-loading-screen` · CONFIRMED · **open — the real cost of the "two minute" load**
+
+The client reaches the match (`Join succeeded`, `EnterAircraft`, `ExitAircraft` all present) while
+still showing the loading screen, because it is still streaming the island. On the reported machine
+it was still creating `LevelActorCluster`s ~36s after leaving the aircraft.
+
+Two related symptoms sit alongside it and are NOT yet ruled in or out as causes:
+
+- `ClientRestart_Implementation failed because WorldInventory is invalid` — 69-87 times in a ~0.5s
+  burst, then it stops. See `worldinventory-race-at-spawn`.
+- `Failed to find property 'QuickBars'` on the server. Already handled defensively (a missing offset
+  returns null rather than the controller's vtable pointer), but it means the player's quickbars are
+  never set up on this build.
+
+Not diagnosed further: it needs someone watching the screen while the log is read, and the fix is in
+the spawn path, which `worldinventory-race-at-spawn` already records as dangerous to change blind.
 
 ### `bumper-music-mute-capped-at-eight-classes` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-09-06 (1.8.5)** · *1.8.4 silenced nothing that mattered*
 
