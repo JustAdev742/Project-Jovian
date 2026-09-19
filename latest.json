@@ -1,11 +1,11 @@
 {
-  "version": "1.9.1",
-  "notes": "Puts the lobby wait back where it was.\n\n1.9.0 let the bus leave as soon as the lobby stopped filling. That measured the wrong thing: you count as \"joined\" the moment your connection is accepted, but your game then spends a long time loading the island before it can show you anything. The lobby wait is most of that head start, and cutting it short just moved the waiting to a screen with no countdown on it.\n\nBack to back on the same machine: the old wait gave the game 53 seconds to load before the bus left, the new one gave it 18. Nothing looked wrong on the server either way — both reached the bus — but on screen the second one was still loading right through the flight.\n\nSo the wait goes back to its previous length. The player-count tracking stays in the log, because it is what a proper fix will need.\n\nEverything else from 1.9.0 is unchanged, including the region-aware hosting fix.",
-  "pub_date": "2026-09-19T02:24:17Z",
+  "version": "1.9.2",
+  "notes": "The loading screen should clear now.\n\nYour inventory bar was never being built. The server looks up the object that owns your quickbar slots, and on 7.40 it was looking for it under the wrong name — so nothing ever told the game which item belongs in which slot. Your game received the items, could not place a single one, and waited on a loading screen for an inventory that was never going to arrive. The only sign of it in the log was one line reading \"Failed to find property 'QuickBars'\", which looked harmless.\n\nIt now tries both names this property goes by, and if a future build renames it again, finds the object directly by who owns it — which cannot be misspelled. The result is checked before it is used, so a wrong match is ignored rather than trusted.\n\nIf this is the last thing standing between you and a match, the loading screen should now give way to the island.",
+  "pub_date": "2026-09-19T02:55:58Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVdtQ2VXdFg0b0VvdzNGdzJqZTg3ZEZWWWlaVVd1YXRkTDRndDltR2tBeWZ1UHZvekNVdno2dlFSb2NkV3JlMGJ3dlMrdkNnVVp2dTRFR1dWV3dGb0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5Nzg0NjQ2CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuMV94NjQtc2V0dXAubnNpcy56aXAKWUdYRitLa1dWdlZxeFhqdi8zaThJbUd1Z3VZTEpiL21kUUp6SUZZZ3N6ZDBzSEk2TEp3WW11TjNIMGNzczVVNmNkWTk5Q1R6d29KakttaldjSEZkQUE9PQo=",
-      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.1/Project.Launcher_1.9.1_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bWRDRnVCc0VCMWMyc2xvK3lZMmNETno1MVBHbkNnZTBtcFl2azJnRmFEYjlBVjZFS1ZpNEQ4ZlkyMDdya3FYVVAzbzZtTSs4dlB1dlZFYmRRS1V6RFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5Nzg2NTQ5CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuMl94NjQtc2V0dXAubnNpcy56aXAKait1dDlrMGo2TGhRMW5xNWxyREVRL2xPWSt3T2F5Qmh5M3ZiTmRlQ0pkYmVNWERQVFdXWGNRZTljcmtwcGxWakhhU2NmQ2c3K3BjWE0rSERDUlhVQWc9PQo=",
+      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.2/Project.Launcher_1.9.2_x64-setup.nsis.zip"
     }
   }
 }
