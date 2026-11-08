@@ -247,7 +247,14 @@ fn start_backend(
         // Passed by environment rather than argv because argv is world-readable on Windows: any
         // process can list another's command line, and a secret in it would be visible to every
         // program on the machine.
-        cmd.env("NOVA_REGISTER_SECRET", s);
+        //
+        // NOVA_COORDINATOR_REGISTER_SECRET, not NOVA_REGISTER_SECRET (changed 2026-11-08). The old name
+        // also armed the agent's OWN register gate with the coordinator's credential, so the
+        // launcher's loopback registration (useLauncher.ts registerHostEverywhere, which sends no
+        // secret to the agent) would have been refused the day the coordinator started issuing one.
+        // It never bit only because the coordinator answered 503 until 2026-11-08. The agent sends
+        // this to the coordinator and enforces nothing with it.
+        cmd.env("NOVA_COORDINATOR_REGISTER_SECRET", s);
     }
     {
         // Stamp the LAUNCHER's version into the agent's environment so it appears in the log the
@@ -301,7 +308,12 @@ pub fn dbg_log(msg: &str) {
                 .append(true)
                 .open(dir.join("launcher-startup.log"))
             {
-                let _ = writeln!(f, "{}", msg);
+                // Redacted HERE, at the one place every line passes through, rather than at the call
+                // that happened to leak. carter.rs logs the full Fortnite command line on each launch,
+                // and that line carried `-AUTH_PASSWORD=eg1~<the player's live bearer token>` into a
+                // plain-text file next to the exe — the one log players are asked to share. Fixing the
+                // call site alone would leave the next `dbg_log(&format!(...))` free to do it again.
+                let _ = writeln!(f, "{}", crate::ue4log::redact(msg));
             }
         }
     }

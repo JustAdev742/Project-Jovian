@@ -106,8 +106,27 @@ export const Config = {
 
   /** Optional shared secret for gameserver registration. If set (NOVA_REGISTER_SECRET), the
    *  register/unregister endpoints require a matching `secret` in the body — prevents anyone who
-   *  finds the public coordinator URL from poisoning the routing table. Empty = open (default). */
+   *  finds the public coordinator URL from poisoning the routing table. Empty = open (default).
+   *
+   *  This is the ENFORCED secret only. It must stay unset on the coordinator until the field sends a
+   *  credential — see services/matchmaking/registerSecret.ts, which now issues a secret to launchers
+   *  WITHOUT this being set. It is no longer an admin credential either: it is handed to every
+   *  signed-in launcher, so it cannot double as a password for cross-player admin views. */
   REGISTER_SECRET: process.env.NOVA_REGISTER_SECRET || '',
+
+  /** Where the coordinator stores the registration secret it ISSUES when NOVA_REGISTER_SECRET is
+   *  unset. Generated on first use; overridable so a test run never writes into the real data dir. */
+  REGISTER_SECRET_FILE: process.env.NOVA_REGISTER_SECRET_FILE
+    ? path.resolve(process.env.NOVA_REGISTER_SECRET_FILE)
+    : path.resolve(__dirname, '..', 'data', 'register-secret'),
+
+  /** HOST AGENT only: the secret this machine SENDS when it registers its gameserver with the
+   *  coordinator. The launcher fetches it from the coordinator and passes it in at spawn.
+   *
+   *  Deliberately not NOVA_REGISTER_SECRET. That name also arms this backend's OWN register gate, and
+   *  the coordinator's credential has no business deciding who may register on a player's loopback
+   *  agent — the launcher registers there without one (useLauncher.ts registerHostEverywhere). */
+  COORDINATOR_REGISTER_SECRET: process.env.NOVA_COORDINATOR_REGISTER_SECRET || '',
 
   // ── Tailscale auto-mesh ────────────────────────────────────────────────────────────────────
   /** Tailscale auth key handed to authenticated launchers so they can join the tailnet silently.
@@ -136,8 +155,13 @@ export const Config = {
    *  Off by default on purpose: on a small private server, wrongly locking out a friend is worse
    *  than reviewing a real cheater a day later. */
   AC_AUTOBAN_AT: parseInt(process.env.NOVA_AC_AUTOBAN_AT || '0', 10),
-  /** Shared secret for the anti-cheat admin views. Falls back to REGISTER_SECRET when unset; if
-   *  BOTH are empty the admin endpoints refuse everyone rather than opening up. */
+  /** Shared secret for the anti-cheat and diagnostics admin views. Empty = those endpoints refuse
+   *  everyone rather than opening up.
+   *
+   *  It used to fall back to REGISTER_SECRET. Removed 2026-11-08: the registration secret is now
+   *  handed to every signed-in launcher, and a value every player holds cannot also be the password
+   *  for views that expose other players' data. The coordinator sets this explicitly, so nothing
+   *  there changes. */
   AC_ADMIN_SECRET: process.env.NOVA_AC_ADMIN_SECRET || '',
 
   /** EOS (Epic Online Services) identifiers */

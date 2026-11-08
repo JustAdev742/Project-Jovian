@@ -297,7 +297,14 @@ pub fn normalise_message(msg: &str) -> String {
 
 /// Remove secret material. The backend redacts on the way in as well; this keeps it out of the
 /// launcher's own console and off the loopback hop, which is where it would be easiest to forget.
-fn redact(s: &str) -> String {
+///
+/// Also the choke point for `launcher-startup.log` — `dbg_log` in main.rs runs every line through
+/// here, because that file recorded the whole Fortnite command line, `-AUTH_PASSWORD=eg1~…`
+/// included, on every launch.
+///
+/// The token alphabet below must keep `_` (it is the second character of the set): a Nova token is a
+/// JWT, JWTs are base64url, and base64url uses `_`. `an_underscore_does_not_end_the_token` pins it.
+pub(crate) fn redact(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(idx) = rest.find("eg1~") {
@@ -778,6 +785,48 @@ mod tests {
         let all = format!("{:?}", scan.events);
         assert!(!all.contains("aaaabbbbccccdddd"), "a token survived redaction: {}", all);
         assert!(all.contains("eg1~<redacted>"), "the shape should stay readable: {}", all);
+    }
+
+    #[test]
+    fn an_underscore_does_not_end_the_token() {
+        // base64url uses `_`. If it ever drops out of the alphabet, everything after the first
+        // underscore — usually the signature — would be written out in clear.
+        let line = "x eg1~eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMyJ9.ab_SIGNATURE-tail_end y";
+        let out = redact(line);
+        assert_eq!(out, "x eg1~<redacted> y", "part of the token survived: {}", out);
+    }
+
+    #[test]
+    fn the_launch_command_line_is_logged_without_the_password() {
+        // The exact shape carter.rs writes to launcher-startup.log on every launch.
+        let line = "launch: exe=\"FortniteClient-Win64-Shipping.exe\" args=-AUTH_TYPE=epic \
+                    -AUTH_LOGIN=03eebb6c289fc13e0dd0b60617757122 \
+                    -AUTH_PASSWORD=eg1~eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMyJ9.2d11U9_secret-sig -epicapp=Fortnite";
+        let out = redact(line);
+        assert!(!out.contains("secret-sig"), "the signature survived: {}", out);
+        assert!(!out.contains("eyJzdWIi"), "the payload survived: {}", out);
+        assert!(out.contains("-AUTH_PASSWORD=eg1~<redacted> -epicapp=Fortnite"), "{}", out);
+        // The account id is not a credential, and diagnosis needs it.
+        assert!(out.contains("-AUTH_LOGIN=03eebb6c289fc13e0dd0b60617757122"), "{}", out);
+    }
+
+    #[test]
+    fn dbg_log_writes_launcher_startup_log_without_the_token() {
+        // The integration, not just the helper: dbg_log used to write `msg` verbatim, and the helper
+        // above was already correct — so a test of redact() alone passed while the log leaked.
+        let marker = format!("redaction-probe-{}", std::process::id());
+        crate::dbg_log(&format!("{} -AUTH_PASSWORD=eg1~eyJhbGciOi.eyJzdWIi.sig_PROBE-tail end", marker));
+        let path = std::env::current_exe().unwrap().parent().unwrap().join("launcher-startup.log");
+        let text = std::fs::read_to_string(&path).expect("dbg_log should have written its file");
+        let line = text.lines().rev().find(|l| l.contains(&marker)).expect("probe line missing");
+        assert!(!line.contains("sig_PROBE"), "the token reached launcher-startup.log: {}", line);
+        assert!(line.contains("-AUTH_PASSWORD=eg1~<redacted> end"), "{}", line);
+    }
+
+    #[test]
+    fn text_without_a_token_is_untouched() {
+        let line = "firewall: inbound UDP 7777 rule is in place";
+        assert_eq!(redact(line), line);
     }
 
     #[test]

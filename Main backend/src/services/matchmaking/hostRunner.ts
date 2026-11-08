@@ -254,6 +254,15 @@ export function stopServer(reason: string): void {
 // Agent: POST to the coordinator, which is the only registry anyone else reads. The address must be
 // the tailnet one; publishing 127.0.0.1 globally would send every joiner to their own machine.
 
+/**
+ * The secret to send the coordinator. NOVA_COORDINATOR_REGISTER_SECRET is what a current launcher
+ * passes; NOVA_REGISTER_SECRET is what 1.6.5–1.9.2 passed, kept as a fallback so an agent started
+ * either way still signs its registrations.
+ */
+function coordinatorSecret(): string | undefined {
+  return Config.COORDINATOR_REGISTER_SECRET || Config.REGISTER_SECRET || undefined;
+}
+
 async function register(): Promise<void> {
   if (!spec) return;
   const name = spec.name || 'Nova (auto-host)';
@@ -273,7 +282,7 @@ async function register(): Promise<void> {
         region: spec.region,
         name,
         status,
-        secret: Config.REGISTER_SECRET || undefined,
+        secret: coordinatorSecret(),
       }),
       signal: AbortSignal.timeout(8000),
     });
@@ -296,7 +305,7 @@ async function deregister(): Promise<void> {
       // registration is expensive: joiners keep being routed to a server that has gone.
       body: JSON.stringify({
         address: publicAddress(), port: spec.port, playlist: '*',
-        secret: Config.REGISTER_SECRET || undefined,
+        secret: coordinatorSecret(),
       }),
       signal: AbortSignal.timeout(8000),
     });

@@ -116,7 +116,7 @@ layouts. That is another reason a hand-written signature was the wrong fix and a
 what it found was the right one.
 
 
-### `gameserver-register-unauthenticated` · CONFIRMED · accepted open
+### `gameserver-register-unauthenticated` · CONFIRMED · accepted open · **step one live 2026-11-08**
 `matchmaking.routes.ts:953,1001` gate registration on
 `if (Config.REGISTER_SECRET && b.secret !== Config.REGISTER_SECRET)`, and `config.ts:110` defaults
 the secret to `''` — **an empty secret skips the gate entirely.** Confirmed absent from the live
@@ -163,6 +163,50 @@ short-circuit so an unset secret no longer skips the gate — belongs in a relea
 had time to propagate**, and it is a two-line change when that day comes.
 
 The secret is passed by environment, not argv: command lines are world-readable on Windows.
+
+**2026-11-08 — STEP ONE WAS NEVER RUNNING, and now it is.** The route above served
+`Config.REGISTER_SECRET` and answered **503** when it was unset — and it *must* be unset on the
+coordinator, because the same variable arms the gate. So every launcher asked, got 503, and registered
+without a secret: `launcher-startup.log` on the dev PC says `register-secret: coordinator returned HTTP
+503` on every start. The pipeline was built end to end and carried nothing.
+
+The fix separates the two jobs (`services/matchmaking/registerSecret.ts`):
+
+| | value | effect |
+|---|---|---|
+| **issued** | `NOVA_REGISTER_SECRET` if set, otherwise a random 32-byte value generated on the first authenticated request and kept in `data/register-secret` (mode 600) | served by `GET /nova/api/register-secret` — no more 503 |
+| **enforced** | only when `NOVA_REGISTER_SECRET` is set | byte-for-byte the old gate; still open on the coordinator |
+
+Every new registration is now logged `auth=signed|unsigned|wrong`. **That is the evidence step two
+waits on**: `grep "Gameserver registered" ~/nova-backend/nova.log`. A `wrong` is logged, not refused,
+because an agent outlives its launcher and can hold a stale secret.
+
+**Step two is now a config change, not a code change:** once current launchers log `auth=signed` and
+the `unsigned` ones are gone, set `NOVA_REGISTER_SECRET` in the coordinator's `.env` to the contents
+of `data/register-secret`. Issued and enforced then become the same value, and the gate closes. Until
+then the standing rule holds — `NOVA_REGISTER_SECRET` stays unset — and it still does after this fix.
+
+Two hazards had to be closed first, both found while making this change:
+
+- **The registration secret was an admin password.** `adminOk` in `anticheat.routes.ts` and
+  `diagnostics.routes.ts` fell back to `REGISTER_SECRET` when `NOVA_AC_ADMIN_SECRET` was unset. Once
+  the secret goes to every signed-in launcher, that fallback makes "any player" and "admin" the same
+  credential on such a backend. Removed. No change on the coordinator, which sets
+  `NOVA_AC_ADMIN_SECRET` (checked: present in `.env`, value not read).
+- **The agent armed its own gate with the coordinator's credential.** `main.rs` passed the fetched
+  secret as `NOVA_REGISTER_SECRET`, which also turns on the *agent's* loopback register gate — and
+  `useLauncher.ts` registers on that agent without a secret. It never bit only because the coordinator
+  always said 503. A current launcher now passes `NOVA_COORDINATOR_REGISTER_SECRET`, which the agent
+  sends and enforces nothing with. Launchers 1.6.5–1.9.2 still use the old name; on those the agent's
+  loopback gate does arm, and the only call it refuses is the manual-playit path's local registration,
+  which no game client reads in P2P mode (matchmaking goes to the coordinator through nova-proxy).
+
+Tests: `register-secret-issued.test.ts` (8, the coordinator's real configuration) and three more in
+`register-secret.test.ts` (the secret opens no admin view). Against the old route code 8 of the 17
+fail, including the 503; with the fix all pass, inside a suite of 269. Deployed to the coordinator
+2026-11-08 — 30/30 of those tests passed on the box under its own node v22 before the swap; probes
+afterwards: anonymous and garbage-token requests get 401 and create no secret file, bogus-path control
+still `200 {}`.
 
 ---
 
@@ -326,6 +370,32 @@ or one test launch with a candidate key and a check of whether the request lands
 
 ## Fixed in the tree, NOT yet on any player's machine
 
+### `launcher-log-wrote-bearer-token` · CONFIRMED · **FIXED in source 2026-11-08** · *ships with the next launcher release*
+
+`launcher-startup.log`, next to the launcher exe, recorded the player's **live bearer token** on every
+launch: `carter.rs` logs the full Fortnite command line, and that includes
+`-AUTH_PASSWORD=eg1~<token>`. 59 such lines were on the dev PC. Cobalt's log and the backend's had
+been redacted since 2026-09-06; this file was the one nobody had covered, and it is the one players
+are asked to share.
+
+**Fix:** `dbg_log` in `main.rs`, the single function every line passes through, now runs the line
+through the existing `ue4log::redact`. Fixing the call in `carter.rs` alone would leave the next
+`dbg_log(&format!(…))` free to do it again. The account id stays readable; it is not a credential.
+
+**Test that fails without it:** `dbg_log_writes_launcher_startup_log_without_the_token` writes through
+the real `dbg_log` and reads the file back. With the old raw write it fails and prints the token.
+
+**A wrong claim, withdrawn in the same session.** I first reported that `redact()` also leaked because
+its token alphabet lacked `_` (JWTs are base64url). It does not: `"._~+/-="` has `_` as its second
+character. The old-code run proved it — the underscore test passed without the change — so the change
+was reverted and the test kept as a guard. The defect was only ever the unredacted `dbg_log`.
+
+**Already-written tokens:** the 59 in `launcher-startup.log` and 76 older ones in `cobalt.log` (from
+before Cobalt's redaction) were replaced in place with `eg1~<redacted>` on the dev PC. All had expired
+(8-hour lifetime). Other machines keep theirs until their logs rotate. Note that both files also hold
+runs of NUL bytes (1,509 and 6,188), the same unclean-shutdown signature as the 2026-09-19 nova-proxy
+corruption.
+
 ### `muc-join-answered-with-silence` · CONFIRMED · **FIXED 2026-09-06** · *found by the dashboard, in a played session*
 
 **Global chat did not work for an entire match, and the backend looked healthy the whole time.**
@@ -453,6 +523,15 @@ to match against, which is exactly what launchers from before regions existed se
 distance maths, lobby scoring, the election's own claim that a nearby mid-range PC beats a distant
 powerhouse, and this regression. Against the old code the two region-demand tests fail and the other
 eleven pass; with the fix all thirteen pass, inside a suite of 258.
+
+**CORRECTION 2026-11-08 — "ships in 1.9.0" was only half true, and it was the wrong half.** Host
+demand is decided on the **coordinator**; the launcher payload only runs it for a host agent's own
+loopback. The coordinator was never updated: a content diff on 2026-11-08 found its
+`matchmaking.routes.ts` without `regionStrict` (box file dated 2026-09-06, a fortnight before the
+fix). So for seven weeks the live election was still region-blind while this entry said FIXED.
+Deployed to the coordinator 2026-11-08 alongside the registration-secret change; box and repo now
+match on all seven touched files. Same lesson as the 2026-09-05 deploy: a backend fix is not live
+until the coordinator's content matches, and only a content diff shows that.
 
 ### `solo-lobby-waited-the-full-warmup` · **REVERTED 2026-09-19 in 1.9.1 — the fix was worse than the problem**
 

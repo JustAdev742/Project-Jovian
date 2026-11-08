@@ -48,10 +48,14 @@ function shortBuild(build: string | undefined): string | undefined {
  * host that Tailscale Funnel publishes to the open internet.
  */
 
-/** Same gate as the anti-cheat admin views, deliberately: one secret to manage, one behaviour. */
+/** Same gate as the anti-cheat admin views, deliberately: one secret to manage, one behaviour.
+ *
+ *  NOVA_AC_ADMIN_SECRET only. The fallback to the registration secret was removed on 2026-11-08,
+ *  when that secret began to be handed to every signed-in launcher — this view exposes every
+ *  player's failures, so it cannot open to a value every player holds. */
 /** Whether a secret exists at all. Distinct from "the caller sent one" — see adminRefused. */
 function adminConfigured(): boolean {
-  return Boolean(Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET);
+  return Boolean(Config.AC_ADMIN_SECRET);
 }
 
 /**
@@ -63,7 +67,7 @@ function adminConfigured(): boolean {
  * same dashboard access and reveals nothing that can be replayed as the header elsewhere.
  */
 function cookieToken(): string {
-  const secret = Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET || '';
+  const secret = Config.AC_ADMIN_SECRET || '';
   return crypto.createHmac('sha256', secret).update('nova-dashboard-cookie-v1').digest('hex');
 }
 
@@ -91,7 +95,7 @@ function sameSecret(a: string, b: string): boolean {
 }
 
 function adminOk(request: any): boolean {
-  const expected = Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET;
+  const expected = Config.AC_ADMIN_SECRET;
   if (!expected) return false; // no secret configured → closed, not open
 
   // The cookie is what makes this usable from a browser at all. A browser cannot send a custom
@@ -113,7 +117,7 @@ function adminRefused(reply: any) {
   return reply.status(403).send({
     error: 'diagnostics admin access is not configured',
     detail:
-      'Set NOVA_AC_ADMIN_SECRET (or NOVA_REGISTER_SECRET) on the coordinator and send it as the ' +
+      'Set NOVA_AC_ADMIN_SECRET on the coordinator and send it as the ' +
       'x-nova-admin header. Unset means closed — this view exposes cross-player data.',
   });
 }
@@ -394,7 +398,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
    */
   fastify.post('/nova/api/dashboard/login', async (request, reply) => {
     const supplied = String((request.body as any)?.secret || '');
-    const expected = String(Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET || '');
+    const expected = String(Config.AC_ADMIN_SECRET || '');
 
     if (!expected || !sameSecret(supplied, expected)) {
       // Recorded like any other auth failure: repeated attempts on this endpoint are exactly the

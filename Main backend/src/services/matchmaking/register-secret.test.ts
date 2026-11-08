@@ -21,6 +21,9 @@ import formbody from '@fastify/formbody';
 
 process.env.NOVA_DB_PATH = path.join(os.tmpdir(), `nova-regsecret-${process.pid}.db`);
 process.env.NOVA_REGISTER_SECRET = 'test-secret-value-do-not-ship';
+process.env.NOVA_REGISTER_SECRET_FILE = path.join(os.tmpdir(), `nova-regsecret-${process.pid}.secret`);
+// No admin secret: the case where the old fallback made the registration secret an admin password.
+delete process.env.NOVA_AC_ADMIN_SECRET;
 
 let app: FastifyInstance;
 let token = '';
@@ -29,12 +32,16 @@ before(async () => {
   const { initDatabase } = (await import('../../database')) as any;
   const { authRoutes } = (await import('../auth/auth.routes')) as any;
   const { matchmakingRoutes } = (await import('./matchmaking.routes')) as any;
+  const { anticheatRoutes } = (await import('../anticheat/anticheat.routes')) as any;
+  const { diagnosticsRoutes } = (await import('../nova/diagnostics.routes')) as any;
 
   await initDatabase();
   app = Fastify({ logger: false });
   await app.register(formbody);
   await app.register(authRoutes);
   await app.register(matchmakingRoutes);
+  await app.register(anticheatRoutes);
+  await app.register(diagnosticsRoutes);
   await app.ready();
 
   const res = await app.inject({
@@ -96,5 +103,31 @@ describe('GET /nova/api/register-secret', () => {
       payload: { address: '127.0.0.1', port: 7778, secret: 'wrong' },
     });
     assert.equal(bad.statusCode, 403, 'the register gate accepted a wrong secret');
+  });
+});
+
+describe('the registration secret is not an admin password', () => {
+  // It is handed to every signed-in launcher. Admin views fell back to it when NOVA_AC_ADMIN_SECRET
+  // was unset, which made "any player" and "admin" the same credential on such a backend.
+  const asAdmin = { 'x-nova-admin': 'test-secret-value-do-not-ship' };
+
+  test('anti-cheat admin views refuse it', async () => {
+    const flags = await app.inject({ method: 'GET', url: '/nova/api/anticheat/flags', headers: asAdmin });
+    assert.equal(flags.statusCode, 403, 'the registration secret unlocked the anti-cheat audit trail');
+  });
+
+  test('diagnostics admin views refuse it', async () => {
+    const inc = await app.inject({ method: 'GET', url: '/nova/api/incidents', headers: asAdmin });
+    assert.equal(inc.statusCode, 403, 'the registration secret unlocked cross-player incidents');
+  });
+
+  test('the dashboard sign-in refuses it', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/nova/api/dashboard/login',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: 'secret=test-secret-value-do-not-ship',
+    });
+    assert.ok(!String(res.headers['set-cookie'] || '').includes('nova_admin='),
+      'the registration secret was accepted as the dashboard password');
   });
 });

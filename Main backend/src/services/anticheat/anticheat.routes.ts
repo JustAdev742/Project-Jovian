@@ -11,9 +11,13 @@ import {
 } from './anticheat.service';
 
 /** Admin endpoints are gated by a shared secret rather than a role, because Nova has no admin
- *  accounts. Falls back to the registration secret so there is only one secret to manage. */
+ *  accounts.
+ *
+ *  This used to fall back to the registration secret "so there is only one secret to manage". That
+ *  became unsafe on 2026-11-08, when the registration secret started being handed to every signed-in
+ *  launcher: a value every player holds cannot also unlock bans and other players' flags. */
 function adminOk(request: any): boolean {
-  const expected = Config.AC_ADMIN_SECRET || Config.REGISTER_SECRET;
+  const expected = Config.AC_ADMIN_SECRET;
   if (!expected) return false; // no secret configured → admin views stay closed, not wide open
   const supplied = String(
     (request.headers?.['x-nova-admin'] as string) || (request.query as any)?.secret || (request.body as any)?.secret || ''

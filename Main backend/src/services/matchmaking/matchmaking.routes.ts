@@ -5,6 +5,7 @@ import { generateUUID } from '../../utils/uuid';
 import { Config } from '../../config';
 import { setHostSpec, hostStatus, stopServer, markServerInjected } from './hostRunner';
 import { lobbyProximityScore, regionLabel } from './regions';
+import { classifyRegistration, issuedRegisterSecret, registerGateRefuses } from './registerSecret';
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  NOVA MATCHMAKING  —  gameserver routing table + P2P host registry
@@ -1025,7 +1026,10 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
    */
   fastify.post('/nova/api/gameserver/register', async (request, reply) => {
     const b = (request.body || {}) as any;
-    if (Config.REGISTER_SECRET && b.secret !== Config.REGISTER_SECRET) {
+    // Enforced only when NOVA_REGISTER_SECRET is set — unchanged. `auth` is recorded either way:
+    // it is the evidence step two of `gameserver-register-unauthenticated` waits on.
+    const auth = classifyRegistration(b.secret);
+    if (registerGateRefuses(b.secret)) {
       return reply.status(403).send({ error: 'invalid or missing registration secret' });
     }
     let address = String(b.address || '').trim();
@@ -1066,14 +1070,14 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
     // waiting player produced two servers, and the second machine started hosting the moment its
     // launcher opened, before its own player had finished loading.
     if (entry.status === 'ready') clearPendingForServer(playlist);
-    if (!existing) console.log(`[Matchmaking] Gameserver registered: ${address}:${port} playlist=${playlist} region=${region} status=${entry.status}`);
+    if (!existing) console.log(`[Matchmaking] Gameserver registered: ${address}:${port} playlist=${playlist} region=${region} status=${entry.status} auth=${auth}`);
     return reply.send({ success: true, key, ttlMs: DYNAMIC_TTL_MS });
   });
 
   /** POST /nova/api/gameserver/unregister  { address, port, playlist? } */
   fastify.post('/nova/api/gameserver/unregister', async (request, reply) => {
     const b = (request.body || {}) as any;
-    if (Config.REGISTER_SECRET && b.secret !== Config.REGISTER_SECRET) {
+    if (registerGateRefuses(b.secret)) {
       return reply.status(403).send({ error: 'invalid or missing registration secret' });
     }
     const address = String(b.address || '').trim();
@@ -1414,16 +1418,23 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
    * Doing both at once would lock every existing player out of hosting, which is why the issue was
    * left open rather than "fixed" in a way that shipped an outage.
    *
-   * The value is never logged, and 503 is deliberate when it is unset: a launcher that gets no
-   * secret must keep registering without one, because that is still the live behaviour.
+   * 2026-11-08 — STEP ONE WAS NEVER ACTUALLY RUNNING. This used to serve `Config.REGISTER_SECRET`
+   * and answer 503 when it was unset — and it has to be unset on the coordinator, because setting it
+   * also closes the gate. So every launcher got 503 and registered without a secret. The value served
+   * now comes from registerSecret.ts, which ISSUES a secret without ENFORCING it; see that file.
+   *
+   * The value is never logged. A 503 now means only that the secret could not be stored, and a
+   * launcher that gets one keeps registering without a secret, which the gate still allows.
    */
   fastify.get('/nova/api/register-secret', { preHandler: requireAuth }, async (_request, reply) => {
-    if (!Config.REGISTER_SECRET) {
-      return reply.status(503).send({
-        error: 'no registration secret configured — set NOVA_REGISTER_SECRET on the coordinator',
-      });
+    let secret: string;
+    try {
+      secret = issuedRegisterSecret();
+    } catch (e: any) {
+      console.warn(`[Matchmaking] Could not create the registration secret: ${e?.code || e?.message || e}`);
+      return reply.status(503).send({ error: 'registration secret unavailable on this coordinator' });
     }
-    return reply.send({ secret: Config.REGISTER_SECRET });
+    return reply.send({ secret });
   });
   // Back-compat: a listen-server that reports readiness maps onto a dynamic registration.
   fastify.post('/nova/api/session/:sessionId/host-ready', async (request, reply) => {

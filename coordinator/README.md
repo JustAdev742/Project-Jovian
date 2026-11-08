@@ -6,8 +6,12 @@ hand when you change the box.
 
 ```
 ssh -i ~/.ssh/nova_coordinator admin_home@2001:8003:2291:a501:2af1:eff:fe28:da6
-ssh -i ~/.ssh/nova_coordinator admin_home@192.168.0.170          # same box on the LAN
+ssh -i ~/.ssh/nova_coordinator admin_home@100.96.188.28          # tailnet, from a tailnet member
+ssh -i ~/.ssh/nova_coordinator admin_home@192.168.0.101          # LAN — DHCP; was .170, then .167
 ```
+
+The LAN address moves with DHCP; `ip -4 addr` on the box gives the current one. The IPv6 and tailnet
+addresses were unchanged across the 2026-10-10 → 2026-11-08 outage.
 
 ## How it runs
 
@@ -120,3 +124,27 @@ ssh -i ~/.ssh/nova_coordinator admin_home@2001:8003:2291:a501:2af1:eff:fe28:da6 
 
 `start-diag.sh` keeps both processes up (`@reboot` and every 5 minutes) and is idempotent. A stable
 hostname would need a named Cloudflare tunnel and a domain.
+
+## Outages
+
+**2026-10-10 18:36 UTC → 2026-11-08 03:45 UTC — the box was powered off.** Not a crash and not a
+power cut: the journal of that boot ends `systemd-logind: The system will power off now!` followed by
+an orderly `systemd-poweroff`. With it off, the tailnet showed `clientfinder` as "offline, last seen
+33d ago", the Funnel name stopped resolving, and SSH to the IPv6 timed out. That combination means
+"the machine is off", not "Nova is broken": check the box itself before debugging the launcher.
+Everything came back by itself when it was switched on (the cron `@reboot` lines above).
+
+The first boot of 2026-11-08 started with the clock at **2026-07-27** until NTP corrected it, so the
+hardware clock is wrong — likely a flat CMOS battery. Harmless once NTP syncs, but anything that
+checks a TLS certificate in the first seconds after boot would see the wrong date.
+
+**Check drift after any outage or hand edit** — compare content, not mtimes (CRLF-normalised):
+
+```bash
+ssh ... 'cd ~/nova-backend/src && find . -name "*.ts" ! -name "*.test.ts" | sort | while read f; do
+  printf "%s %s\n" "$(tr -d "\r" < "$f" | md5sum | cut -d" " -f1)" "$f"; done'
+# and the same over `git show HEAD:"Main backend/src/<file>"` locally, then diff the two lists
+```
+
+On 2026-11-08 this found the box missing the 1.9.0 `regionStrict` fix that KNOWN_ISSUES had marked
+fixed since 2026-09-19.

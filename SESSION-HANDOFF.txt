@@ -4,6 +4,19 @@ Written 2026-11-08. Last active work: 2026-09-19.
 Hand this to a new session before doing anything else.
 ===============================================================================
 
+UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
+  * The coordinator had been POWERED OFF since 2026-10-10. It is back on and
+    autostarted. Tailnet SSH works: ssh -i ~/.ssh/nova_coordinator
+    admin_home@100.96.188.28
+  * Coordinator now ISSUES a registration secret without enforcing it
+    (registerSecret.ts). No more 503 from /nova/api/register-secret. The
+    rule below still holds: NOVA_REGISTER_SECRET stays UNSET. Each new
+    registration logs auth=signed|unsigned|wrong in ~/nova-backend/nova.log.
+  * The 1.9.0 region fix had never reached the coordinator. Deployed now.
+  * launcher-startup.log was recording the live bearer token; fixed in
+    source (dbg_log redacts). Reaches players only with the next launcher
+    release. Section 0 below still applies: 1.9.2 has still never been run.
+
 -------------------------------------------------------------------------------
 0. READ THIS FIRST — THE ONE THING THAT MATTERS
 -------------------------------------------------------------------------------
