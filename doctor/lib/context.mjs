@@ -133,6 +133,8 @@ export function discover(opts = {}) {
       cargo: firstExisting([path.join(os.homedir(), '.cargo', 'bin', 'cargo.exe')]) || 'cargo',
       tsc: firstExisting([path.join(repo, 'Main backend', 'node_modules', '.bin', 'tsc.cmd'),
         path.join(repo, 'Main backend', 'node_modules', '.bin', 'tsc')]),
+      // Run TypeScript through node rather than the .cmd shim: no shell, no argument-escaping warning.
+      tscJs: firstExisting([path.join(repo, 'Main backend', 'node_modules', 'typescript', 'bin', 'tsc')]),
     },
     remote: {
       // Read-only access to the live coordinator, used only with --remote. These are already in

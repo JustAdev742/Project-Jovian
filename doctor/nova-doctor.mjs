@@ -50,6 +50,8 @@ function parseArgs(argv) {
     else if (a === '--json') opts.json = true;
     else if (a === '--quiet') opts.quiet = true;
     else if (a === '--apply') opts.apply = next();
+    else if (a === '--rollback') opts.rollback = next();
+    else if (a === '--quick') opts.quick = true;
     else if (a === '--yes') opts.yes = true;
     else if (a === '--help' || a === '-h') opts.command = 'help';
     else throw new Error(`unknown argument: ${a}`);
