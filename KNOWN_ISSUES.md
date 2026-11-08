@@ -781,8 +781,28 @@ then read `*(PlayerController + 0)` (the vtable pointer) as "the quickbar", foun
 spawned one. That is the doctor's P2 "a 0 offset reads the vtable" in a concrete case.
 
 **Fix (1.9.6):** the three gates are back to `< 7.4` (`Inventory::Update`, the per-item slot add, and
-the join-time spawn), and the spawn checks its offset. **Verify:** after joining, the client log should
-show `Hiding loading screen` and the player should be able to move during warmup.
+the join-time spawn), and the spawn checks its offset. **It did not end the hang** (played the same
+evening: still stuck). It was a real bug, but not this one.
+
+**The actual trigger, found the same evening: XMPP presence being ONLINE.** Every game log on this PC
+that got past the loading screen after joining (2026-07-20, 07-22, 07-25/26) has the game's XMPP
+pointed at `ws://127.0.0.1:80`, where nothing listens. Its connection keeps dropping
+(`HandleXmppConnectionRemoved`), the party stays local, and the client logs `Setting up first time
+rich presence` and then `UIManager … states from: Invalid to Athena`, which is the switch that drops the
+loading screen. On 2026-07-28 the coordinator's cloudstorage `DefaultEngine.ini` was corrected to
+3551, so XMPP connects and the party becomes `Active`. From then on, no log on this PC shows rich
+presence or the Athena UI switch, and no session got past the loading screen. The client's presence
+code logs nothing at all on that path, neither "first time" nor "Updating rich presence with OSS".
+It waits on something Nova's XMPP never completes; what exactly is not yet known.
+
+**Workaround applied 2026-11-08 08:06 UTC (pending a played match):** the coordinator's
+`data/cloudstorage/DefaultEngine.ini` XMPP address is back to `ws://127.0.0.1:80` (backup
+`DefaultEngine.ini.bak-before-xmpp-offline-20261108-080650`), the exact setting of every working
+session. The July sessions with it show no `ForceLogout`; the 07-28 note blaming it for "Fortnite was
+not started correctly" did not reproduce in them. Cost: in-game chat, parties and friend presence are
+offline, and those were already broken (FEATURES §5). **Real fix (ROADMAP Phase 1 step 0):** find what
+the online party/presence path waits for, fix Nova's XMPP, then restore 3551. **Do not restore 3551
+before that,** or every player is stuck on the loading screen again.
 
 **The original 1.9.2 analysis follows, kept for the record.**
 
