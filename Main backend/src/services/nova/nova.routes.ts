@@ -8,6 +8,20 @@ import { getLeaderboard, getAccount, getAccountIdByDisplayName } from '../../dat
 import { getEquippedCharacterId, getEquippedCosmetics } from '../mcp/profiles/athena';
 import { noteServerOutput } from '../matchmaking/hostRunner';
 import { Config } from '../../config';
+import { adminOk } from './diagnostics.routes';
+
+/**
+ * Destructive routes are admin-only. They used to be open on the theory that only the local machine
+ * could reach them — true on a player's PC (nova-proxy keeps /nova/api/logs on loopback), false on
+ * the coordinator, where Tailscale Funnel publishes every path and its traffic arrives FROM
+ * 127.0.0.1. Nothing in the launcher calls either DELETE, so gating them breaks no client; where no
+ * admin secret is set they simply refuse. KNOWN_ISSUES coordinator-local-control-routes-public.
+ */
+function refuseUnlessAdmin(request: any, reply: any): boolean {
+  if (adminOk(request)) return false;
+  reply.status(403).send({ error: 'admin secret required (x-nova-admin)' });
+  return true;
+}
 
 const START_TIME = Date.now();
 
@@ -89,7 +103,8 @@ export async function novaRoutes(fastify: FastifyInstance): Promise<void> {
     return reply.send({ components: getComponentStatuses() });
   });
 
-  fastify.delete('/nova/api/logs', async (_request, reply) => {
+  fastify.delete('/nova/api/logs', async (request, reply) => {
+    if (refuseUnlessAdmin(request, reply)) return reply;
     clearLogs();
     return reply.send({ ok: true });
   });
@@ -121,7 +136,8 @@ export async function novaRoutes(fastify: FastifyInstance): Promise<void> {
     });
   });
 
-  fastify.delete('/nova/api/diagnostics', async (_request, reply) => {
+  fastify.delete('/nova/api/diagnostics', async (request, reply) => {
+    if (refuseUnlessAdmin(request, reply)) return reply;
     clearDiagnostics();
     return reply.send({ ok: true });
   });

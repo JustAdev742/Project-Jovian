@@ -871,11 +871,12 @@ bool ClientOnPawnDied(UObject* DeadController, UFunction* fn, void* Parameters)
 
 	auto AlivePlayers = (TArray<UObject*>*)(__int64(GameMode) + AlivePlayersOffset);
 
-	*Get<bool>(DeadController, bMarkedAliveOffset) = false;
+	if (bMarkedAliveOffset != 0) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+		*Get<bool>(DeadController, bMarkedAliveOffset) = false;
 
 	auto TeamsLeftBefore = *TeamsLeft;
 
-	if (!Defines::bIsPlayground) // && OldPhase > EAthenaGamePhase::Warmup)
+	if (!Defines::bIsPlayground && PlayersLeftPtr) // && OldPhase > EAthenaGamePhase::Warmup)
 	{
 		beforePlayersLeft = *PlayersLeftPtr;
 		(*PlayersLeftPtr)--;
@@ -900,6 +901,9 @@ bool ClientOnPawnDied(UObject* DeadController, UFunction* fn, void* Parameters)
 			for (int i = 0; i < TeamMembers->Num(); i++)
 			{
 				auto TeamMember = TeamMembers->At(i);
+
+				if (!TeamMember || bMarkedAliveOffset == 0) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+					continue;
 
 				auto bAlive = *Get<bool>(TeamMember, bMarkedAliveOffset);
 				std::cout << std::format("[{}] bAlive: {}", i, bAlive);
@@ -966,7 +970,7 @@ bool ClientOnPawnDied(UObject* DeadController, UFunction* fn, void* Parameters)
 		// (PlayersLeft hit 0): firing EndMatch there is what tore the server down under the departing
 		// client. A plain `!bWasLogout` skipped BOTH cases, so a runner-up quit hung the match.
 		// if (*TeamsLeft <= 1) // && (int)Playlist->WinCondition <= 1
-		if (*PlayersLeftPtr <= 1 && !Defines::bIsPlayground && !(bWasLogout && *PlayersLeftPtr <= 0))
+		if (PlayersLeftPtr && *PlayersLeftPtr <= 1 && !Defines::bIsPlayground && !(bWasLogout && *PlayersLeftPtr <= 0))
 		{
 			static auto ClientNotifyWon = FindObject<UFunction>("/Script/FortniteGame.FortPlayerControllerAthena.ClientNotifyTeamWon");
 
@@ -1005,9 +1009,8 @@ bool ClientOnPawnDied(UObject* DeadController, UFunction* fn, void* Parameters)
 					if (!AlivePlayerPS)
 						continue;
 
-					auto apPlace = Get<int>(AlivePlayerPS, PlaceOffset);
-
-					*apPlace = 1;
+					if (PlaceOffset != 0) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+						*Get<int>(AlivePlayerPS, PlaceOffset) = 1;
 				}
 			}
 
@@ -1315,10 +1318,11 @@ bool ClientOnPawnDied(UObject* DeadController, UFunction* fn, void* Parameters)
 		}
 	}
 
-	if (KillerPawn && KillerPlayerState != DeadPlayerState)
+	if (KillerPawn && KillerPlayerState && KillerPlayerState != DeadPlayerState) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
 	{
 		static auto KillScoreOffset = preoffsets::KillScore; // KillerPlayerState->GetOffset("KillScore");
-		(*Get<int>(KillerPlayerState, KillScoreOffset))++;
+		if (KillScoreOffset != 0)
+			(*Get<int>(KillerPlayerState, KillScoreOffset))++;
 
 		if (KillerController)
 		{

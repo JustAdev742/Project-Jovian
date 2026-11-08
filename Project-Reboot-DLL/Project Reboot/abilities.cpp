@@ -169,6 +169,9 @@ std::vector<UObject*> Abilities::DoesASCHaveAbility(UObject* ASC, UObject* Abili
     auto compareAbilities = [&AbilitiesToReturn, &Ability](__int64* Spec) {
         auto CurrentAbility = GetAbilityFromSpec(Spec);
 
+        if (!CurrentAbility || !*CurrentAbility) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+            return;
+
         if ((*CurrentAbility)->ClassPrivate == Ability->ClassPrivate)
         {
             AbilitiesToReturn.push_back(*CurrentAbility);

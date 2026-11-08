@@ -1045,7 +1045,7 @@ void Looting::Initialize()
 						currentItem.Type = ItemType::Ammo;
 					else if (DefinitionString.contains("ResourcePickups"))
 						currentItem.Type = ItemType::Resource;
-					else if (DefinitionString.contains("TID") && bAllowContextTraps ? true : !DefinitionString.contains("Context"))
+					else if (DefinitionString.contains("TID") && (bAllowContextTraps || !DefinitionString.contains("Context"))) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
 						currentItem.Type = ItemType::Trap;
 
 					if (Weight)

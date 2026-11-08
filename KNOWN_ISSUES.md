@@ -9,6 +9,11 @@ in the same run. An entry marked PLAUSIBLE was reported by a reviewer but never 
 reproduced — 5 of 8 claimed P1s in the 2026-08-15 audit did **not** survive scrutiny, so treat
 anything unverified as a lead.
 
+**Run the doctor first** (since 2026-11-08): `node doctor/nova-doctor.mjs` reads every log, crash
+report, build and installed copy, and recognises the failures recorded here automatically — its
+signature catalog (`doctor/rules/signatures.mjs`) cites the entry each rule comes from. See
+[doctor/README.md](doctor/README.md) and, for what it cannot see, [doctor/COVERAGE.md](doctor/COVERAGE.md).
+
 ---
 
 ## Open — P1
@@ -333,6 +338,39 @@ or one test launch with a candidate key and a check of whether the request lands
 
 ---
 
+### `coordinator-local-control-routes-public` · PROBABLE · **open** · *found by nova-doctor 2026-11-08*
+
+Several Nova API routes that change state or expose cross-player data have no authentication, on
+the understanding that they are "reachable only from the local machine" (the comment on
+`/nova/api/logs/ingest` says exactly that). On a player's PC that holds: nova-proxy keeps them on
+loopback (`LOCAL_PREFIXES`). **On the coordinator it does not.** There is no proxy there; Tailscale
+Funnel publishes every path of `127.0.0.1:3551` on `:8443`.
+
+| route | effect if called from the internet |
+|---|---|
+| `DELETE /nova/api/diagnostics`, `DELETE /nova/api/logs` | wipes the coordinator's diagnostics / log ring |
+| `GET /nova/api/diagnostics`, `GET /nova/api/logs` | reads cross-player failures and request lines (redacted, but account-shaped) — contrary to "a player may not read" (DIAGNOSTICS_ARCHITECTURE §3) |
+| `POST /nova/api/logs/ingest` | injects lines into the log store |
+| `POST /nova/api/host/config`, `/host/ready`, `GET /host/status`, `/host/should-i-serve` | host-agent control; `host/config` sets the command a host spawns (exe basename-checked) |
+| `POST /nova/api/mesh/announce` | announces a host candidate (a tailnet check was added on the box in August; re-verify) |
+
+**Why it is PROBABLE, not CONFIRMED.** The doctor reads handler bodies; an auth step done elsewhere
+would not be seen, and none of these were probed on the live box (a DELETE probe would destroy the
+data it tests). The GET exposure can be confirmed read-only with one anonymous request.
+
+**Why a loopback check is not the fix.** Funnel traffic reaches the backend FROM 127.0.0.1, so
+`request.ip` cannot tell the internet from the machine. Options, in order of preference: an explicit
+`NOVA_PUBLIC=1` on the coordinator under which local-control routes refuse anything without the
+admin secret; or detecting Funnel's forwarding headers (verify what Funnel actually sends first).
+The launcher only ever GETs `/nova/api/logs` (novaApi.ts) and calls neither DELETE — checked — so the
+two DELETEs can be gated outright; the GETs cannot, because the launcher's Logs tab reads its local
+agent through them.
+
+**2026-11-08: the two DELETEs are now admin-only** (`adminOk`, the same gate as the dashboard): fail
+closed where no admin secret is set, usable with `x-nova-admin` on the coordinator. Test:
+`nova-routes-auth.test.ts`. The GETs and the host-control routes remain open pending the
+`NOVA_PUBLIC` design.
+
 ## Open — P2
 
 | id | grade | location | issue |
@@ -369,6 +407,67 @@ or one test launch with a candidate key and a check of whether the request lands
 ---
 
 ## Fixed in the tree, NOT yet on any player's machine
+
+### `reboot-july-fixes-lost` · CONFIRMED · **PARTLY RESTORED 2026-11-08** · *ships with the next launcher release*
+
+**The fix pass of 2026-07-25 never reached the Reboot tree that ships.** It survives in
+`_backup-reboot-src-20260725/`; the repo's `Project-Reboot-DLL/` was first committed on 07-26
+(`c3b9ef2`) from an unfixed copy, and every release since was built from it. Every missing site is
+byte-identical to that first commit — nothing was reverted on purpose. Memory and earlier notes
+recorded these as fixed; for the shipped code they were not.
+
+Found by nova-doctor (`.c_str()` of a temporary and the address-vs-value guard are two of its
+static patterns), confirmed by reading the code, traced with `git log -S`, then inventoried
+fix-by-fix against the backup.
+
+**Restored now** — each a guard that only skips a bad read or write, so behaviour is unchanged
+whenever offsets resolve:
+
+| fix | where |
+|---|---|
+| `.c_str()` of a temporary `std::wstring` (use-after-free on every object lookup) | `structs.cpp` FindObject, `structs.h` StaticLoadObject |
+| TickFlush tested the address `Get<T>()` returns, then passed a null value at match end | `server.cpp` |
+| win-notify `Place` written through offset 0 (the PlayerState vtable) | `processevent.cpp` |
+| `GetPlayersLeft` returned a bogus pointer; callers now handle null | `helper.cpp`, `processevent.cpp` |
+| `bMarkedAlive`, team-member and `KillScore` writes through unchecked offsets | `processevent.cpp` |
+| `IsBanned` dereferenced before a null check; `Unban` opened with `ios::ate` (never rewrote the file) | `moderation.cpp` |
+| `a && b ? true : !c` tagged every non-Context definition a Trap | `loot.cpp` |
+| null ability dereferenced while comparing specs (spawn path) | `abilities.cpp` |
+
+**Held back on purpose — they change join, spawn or restart behaviour and need a played match to
+verify** (the 7.40 build is missing from the dev PC):
+
+- `HandleStartingNewPlayer` returns `false` after calling the original, so RestartPlayer runs twice
+  per player (`processevent.cpp`, four sites). Proof after porting: one `[Spawn] SpawnDefaultPawnFor`
+  per player.
+- `GetPlayerStart` caches actors in a `static TArray` that dangles, never picks index 0/1 and can
+  spin forever; must ship together with the null-PlayerStart guard in `SpawnDefaultPawnFor`.
+- `Server::Listen` decrements the port per in-process restart (dedicated mode terminates instead,
+  so this is latent).
+- `edit.cpp` getters without an IsA/offset check, and the crash handler's one-shot latch (port with
+  a dump cap; benign first-chance faults are routine).
+
+**Repo is newer than the backup — do not copy backup files over it:** harvesting's ParamOffset
+guards, the FName guards and offset instrumentation in `structs`, the locker guards in `helper`,
+the crash.log stack walk and dump flags in `dllmain`, warmup tracking, and the 3-route
+`GetQuickBars`.
+
+**Verified:** builds clean (no warnings at any changed line); staged; backend 276/276, launcher
+26/26, e2e replay 22/22, Cobalt emitter test; doctor re-scan against the saved baseline: the three
+source findings gone, nothing new. **Not verified in a match.**
+
+### `bumper-ran-in-gameserver` · CONFIRMED · **FIXED in source 2026-11-08** · *ships with the next launcher release*
+
+Cobalt is loaded into BOTH Fortnite processes, and its bumper warm-up ran inside the headless
+`-nullrhi` gameserver too: 30 `LogMediaUtils: Cannot play file … bumper.mp4: no media player
+plug-ins` errors across the logged server sessions, and 19 `A null object was passed as a world
+context object` script messages within 15 s of them (the music handling, with no world). Found by
+the doctor's Root Cause Analyzer, which matched the two by timestamp.
+
+**Fix:** `IsHeadlessServer()` in `ue4.cpp` (hand-rolled over `GetCommandLineW`, so the import table
+stays at 9 — verified with dumpbin) skips the warm-up and the trigger. **Proof to look for** in a
+gameserver session: `[UE4] headless gameserver (-nullrhi): skipping the bumper warm-up`, and no
+`LogMediaUtils` errors in `FortniteGame_2.log`.
 
 ### `launcher-log-wrote-bearer-token` · CONFIRMED · **FIXED in source 2026-11-08** · *ships with the next launcher release*
 

@@ -16,6 +16,16 @@ UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
   * launcher-startup.log was recording the live bearer token; fixed in
     source (dbg_log redacts). Reaches players only with the next launcher
     release. Section 0 below still applies: 1.9.2 has still never been run.
+  * NEW: run `node doctor/nova-doctor.mjs` FIRST. It reads every log, crash
+    report, build and installed copy and writes doctor/out/latest/report.html
+    (doctor/README.md). `verify` runs every test suite + a baseline re-scan.
+  * THE 7.40 BUILD IS GONE from this PC (Downloads\v7.40 deleted; not found
+    on any drive). Nothing can be played or verified until it is restored.
+  * The 2026-07-25 Reboot fixes had never reached the shipped tree; the
+    low-risk ones are restored and staged, four behaviour-changing ones are
+    held for a played match (KNOWN_ISSUES reboot-july-fixes-lost).
+  * Staged, not released: Reboot fixes, the Cobalt bumper-on-server guard,
+    the backend DELETE gate. A 1.9.3 release would carry all of them.
 
 -------------------------------------------------------------------------------
 0. READ THIS FIRST — THE ONE THING THAT MATTERS

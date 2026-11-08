@@ -296,7 +296,7 @@ function routeAudit(ctx, F, cov) {
     [/^\/nova\/api\/dashboard\/(login|logout)$/, 'the sign-in form itself (it checks the admin secret in the body)'],
   ];
   // authenticateLauncher = the route checks the account's current password in the body (rate-limited).
-  const authed = r => /requireAuth|adminOk\(|adminRefused|registerGateRefuses|verifyToken|isLoopback|remoteAddress|x-nova-admin|authenticateLauncher\(/.test(r.opts + r.body);
+  const authed = r => /requireAuth|adminOk\(|adminRefused|registerGateRefuses|verifyToken|isLoopback|remoteAddress|x-nova-admin|authenticateLauncher\(|refuseUnlessAdmin\(/.test(r.opts + r.body);
   const sensitive = r => r.method !== 'GET' || /diagnostics|incidents|logs|anticheat|host\/|dashboard|launcher\/me|register-secret|tailnet/.test(r.path);
   let open = 0;
   for (const r of routes.filter(r => r.path.startsWith('/nova/api/'))) {

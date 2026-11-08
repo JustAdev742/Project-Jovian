@@ -70,7 +70,7 @@ void Moderation::Banning::Unban(UObject* PlayerController)
 
 	if (ipToRemove != -1)
 	{
-		std::ofstream stream("banned-ips.json", std::ios::ate);
+		std::ofstream stream("banned-ips.json", std::ios::out | std::ios::trunc); // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
 		for (int i = 0; i < lines.size(); i++)
 		{
 			if (i != ipToRemove - 1)
@@ -89,7 +89,13 @@ bool Moderation::Banning::IsBanned(UObject* PlayerController)
 	if (!input_file.is_open())
 		return false;
 
+	if (!PlayerController) // July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+		return false;
+
 	auto PlayerState = Helper::GetPlayerStateFromController(PlayerController);
+
+	if (!PlayerState)
+		return false;
 
 	auto IP = Helper::GetIPf(PlayerState).ToString();
 

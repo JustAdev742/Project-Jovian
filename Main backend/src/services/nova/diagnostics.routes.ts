@@ -94,7 +94,8 @@ function sameSecret(a: string, b: string): boolean {
   return crypto.timingSafeEqual(ah, bh);
 }
 
-function adminOk(request: any): boolean {
+/** Exported so other Nova routes share ONE admin gate rather than growing their own copies. */
+export function adminOk(request: any): boolean {
   const expected = Config.AC_ADMIN_SECRET;
   if (!expected) return false; // no secret configured → closed, not open
 

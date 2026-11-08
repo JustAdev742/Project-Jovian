@@ -1118,6 +1118,11 @@ int* Helper::GetPlayersLeft()
 
 	static auto PlayersLeftOffset = FindOffsetStruct2("Class /Script/FortniteGame.FortGameStateAthena", "PlayersLeft");
 
+	// Null, not a bogus pointer, when there is no GameState or the property is missing: a 0 offset
+	// would point at the GameState's vtable. Callers check for null. July fix restored 2026-11-08 (nova-doctor; lost when the repo tree was first committed)
+	if (!GameState || PlayersLeftOffset == 0)
+		return nullptr;
+
 	return Get<int>(GameState, PlayersLeftOffset);
 }
 
