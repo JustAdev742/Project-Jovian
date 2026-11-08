@@ -45,3 +45,8 @@ Full documentation/
 Launcher/cobalt/Cobalt/tests/*.exe
 Launcher/cobalt/Cobalt/tests/*.obj
 Launcher/cobalt/Cobalt/tests/*.pdb
+
+# nova-doctor reports are per-machine output (they quote local log evidence). Test fixtures are
+# source, and are named *.log on purpose, so they must survive the *.log rule above.
+doctor/out/
+!doctor/test/fixtures/**

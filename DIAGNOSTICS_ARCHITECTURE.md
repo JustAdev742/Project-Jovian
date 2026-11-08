@@ -50,8 +50,10 @@ publishes to the open internet.
 ## 3. The read side is a different boundary
 
 The incident list is cross-population data: routes, builds, affected counts. It is gated behind
-`NOVA_AC_ADMIN_SECRET` (falling back to `NOVA_REGISTER_SECRET`) and **fails closed** — unset means
-unavailable, with a page that explains how to enable it rather than a 404.
+`NOVA_AC_ADMIN_SECRET` and **fails closed** — unset means unavailable, with a page that explains how
+to enable it rather than a 404. (It used to fall back to `NOVA_REGISTER_SECRET`; removed 2026-11-08,
+when that secret began to be issued to every signed-in launcher. See KNOWN_ISSUES
+`gameserver-register-unauthenticated`.)
 
 A player may write. A player may not read, including their own aggregate.
 
