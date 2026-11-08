@@ -39,7 +39,10 @@ UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
     Stage it with tools/stage-doctor.mjs (a fourth --check gate). Verified end
     to end with a simulated session only, not yet in a real match.
   * FIRST PLAYED SESSION ON 1.9.4 (the 7.40 build is back, in
-    Downloads\7.40-CL-5046157): it loaded in and played. The logs showed a
+    Downloads\7.40-CL-5046157). The player was STUCK ON THE LOADING SCREEN in
+    both sessions (0 "Hiding loading screen" after the join), fixed in 1.9.6:
+    Reboot must use ClientForceUpdateQuickbar on 7.40 (gate < 7.4, not < 7.41).
+    The logs also showed a
     62s queue (cold server start), a PHANTOM host player in every hosted
     match, and 30 Hz server net updates. Fixed in 1.9.5 + on the coordinator:
     injection at server readiness, lobby pre-warm, phantom guard, 60 Hz. See
