@@ -20,7 +20,7 @@ services correctly. The launcher is Nova's own design and does not copy Epic's a
 | Host election, on-demand server, P2P over Tailscale | WORKS | played 2026-11-08 | — |
 | Lobby pre-warm (server starts before Play) | WORKS | 2026-11-08 1.9.5: elected from lobby, ready, 22s queue | — |
 | **Getting past the loading screen after joining** | WORKS (1.9.7) | verified in play 2026-11-08: Athena UI, loading screen dropped, bus, landed. Cause was Cobalt's persistent ProcessEvent hook (KNOWN_ISSUES client-stuck-on-loading-screen) | — |
-| Opening chests | BROKEN | `ABuildingContainer::ServerOnAttemptInteract … failed for Tiered_Chest_Athena` in the first match that got in (2026-11-08) | P1 step 1 |
+| Opening chests | WORKS | 2026-11-08: Reboot logged the container opening, quickbar 6 → 7, weapon picked up and fired. The `ServerAttemptInteract … failed` warning is noise: Reboot opens containers itself | — |
 | Intro bumper | OFF by default (opt-in) | its hook caused the hang; the hook now disables itself after each task, unverified with the bumper on | P1 |
 | In-game chat / party / friend presence | OFF (workaround) | the coordinator points XMPP at a dead port; retest online with 1.9.7 | P1 step 0 |
 | Phantom host player removed | WORKS | 1.9.5: "failed to spawn a pawn" for the server's controller | — |

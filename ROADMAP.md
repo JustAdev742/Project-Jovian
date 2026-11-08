@@ -29,7 +29,7 @@ Order matters: nothing else is testable until a player gets past the loading scr
 | Step | Work | Size | Proof |
 |---|---|---|---|
 | **0** | ~~Loading screen~~ **FIXED in 1.9.7** (Cobalt hook). Remaining: retest XMPP online with 1.9.7 and restore 3551 if it holds; turn the bumper on once and confirm | S | `Hiding loading screen` after `Welcomed by server` with XMPP on 3551 |
-| **0a** | **Chests don't open** (`ServerOnAttemptInteract … failed for Tiered_Chest_Athena`, first match that got in) | S–M | a chest opens and drops loot in a played match |
+| ~~0a~~ | ~~Chests~~: not a bug. They open; the warning is the native path reporting "not handled" (FEATURES) | — | — |
 | 0b | Rotate `NOVA_JWT_SECRET` on the coordinator (when the user says so) | S | an old-placeholder token is rejected; a fresh sign-in works |
 | 1 | Team picker for Solo (each player their own team), plus a `FrontEndPlaylistData` override that only lists modes servers can run | M | two clients in one Solo match can damage each other |
 | 2 | Playlist pipeline (backend → host agent → Reboot `Defines::Playlist`), team-based match end, party-aware teams | M | a Duos match puts a party on one team; cobalt.log `Setting playlist to: Playlist_DefaultDuo` |

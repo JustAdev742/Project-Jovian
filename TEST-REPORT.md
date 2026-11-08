@@ -25,8 +25,10 @@ What is verified, how, and what is not. Update with every release. Newest first.
 - loading screen after joining: Athena UI switch, loading screen dropped, bus, exit with pawn
   (2026-11-08 19:21 local). Cause: Cobalt's persistent ProcessEvent hook.
 
+**Also seen working in that match:** chests (loot spawned, weapon picked up and fired), dynamite, the bus and drop.
+
 **Failing in played sessions**
-- chests do not open (`ServerOnAttemptInteract … failed for Tiered_Chest_Athena`)
+- none known in the solo flow; two-player flows untested
 
 **Not verified**
 - anything with two players (parties, duos, global chat between accounts, Solo team damage)

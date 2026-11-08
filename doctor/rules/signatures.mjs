@@ -116,6 +116,13 @@ export const RULES = [
     explain: 'Exit 3 is UE4\'s GIsCriticalError → RequestExit path (what follows our vectored handler logging a crash); a raw crash shows 3221225477. Read the matching FortniteGame_2.log "=== Critical error: ===" block for the frames.',
   },
   {
+    id: 'container-interact-native-false', sources: ['ue4'], status: 'known-benign',
+    re: /(ABuildingContainer::ServerOnAttemptInteract .* failed for|ServerAttemptInteract_Implementation .* failed for .* bInteractionSuccessful was false)/,
+    severity: 'INFO', confidence: 'CONFIRMED', component: 'reboot', category: 'noise',
+    title: 'Game\'s own container interaction reports "not handled" (Reboot opens it instead)',
+    explain: 'Reboot hooks the interaction and spawns the loot itself, so the native path logs bInteractionSuccessful=false. 2026-11-08: the same second, Reboot logged the container opening and the player picked up and fired a weapon from it.',
+  },
+  {
     id: 'join-in-progress-check', sources: ['ue4'], status: 'known-benign',
     re: /\[UFortMatchmakingV\d::JoinInProgressIfRequired\] bHasCheckedForJoinInProgress/,
     severity: 'INFO', confidence: 'CONFIRMED', component: 'game', category: 'noise',
