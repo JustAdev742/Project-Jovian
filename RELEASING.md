@@ -98,8 +98,8 @@ The remaining artefacts are still manual. Copy them into `Launcher/src-tauri/res
 
 | Goes to | From |
 |---|---|
-| `resources/Project Reboot.dll` | `backends/_extracted/Project-Reboot-main/x64/Release/Project Reboot.dll` |
-| `resources/Cobalt.dll` | wherever you built Cobalt |
+| ~~`resources/Project Reboot.dll`~~ | **scripted: `node tools/stage-cobalt.mjs reboot`** — built from `Project-Reboot-DLL/` in this repo, never the out-of-repo `backends/_extracted` tree (KNOWN_ISSUES `reboot-authoritative-tree-was-not-the-one-referenced`) |
+| ~~`resources/Cobalt.dll`~~ | **scripted: `node tools/stage-cobalt.mjs`** |
 | ~~`resources/Backend-Coordinator/dist`~~ | **scripted above — do not copy by hand** |
 | `resources/nova-proxy/` | `nova-proxy/` (proxy.js + node_modules) |
 | `resources/node/node.exe` | your installed Node |

@@ -371,6 +371,12 @@ closed where no admin secret is set, usable with `x-nova-admin` on the coordinat
 `nova-routes-auth.test.ts`. The GETs and the host-control routes remain open pending the
 `NOVA_PUBLIC` design.
 
+**Deployed to the coordinator 2026-11-08** (backup `~/nova-src-backup-20261108-051946.tgz`; 7/7
+tests passed on the box before the swap). Verified from outside, through the public Funnel, only
+after the doctor's drift check showed the box matching the repo (0 of 50 files differing):
+anonymous `DELETE /nova/api/logs` → **403**, `DELETE /nova/api/diagnostics` → **403**; controls
+`GET /nova/api/info` and `GET /nova/api/logs` → 200.
+
 ## Open — P2
 
 | id | grade | location | issue |
@@ -408,7 +414,7 @@ closed where no admin secret is set, usable with `x-nova-admin` on the coordinat
 
 ## Fixed in the tree, NOT yet on any player's machine
 
-### `reboot-july-fixes-lost` · CONFIRMED · **PARTLY RESTORED 2026-11-08** · *ships with the next launcher release*
+### `reboot-july-fixes-lost` · CONFIRMED · **PARTLY RESTORED 2026-11-08** · *ships in 1.9.3*
 
 **The fix pass of 2026-07-25 never reached the Reboot tree that ships.** It survives in
 `_backup-reboot-src-20260725/`; the repo's `Project-Reboot-DLL/` was first committed on 07-26
@@ -456,7 +462,7 @@ the crash.log stack walk and dump flags in `dllmain`, warmup tracking, and the 3
 26/26, e2e replay 22/22, Cobalt emitter test; doctor re-scan against the saved baseline: the three
 source findings gone, nothing new. **Not verified in a match.**
 
-### `bumper-ran-in-gameserver` · CONFIRMED · **FIXED in source 2026-11-08** · *ships with the next launcher release*
+### `bumper-ran-in-gameserver` · CONFIRMED · **FIXED in source 2026-11-08** · *ships in 1.9.3*
 
 Cobalt is loaded into BOTH Fortnite processes, and its bumper warm-up ran inside the headless
 `-nullrhi` gameserver too: 30 `LogMediaUtils: Cannot play file … bumper.mp4: no media player
@@ -469,7 +475,7 @@ stays at 9 — verified with dumpbin) skips the warm-up and the trigger. **Proof
 gameserver session: `[UE4] headless gameserver (-nullrhi): skipping the bumper warm-up`, and no
 `LogMediaUtils` errors in `FortniteGame_2.log`.
 
-### `launcher-log-wrote-bearer-token` · CONFIRMED · **FIXED in source 2026-11-08** · *ships with the next launcher release*
+### `launcher-log-wrote-bearer-token` · CONFIRMED · **FIXED in source 2026-11-08** · *ships in 1.9.3*
 
 `launcher-startup.log`, next to the launcher exe, recorded the player's **live bearer token** on every
 launch: `carter.rs` logs the full Fortnite command line, and that includes
