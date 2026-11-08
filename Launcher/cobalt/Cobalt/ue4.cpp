@@ -750,6 +750,21 @@ namespace Nova::UE4
         }
     }
 
+    /** [Nova] Take the ProcessEvent hook back out once its job is done. Every Blueprint event and UI
+     *  call in the client goes through ProcessEvent, and the hook was left in for the whole session,
+     *  matches included, long after the bumper (its only user) had finished. Called from a worker
+     *  thread after the last game-thread task has run; MinHook suspends the other threads while it
+     *  patches. A later RunOnGameThread simply installs it again. */
+    void UninstallGameThreadHook()
+    {
+        for (int i = 0; i < 100 && gTaskPending.load(); ++i) Sleep(20);   // let a queued task run first
+        if (!gHookInstalled) return;
+        MH_DisableHook((LPVOID)gProcessEvent);
+        MH_RemoveHook((LPVOID)gProcessEvent);
+        gHookInstalled = false;
+        Cobalt::Log::WriteLine("[UE4] game-thread hook removed - ProcessEvent is untouched for the rest of the session");
+    }
+
     bool RunOnGameThread(void (*task)())
     {
         if (!gResolved.load() || !task) return false;
@@ -2104,6 +2119,7 @@ namespace Nova::UE4
                 Cobalt::Log::WriteLine("[UE4] bumper: finished - back to the lobby (texture reported " +
                                        std::to_string(w) + " wide during playback; 854 = frames drawn, 0 = none)");
             });
+            UninstallGameThreadHook();
             return 0;
         }, nullptr, 0, nullptr);
     }
@@ -2187,6 +2203,14 @@ namespace Nova::UE4
                 if (IsHeadlessServer())
                 {
                     Cobalt::Log::WriteLine("[UE4] headless gameserver (-nullrhi): skipping the bumper warm-up");
+                    return;
+                }
+                // [Nova] Switched off means NOTHING runs. The warm-up used to run regardless and leave
+                // a hidden full-screen widget in the viewport plus a hook on ProcessEvent for the whole
+                // session; with the switch off the clip never plays, so neither was ever removed.
+                if (!BumperEnabled())
+                {
+                    Cobalt::Log::WriteLine("[UE4] bumper switched off in Settings - no warm-up, no widget, no ProcessEvent hook");
                     return;
                 }
                 EnumerateMedia();
