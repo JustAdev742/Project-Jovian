@@ -1,11 +1,11 @@
 {
-  "version": "1.9.6",
-  "notes": "Fixes being stuck on the loading screen after joining a match.\n\nYou could join a match but never get past the loading screen, while the match carried on behind it. The cause was in the match server: it was setting up your hotbar the way older versions of the game do, which this version of the game does not support, so your game never finished building your hotbar and never dropped the loading screen. It now uses the method this version expects.\n\nThis release also includes everything from 1.9.5 (faster matches, no ghost player, smoother updates). It has been built and tested, but not yet played through a match. If you still get stuck on the loading screen, send the log from the Logs tab.",
-  "pub_date": "2026-11-08T07:24:27Z",
+  "version": "1.9.7",
+  "notes": "Fixes being stuck on the loading screen after joining a match. Confirmed in a played match.\n\nThe cause was the intro bumper. To play its video, the launcher's game add-on hooked into the game's core event system, and that hook stayed in place for the whole match. With it there, the game never switched to the in-match screen, so the loading screen never went away. The hook is now only in place for the moment it is needed, and is switched off again straight after.\n\nThe intro bumper is now off by default while this is double-checked. You can turn it back on in Settings > Intro bumper.\n\nThis release also includes the hotbar fix from 1.9.6 and everything from 1.9.5 (faster matches, no ghost player, smoother updates).",
+  "pub_date": "2026-11-08T08:33:37Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bVZEdzJtdDVqN0poZ3J2RldIRUloTkpOUThqR1ZVQUNpR0lrbnRvY3RVWk9zY2FRUmprK3h4NmdPWURsUnZRTm1ScVFHdy9MdGtzUDdtQjk2cW85SmdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTIyNjY0CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuNl94NjQtc2V0dXAubnNpcy56aXAKNFRjbWN4ZVRNOFR4cUFBV0V3UlFPNzE4eEFGdi9yc1BoV1dVaW9WbzhXVUx3VDZPeUh1d20wMTZ5bnFXOVB4RGRwa243YXkyeDVsOFk4cmxKRjV0Q1E9PQo=",
-      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.6/Project.Launcher_1.9.6_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bWVMV1JBMk1SUDBKb3paMzkyWUI0cWdNcEloTmxVRjdnaTg0NVVCblhwZEtBeUhmYm9TU2ZCaUJKQ0tsaDN2ZXVBZ0J0S1ppazFXZWNCcytRNUljR3c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTI2ODE1CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuN194NjQtc2V0dXAubnNpcy56aXAKdTAxMDRNN1Zaekl3blhNeXErWWJJdjhUTXVHaGc3c2lyTG84N0k5WVJUN2ZNRzNBOG5WYjdleHN3eTBDM0U4cWNJbi8yak50Q0lmeEEvalpFU21sQUE9PQo=",
+      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.7/Project.Launcher_1.9.7_x64-setup.nsis.zip"
     }
   }
 }
