@@ -120,7 +120,7 @@ services correctly. The launcher is Nova's own design and does not copy Epic's a
 
 | Feature | Status | Evidence | Phase |
 |---|---|---|---|
-| **Login tokens can't be forged** | BROKEN; fix written, needs the secret set on the coordinator | KNOWN_ISSUES jwt-secret-public | now (waiting on the user) |
+| **Login tokens can't be forged** | WORKS | NOVA_JWT_SECRET rotated on the coordinator 2026-11-08; placeholder-signed and pre-rotation tokens rejected (401), fresh tokens accepted | — |
 | Coordinator local-control routes without auth | BROKEN (8 routes) | KNOWN_ISSUES coordinator-local-control-routes-public | P1 |
 | Gameserver registration auth | PARTIAL (step one live) | KNOWN_ISSUES gameserver-register-unauthenticated | P1 |
 | One account per person (votes, abuse) | MISSING | 05 C.7 | P2 |

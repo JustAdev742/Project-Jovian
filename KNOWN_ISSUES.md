@@ -377,7 +377,12 @@ after the doctor's drift check showed the box matching the repo (0 of 50 files d
 anonymous `DELETE /nova/api/logs` → **403**, `DELETE /nova/api/diagnostics` → **403**; controls
 `GET /nova/api/info` and `GET /nova/api/logs` → 200.
 
-### `jwt-secret-public` · CONFIRMED · **P1 security** · *found 2026-11-08 by the voice-chat research*
+### `jwt-secret-public` · CONFIRMED · **FIXED ON THE COORDINATOR 2026-11-08 08:37 UTC** · *found 2026-11-08 by the voice-chat research*
+
+**Closed.** A random 64-char `NOVA_JWT_SECRET` was generated on the box (never printed) and appended to
+`~/nova-backend/.env` (backup `~/.nova-secret-backup/env-before-jwt-20261108-083702`, mode 600). Probes
+after the restart: a token issued before the rotation → 401, a token signed with the public placeholder
+→ 401, a freshly issued token → 200, and no startup security warning. Everyone had to sign in again once.
 
 **Anyone can mint a login token for any account on the coordinator.** `config.ts` signed and verified
 every token with a fixed placeholder string. There was no environment override, the coordinator's
