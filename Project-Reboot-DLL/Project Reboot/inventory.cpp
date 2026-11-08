@@ -254,10 +254,14 @@ void Inventory::Update(UObject* Controller, bool bAddOrRemove, FFastArraySeriali
 	if (WorldInventory && WorldHandleInvUpdate)
 		WorldInventory->ProcessEvent(WorldHandleInvUpdate); // This like sets the OwnerInventory probs idfk
 
-	// 7.40 uses the AFortQuickBars actor path (OnRep the quickbars so the client rebuilds slots from
-	// the server-mapped GUIDs). `< 7.41` includes 7.40; the old `< 7.4` sent it down the
-	// ClientForceUpdateQuickbar branch, which has no server slot mapping -> GUIDs unresolved.
-	if (Fortnite_Version < 7.41)
+	// [Nova] 7.40 BUILDS ITS QUICKBARS ON THE CLIENT. The 7.40 binary has no QuickBars/QuickBar property on
+	// the controller, no OnRep_QuickBar and no OnRep_Primary/SecondaryQuickBar; it has ClientQuickBars and
+	// ClientForceUpdateQuickbar. Upstream Project Reboot gates the server-quickbar path at < 7.4 for exactly
+	// this reason, and so did this tree until July 2026, when it was changed to < 7.41. From then on 7.40
+	// called functions that do not exist instead of ClientForceUpdateQuickbar: the client was never told to
+	// build its quickbar and sat on the loading screen (KNOWN_ISSUES client-stuck-on-loading-screen; both
+	// 2026-11-08 sessions logged 0 loading-screen drops after joining).
+	if (Fortnite_Version < 7.4)
 	{
 		const auto QuickBars = GetQuickBars(Controller);
 
@@ -501,10 +505,8 @@ UObject* Inventory::GiveItem(UObject* Controller, UObject* ItemDefinition, EFort
 			if (LoadedAmmo != -1)
 				FFortItemEntry::SetLoadedAmmo(ItemEntry, Controller, LoadedAmmo);
 
-			// 7.40 uses the AFortQuickBars actor (see the note at the actor spawn) — map this item's
-			// GUID to its quickbar slot so the client's AddItemInternal can resolve it. `< 7.41`
-			// includes 7.40; the old `< 7.4` skipped it, leaving quickbar slots unmapped.
-			if (Fortnite_Version < 7.41)
+			// [Nova] Server-side quickbar slots exist only below 7.4; 7.40 builds its own (see Inventory::Update).
+			if (Fortnite_Version < 7.4)
 			{
 				static auto ServerAddItemInternal = FindObject<UFunction>("/Script/FortniteGame.FortQuickBars.ServerAddItemInternal");
 				auto QuickBars = GetQuickBars(Controller);

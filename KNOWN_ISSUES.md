@@ -737,7 +737,37 @@ wait on the CLIENT being able to render, which nothing on the server can current
 experience. This change was shipped on a server-side measurement and only a screenshot of a loading
 screen revealed it.
 
-### `client-stuck-on-loading-screen` · CONFIRMED · **CAUSE FOUND — fixed 2026-09-19 (ships in 1.9.2)**
+### `client-stuck-on-loading-screen` · CONFIRMED · **REAL CAUSE FOUND 2026-11-08 — fixed in 1.9.6** · *the 1.9.2 fix did not take*
+
+**Correction first.** The 1.9.2 analysis below found a real bug (the property name) but drew the
+wrong conclusion from it, and the hang continued. Both sessions played on 2026-11-08 (1.9.4 and 1.9.5)
+logged `Welcomed by server` → `Athena_Terrain`, then **zero** `LogFortLoadingScreen: Hiding loading
+screen` lines, while lobby map changes log one every time. The player stayed on the loading screen
+through warmup and the bus. `EnterAircraft`/`ExitAircraft` prove nothing about the screen, because the
+server drives the controller. (A doctor regrade the same morning leaned on exactly that and was
+reverted.)
+
+What the client did have: `OnRep_bHasServerFinishedLoading 1`, `SetHasFinishedLoading 1 Client`,
+`OnReadyToStartMatch`, `World Inventory received`. What it never got was a quickbar. Its last line is
+`Attempting to add harvesting tool … to quickbar 2 in slot -3` (2 = Max_None, i.e. no quickbar).
+
+**The 7.40 binary decides it.** Its compiled reflection names (plain text in the exe) include
+`ClientQuickBars` and `ClientForceUpdateQuickbar`, and do **not** include a `QuickBars` or `QuickBar`
+property, `OnRep_QuickBar`, or `OnRep_Primary/SecondaryQuickBar`. 7.40 builds its quickbars on the
+client. Upstream Project Reboot gates the server-quickbar path at `Fortnite_Version < 7.4`, and so did
+this tree on 2026-07-20 (backup in `Documents/backends/_backup-reboot-20260720-092843`). By the first
+commit on 07-26 three sites read `< 7.41`, based on the GUID warnings and a 7.30 engine. From then on,
+7.40 called functions that do not exist instead of `ClientForceUpdateQuickbar`.
+
+A second bug made the 1.9.2 fallback useless. The join handler did `GetOffset("QuickBars")` → 0 on 7.40,
+then read `*(PlayerController + 0)` (the vtable pointer) as "the quickbar", found it non-null, and never
+spawned one. That is the doctor's P2 "a 0 offset reads the vtable" in a concrete case.
+
+**Fix (1.9.6):** the three gates are back to `< 7.4` (`Inventory::Update`, the per-item slot add, and
+the join-time spawn), and the spawn checks its offset. **Verify:** after joining, the client log should
+show `Hiding loading screen` and the player should be able to move during warmup.
+
+**The original 1.9.2 analysis follows, kept for the record.**
 
 The client reaches the match (`Join succeeded`, `EnterAircraft`, `ExitAircraft` all present) while
 still showing the loading screen, because it is still streaming the island. On the reported machine

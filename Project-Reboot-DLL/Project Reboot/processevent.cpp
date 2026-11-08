@@ -155,14 +155,20 @@ bool HandleStartingNewPlayer(UObject* Object, UFunction* Function, void* Paramet
 		// engine) both prove it. The old `< 7.4` gate excluded 7.40 (7.4 < 7.4 is false), so the server
 		// never created a quickbar nor mapped item GUIDs to slots -> the client couldn't resolve them.
 		// `< 7.41` includes 7.40 and below. Null-guard the spawn so we don't replace a native one.
-		if (Fortnite_Version < 7.41)
+		// [Nova] Below 7.4 only. 7.40 has no QuickBars property (it builds ClientQuickBars itself, see
+		// Inventory::Update), and on a build without the property GetOffset returns 0, so the old code read
+		// the controller's vtable pointer as "the quickbar", found it non-null and never spawned anything.
+		if (Fortnite_Version < 7.4)
 		{
 			static const auto QuickBarsClass = FindObject("/Script/FortniteGame.FortQuickBars");
 			static auto QuickBarsOffset = PlayerController->GetOffset("QuickBars");
 
-			auto& QuickBarsRef = *(UObject**)(__int64(PlayerController) + QuickBarsOffset);
-			if (!QuickBarsRef)
-				QuickBarsRef = Helper::Easy::SpawnActor(QuickBarsClass, FVector(), FRotator(), PlayerController);
+			if (QuickBarsOffset > 0)
+			{
+				auto& QuickBarsRef = *(UObject**)(__int64(PlayerController) + QuickBarsOffset);
+				if (!QuickBarsRef)
+					QuickBarsRef = Helper::Easy::SpawnActor(QuickBarsClass, FVector(), FRotator(), PlayerController);
+			}
 		}
 
 		static auto bHasServerFinishedLoadingOffset = PlayerController->GetOffset("bHasServerFinishedLoading");

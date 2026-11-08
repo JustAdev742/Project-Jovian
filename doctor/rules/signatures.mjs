@@ -31,10 +31,10 @@ export const RULES = [
   {
     id: 'quickbar-guid-unmapped', sources: ['ue4:client'],
     re: /AFortQuickBars::AddItemInternal could not find Item with GUID/,
-    severity: 'P2', confidence: 'CONFIRMED', component: 'reboot', category: 'gameplay',
+    severity: 'P0', confidence: 'CONFIRMED', component: 'reboot', category: 'gameplay',
     cause: 'quickbars-lookup', kb: KI('client-stuck-on-loading-screen'),
-    title: 'Quickbar slots arrived before the items they point at (spawn race)',
-    explain: 'The client was told to put items in quickbar slots before the inventory holding them had replicated. Before 1.9.2 this went with the stuck-on-loading-screen hang. On 1.9.4 (2026-11-08) it still appears, 6 times at spawn, in a session that loaded in, dropped from the bus and played normally, so on its own it is no longer the hang. If a player IS stuck on the loading screen, this plus the quickbar lines in cobalt.log is still where to look.',
+    title: 'Client could not build its quickbar (stuck-on-loading-screen signature)',
+    explain: 'The client never got its quickbar built, so it stays on the loading screen while the match runs behind it (EnterAircraft/ExitAircraft still appear: the server drives the controller, so they prove nothing about the screen). Real cause, 2026-11-08: Reboot sent 7.40 down the server-quickbar path (< 7.41) to functions this build does not have, instead of ClientForceUpdateQuickbar (< 7.4, as upstream). Fixed in 1.9.6. A recurrence on >= 1.9.6 means the fix did not take. (An earlier note here, from the same day, downgraded this to P2 on the strength of the bus phases; that reasoning was wrong.)',
   },
   {
     id: 'quickbars-property-missing', sources: ['cobalt'],

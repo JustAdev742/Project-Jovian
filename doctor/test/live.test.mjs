@@ -12,7 +12,7 @@ import { buildUpload, buildSummary } from '../lib/upload.mjs';
 test('a known problem is kept, with its rule', () => {
   const c = classifyLine('ue4:client', '[2026.09.19-02.47.15:721][686]LogFort: Warning: AFortQuickBars::AddItemInternal could not find Item with GUID 520B7F5C');
   assert.equal(c.rule, 'quickbar-guid-unmapped');
-  assert.equal(c.sev, 'P2'); // regraded 2026-11-08: 1.9.4 loads in despite it
+  assert.equal(c.sev, 'P0');
 });
 
 test('benign and not-ours lines are dropped — they are noise the catalog already explains', () => {
@@ -118,8 +118,8 @@ test('noise from 2026-11-08 is no longer sent as problems', () => {
   assert.ok(classifyLine('cobalt', '17:32:38.419 [Exception] first-chance 0xC0000005 at 0x00007FF6AB899999 (RVA 0x1299999) - dump written.'));
 });
 
-test('the quickbar GUID race is no longer graded as a blocking P0', () => {
+test('the quickbar GUID miss stays a blocking P0: it is the stuck-on-loading-screen signature', () => {
   const c = classifyLine('ue4:client', '[2026.11.08-06.32.30:859][ 73]LogFort: Warning: AFortQuickBars::AddItemInternal could not find Item with GUID C5CA04DB4853281A3F2124B02C0A83E6');
   assert.equal(c.rule, 'quickbar-guid-unmapped');
-  assert.equal(c.sev, 'P2');
+  assert.equal(c.sev, 'P0');
 });
