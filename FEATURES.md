@@ -19,7 +19,10 @@ services correctly. The launcher is Nova's own design and does not copy Epic's a
 | Sign in, launch, reach the lobby | WORKS | played 2026-11-08 | — |
 | Host election, on-demand server, P2P over Tailscale | WORKS | played 2026-11-08 | — |
 | Lobby pre-warm (server starts before Play) | WORKS | 2026-11-08 1.9.5: elected from lobby, ready, 22s queue | — |
-| **Getting past the loading screen after joining** | BROKEN (the #1 blocker) | 1.9.6's quickbar fix was real but not the cause. Every session that got past the loading screen predates 2026-07-28, when the hotfix made the game's XMPP presence connect; since then the client never switches its UI to Athena after joining. Cause is in the XMPP-online path; a one-match test is pending (KNOWN_ISSUES client-stuck-on-loading-screen) | P1 step 0 |
+| **Getting past the loading screen after joining** | WORKS (1.9.7) | verified in play 2026-11-08: Athena UI, loading screen dropped, bus, landed. Cause was Cobalt's persistent ProcessEvent hook (KNOWN_ISSUES client-stuck-on-loading-screen) | — |
+| Opening chests | BROKEN | `ABuildingContainer::ServerOnAttemptInteract … failed for Tiered_Chest_Athena` in the first match that got in (2026-11-08) | P1 step 1 |
+| Intro bumper | OFF by default (opt-in) | its hook caused the hang; the hook now disables itself after each task, unverified with the bumper on | P1 |
+| In-game chat / party / friend presence | OFF (workaround) | the coordinator points XMPP at a dead port; retest online with 1.9.7 | P1 step 0 |
 | Phantom host player removed | WORKS | 1.9.5: "failed to spawn a pawn" for the server's controller | — |
 | 60 Hz server updates | UNTESTED | KNOWN_ISSUES server-net-30hz | P1 verify |
 | Match stats, XP, level progress recorded | MISSING | no caller of `/nova/api/match/report` (01 §D) | P1 |

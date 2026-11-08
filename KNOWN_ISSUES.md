@@ -754,7 +754,36 @@ wait on the CLIENT being able to render, which nothing on the server can current
 experience. This change was shipped on a server-side measurement and only a screenshot of a loading
 screen revealed it.
 
-### `client-stuck-on-loading-screen` · CONFIRMED · **REAL CAUSE FOUND 2026-11-08 — fixed in 1.9.6** · *the 1.9.2 fix did not take*
+### `client-stuck-on-loading-screen` · CONFIRMED · **FIXED — VERIFIED IN PLAY 2026-11-08 (1.9.7)** · *cause: Cobalt's persistent ProcessEvent hook*
+
+**The cause, proven by one variable changed in a played session.** Cobalt's intro bumper hooked
+`UObject::ProcessEvent` (MinHook inline) to get onto the game thread, and the hook stayed enabled for
+the whole session, matches included. It was installed at the bumper's warm-up even with the bumper
+switched off in Settings. Every failing session logs `[UE4] game-thread hook installed`. The fix:
+a Cobalt build that skipped the warm-up when the bumper is off, installed locally, with nothing else
+changed. In that session the client logged `SetUIState … Invalid to Athena` after joining, dropped the
+loading screen 5s later, rode the bus and exited with a pawn (19:21 local, 2026-11-08). Mechanism
+unknown: the detour is a plain pass-through, but with it in, the client's UI manager never transitions
+to Athena.
+
+**Fix (1.9.7):**
+- The game-thread hook is enabled only while a task is pending and disabled right after the task runs.
+  It is disabled, never removed, because the game thread may still be returning through the
+  trampoline.
+- The bumper is opt-in (`bumper.on`; the Settings switch writes it) until a played match with it on
+  confirms the self-disabling hook is safe.
+
+**What the earlier analyses got right and wrong, kept for the record:**
+- 1.9.6 (quickbar gate `< 7.4`): a real bug that 7.40 needed fixed (the pickaxe now reaches the
+  quickbar), but not the hang.
+- The XMPP correlation: real (XMPP online suppresses rich presence), but not the cause. The
+  dead-port setting on the coordinator is still in place; ROADMAP Phase 1 step 0 retests XMPP online
+  with this fix and restores 3551 if the loading screen still drops.
+- EnterAircraft/ExitAircraft in a log say nothing about the screen: the server drives the controller.
+
+**Earlier analyses follow, kept for the record.**
+
+### (superseded) `client-stuck-on-loading-screen` · REAL CAUSE FOUND 2026-11-08 — fixed in 1.9.6 · *the 1.9.2 fix did not take*
 
 **Correction first.** The 1.9.2 analysis below found a real bug (the property name) but drew the
 wrong conclusion from it, and the hang continued. Both sessions played on 2026-11-08 (1.9.4 and 1.9.5)

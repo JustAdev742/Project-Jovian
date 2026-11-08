@@ -21,9 +21,12 @@ What is verified, how, and what is not. Update with every release. Newest first.
 - 60 Hz: `[Nova] NetServerMaxTickRate 60 -> 60` (1.9.6)
 - coordinator deploys: content-diffed identical, probes with a bogus-path control
 
+**Fixed and verified in play (1.9.7 build, installed locally first)**
+- loading screen after joining: Athena UI switch, loading screen dropped, bus, exit with pawn
+  (2026-11-08 19:21 local). Cause: Cobalt's persistent ProcessEvent hook.
+
 **Failing in played sessions**
-- **Loading screen after joining a hosted match: still stuck on 1.9.6.** See KNOWN_ISSUES
-  client-stuck-on-loading-screen. Every session on this PC that got past it predates 2026-07-28.
+- chests do not open (`ServerOnAttemptInteract … failed for Tiered_Chest_Athena`)
 
 **Not verified**
 - anything with two players (parties, duos, global chat between accounts, Solo team damage)
