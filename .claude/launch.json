@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "Launcher", "run", "dev"],
       "port": 1420
+    },
+    {
+      "name": "nova-doctor-report",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["doctor/nova-doctor.mjs", "serve"],
+      "port": 4310
     }
   ]
 }

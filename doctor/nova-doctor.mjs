@@ -25,6 +25,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { discover } from './lib/context.mjs';
 import { FindingSet, SEVERITIES } from './lib/finding.mjs';
 import { compareToBaseline } from './lib/baseline.mjs';
@@ -164,6 +165,21 @@ async function main() {
     else if (!opts.quiet) printSummary(report);
     const blocking = report.findings.some(f => f.status === 'open' && f.confidence === 'CONFIRMED' && (f.severity === 'P0' || f.severity === 'P1'));
     return opts.strict && blocking ? 1 : 0;
+  }
+  if (opts.command === 'serve') {
+    // View the latest report in a browser. Loopback only, read-only, and only files inside out/latest.
+    const http = await import('node:http');
+    // fileURLToPath, not URL.pathname: the repo path contains a space, which pathname keeps as %20.
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out', 'latest');
+    const port = Number(process.env.NOVA_DOCTOR_PORT || 4310);
+    http.createServer((req, res) => {
+      const name = decodeURIComponent((req.url || '/').split('?')[0]).replace(/^\/+/, '') || 'report.html';
+      const file = path.join(root, path.basename(name));          // basename: no path traversal
+      if (!fs.existsSync(file)) { res.writeHead(404); res.end('not found'); return; }
+      res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/json' });
+      fs.createReadStream(file).pipe(res);
+    }).listen(port, '127.0.0.1', () => console.log(`nova-doctor report: http://127.0.0.1:${port}/`));
+    return new Promise(() => {});
   }
   if (opts.command === 'repair') return (await import('./lib/repair.mjs')).repairCommand(opts, scan);
   if (opts.command === 'verify') return (await import('./lib/verify.mjs')).verifyCommand(opts, scan);

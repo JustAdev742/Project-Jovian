@@ -15,6 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { run, exists, countNul, md5, readText } from './util.mjs';
 
 const TOKEN = /eg1~[A-Za-z0-9._~+\/=-]{20,}/g;
@@ -130,7 +131,8 @@ export async function repairCommand(opts, scan) {
   const { repair, findings } = hit;
   if (repair.scope !== 'repo' && !opts.yes) { console.error(`"${repair.id}" changes files outside the repo. Re-run with --yes to confirm.`); return 1; }
 
-  const outRoot = opts.out || path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, '$1')), '..', 'out');
+  // fileURLToPath, not URL.pathname — the repo path has a space, which pathname leaves as %20.
+  const outRoot = opts.out || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'out');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dir = path.join(outRoot, 'repairs', `${stamp}-${repair.id.replace(/[^\w.-]+/g, '_')}`);
   fs.mkdirSync(dir, { recursive: true });

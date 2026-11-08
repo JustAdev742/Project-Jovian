@@ -35,7 +35,8 @@ export default {
     // 1. Nothing can be tested without the game.
     if (F.get('scanner.game-build-missing')) {
       add({
-        id: 'game-build-missing', severity: 'P0', confidence: 'CONFIRMED',
+        id: 'game-build-missing', severity: 'P0', confidence: 'CONFIRMED', rank: 0,
+        short: 'the 7.40 game build is missing from this PC',
         title: 'The 7.40 build is missing, so nothing can be played, hosted or verified on this PC',
         findings: ['scanner.game-build-missing'],
         narrative: `The launcher last launched ${ctx.paths.gameLastLaunched}, which no longer exists and was not found on any drive. Every fix awaiting in-game verification (1.9.2's quickbar fix first) is blocked on it, and the pak, exe-signature and Aftermath-slot checks are skipped.`,
@@ -52,13 +53,14 @@ export default {
       const fixedIn = '1.9.2';
       const older = installed && installed.localeCompare(fixedIn, undefined, { numeric: true }) < 0;
       add({
-        id: 'quickbars-lookup', severity: 'P0',
+        id: 'quickbars-lookup', severity: 'P0', rank: 1,
+        short: proof.length ? 'the loading-screen fix has run; confirm it cleared the client errors' : 'the stuck-loading-screen fix in 1.9.2 has never been tested',
         confidence: qbClient.length && qbServer.length ? 'CONFIRMED' : 'PROBABLE',
-        title: proof.length ? 'Stuck loading screen: QuickBars lookup — the 1.9.2 fix has RUN; check it cleared the client errors'
-          : 'Stuck loading screen: Reboot looked up "QuickBars", which 7.40 calls "QuickBar" — fix shipped in 1.9.2, NOT yet verified',
+        title: proof.length ? 'Stuck loading screen: the 1.9.2 QuickBars fix has run; check it cleared the client errors'
+          : 'Stuck loading screen: Reboot looked up “QuickBars”, which 7.40 calls “QuickBar”. The fix shipped in 1.9.2 and is not yet verified',
         findings: [...qbClient, ...qbServer, ...proof].map(f => f.key),
-        narrative: `Server: ${qbServer.reduce((a, f) => a + f.count, 0)}× "Failed to find property 'QuickBars'". Client: ${qbClient.reduce((a, f) => a + f.count, 0)}× "AddItemInternal could not find Item with GUID". No GUID was ever mapped to a quickbar slot, so the client waited for an inventory it could not build. ${proof.length ? `Proof line seen: ${proof.map(p => p.data?.variant).join(', ')}.` : `No "[QuickBars]" proof line exists yet — the fixed code has never run here${older ? ` (installed launcher is ${installed}, the fix is in ${fixedIn})` : ''}.`}`,
-        next: proof.length ? 'Confirm the client logs no "could not find Item with GUID" in the same session.' : 'Restore the game, install 1.9.2, play one match, then look for "[QuickBars]" in cobalt.log.',
+        narrative: `Server: ${qbServer.reduce((a, f) => a + f.count, 0)}× “Failed to find property 'QuickBars'”. Client: ${qbClient.reduce((a, f) => a + f.count, 0)}× “AddItemInternal could not find Item with GUID”. No GUID was ever mapped to a quickbar slot, so the client waited for an inventory it could not build. ${proof.length ? `Proof line seen: ${proof.map(p => p.data?.variant).join(', ')}.` : `No “[QuickBars]” proof line exists yet, so the fixed code has never run here${older ? ` (installed launcher is ${installed}, the fix is in ${fixedIn})` : ''}.`}`,
+        next: proof.length ? 'Confirm the client logs no “could not find Item with GUID” in the same session.' : 'Restore the game, install 1.9.2, play one match, then look for “[QuickBars]” in cobalt.log.',
       });
     }
 
@@ -71,8 +73,8 @@ export default {
         id: 'nova-303', severity: 'P1', confidence: 'CONFIRMED',
         title: `Requests still escape Cobalt's redirect to Epic's live servers (seen in ${sessions.size} of ${total} UE4 sessions)`,
         findings: escape.map(f => f.key),
-        narrative: 'Cobalt\'s VEH page-guard hook is a one-shot alarm with a deferred re-arm; a curl_easy_setopt call landing in the gap runs unhooked and leaves for Epic. Epic then rejects the Nova token ("Token is missing key ID value"). When the escaped call is a hotfix file, UE4 discards the whole batch, including the DefaultEngine.ini that points the client at Nova.',
-        next: 'The inline hook is blocked by UAC code integrity (carter.rs: -nouac made things worse). The config route — service URLs in the LOCAL DefaultEngine.ini so an unhooked call still reaches Nova — is the open lead in KNOWN_ISSUES nova-303-request-escape.',
+        narrative: 'Cobalt\'s VEH (vectored exception handler) page-guard hook is a one-shot alarm with a deferred re-arm; a curl_easy_setopt call landing in the gap runs unhooked and leaves for Epic. Epic then rejects the Nova token (“Token is missing key ID value”). When the escaped call is a hotfix file, UE4 discards the whole batch, including the DefaultEngine.ini that points the client at Nova.',
+        next: 'The inline hook is blocked by UAC code integrity (carter.rs: -nouac made things worse). The open lead is the config route: service URLs in the LOCAL DefaultEngine.ini, so an unhooked call still reaches Nova (KNOWN_ISSUES nova-303-request-escape).',
       });
     }
 
@@ -108,7 +110,7 @@ export default {
         id: 'client-crash-on-disconnect', severity: 'P1', confidence: 'PROBABLE',
         title: 'The client crashes shortly after losing its connection to the gameserver',
         findings: [...new Set(clientAfterDisconnect)],
-        narrative: 'Each client crash in this group lands within two minutes of a PendingConnectionLost to :7777 in the same session — a server that dies takes the client down with it. Fixing the server-side crash removes the trigger; the client crash itself is engine code.',
+        narrative: 'Each client crash in this group lands within two minutes of a PendingConnectionLost to :7777 in the same session. When the server process dies, the client crashes too. Fixing the server-side crash removes the trigger; the client crash itself is engine code.',
         next: 'Treat as a consequence of gameserver deaths; re-check after the gameserver crash causes are fixed.',
       });
     }
@@ -132,7 +134,7 @@ export default {
         id: 'bumper-on-server', severity: 'P3', confidence: 'CONFIRMED',
         title: 'Cobalt runs the intro bumper inside the headless gameserver',
         findings: [...bumperHost, ...correlated].map(f => f.key),
-        narrative: `The gameserver logged ${bumperHost.reduce((a, f) => a + f.count, 0)} failed attempts to play bumper.mp4. Cobalt is loaded into both Fortnite processes and its trigger fires in both.${correlated.length ? ' The null world-context script messages fall within 15 s of those attempts, so they very likely come from the same code.' : ''}`,
+        narrative: `The gameserver logged ${bumperHost.reduce((a, f) => a + f.count, 0)} failed attempts to play bumper.mp4. Cobalt is loaded into both Fortnite processes and its trigger fires in both.${correlated.length ? ' The null world-context script messages fall within 15s of those attempts, so they very likely come from the same code.' : ''}`,
         next: 'Skip ShowBumper (and the music handling) when the process was started with -nullrhi. Small Cobalt change; verify by the absence of LogMediaUtils errors in FortniteGame_2.log.',
       });
     }
@@ -149,7 +151,7 @@ export default {
       }
       for (const f of presence) {
         if (after === 0 && before > 0) { f.status = 'not-ours'; f.confidence = 'CONFIRMED'; f.explain += ` MEASURED: in all ${before} sessions every failure came before OnLoggedIntoXmpp — the startup race.`; }
-        else if (after > 0) { f.confidence = 'PROBABLE'; f.severity = 'P2'; f.explain += ` MEASURED: ${after} session(s) failed AFTER XMPP login — that is not the startup race.`; }
+        else if (after > 0) { f.confidence = 'PROBABLE'; f.severity = 'P2'; f.explain += ` MEASURED: ${after} session(s) failed AFTER XMPP login, which the startup race cannot explain.`; }
       }
       if (after > 0) add({ id: 'party-presence', severity: 'P2', confidence: 'PROBABLE', title: 'Party presence fails to publish after XMPP login', findings: presence.map(f => f.key),
         narrative: `${after} session(s) show PublishPartyInfoToPresence failing after OnLoggedIntoXmpp, which the documented startup race cannot explain. Check the presence self-echo in xmpp.server.ts.`, next: 'Re-test a party join and read the XMPP presence the client receives.' });
@@ -160,7 +162,7 @@ export default {
     if (torn.length) {
       add({
         id: 'unclean-shutdowns', severity: torn.some(f => f.id === 'scanner.files-torn-to-nul') ? 'P1' : 'P3', confidence: 'PROBABLE',
-        title: `${torn.length} files carry torn writes — this PC has repeatedly been powered off or killed with files open`,
+        title: `${torn.length} files carry torn writes: this PC has repeatedly been powered off or killed with files open`,
         findings: torn.map(f => f.key),
         narrative: 'Runs of NUL bytes where text should be are what an interrupted write leaves. The same cause zeroed nova-proxy on 2026-09-19 and stopped the launcher starting. All physical disks reported Healthy when checked on 2026-11-08, which points at power loss or hard kills rather than a failing drive.',
         next: 'Shut down cleanly; if torn CODE files reappear, check the drive with the manufacturer\'s tool.',
@@ -184,14 +186,16 @@ export default {
     if (routes.length) {
       add({
         id: 'coordinator-public-control-routes', severity: 'P1', confidence: 'PROBABLE',
-        title: `${routes.length} Nova API routes that change state or expose cross-player data have no authentication — public on the coordinator`,
+        title: `${routes.length} Nova API routes that change state or expose cross-player data have no authentication, and the coordinator publishes them`,
         findings: routes.map(f => f.key),
         narrative: 'On players\' PCs nova-proxy keeps these on loopback. The coordinator has no proxy: Funnel publishes every path, and Funnel traffic arrives from 127.0.0.1, so a loopback check cannot protect them there.',
         next: 'Give the coordinator a way to tell Funnel traffic from local (or refuse local-control routes when NOVA_HOST_ELECTION is set and no agent spec is expected), then gate the destructive ones (DELETE /logs, DELETE /diagnostics) first.',
       });
     }
 
-    causes.sort((a, b) => a.severity.localeCompare(b.severity) || (a.confidence === 'CONFIRMED' ? -1 : 1));
+    // Severity first; within it, a cause that blocks verifying the others (rank) leads, then confirmed before inferred.
+    causes.sort((a, b) => a.severity.localeCompare(b.severity) || (a.rank ?? 9) - (b.rank ?? 9) ||
+      (a.confidence === b.confidence ? 0 : a.confidence === 'CONFIRMED' ? -1 : 1));
     return { causes, coverage: [{ area: 'root-cause chains', status: 'checked', detail: `10 chains evaluated, ${causes.length} causes identified, ${causes.reduce((a, c) => a + c.findings.length, 0)} findings linked` }] };
   },
 };
