@@ -304,6 +304,11 @@ async function main() {
   console.log('[Server] Target: Chapter 1 Season', Config.SEASON_NUMBER);
   console.log('[Server] All cosmetics: UNLOCKED');
   console.log('[Server] V-Bucks: 999,999');
+  // A coordinator (no NOVA_COORDINATOR) verifies everyone's tokens, so it must not use the public
+  // placeholder secret. A host agent only signs its own local tokens; the fallback is fine there.
+  if (Config.JWT_SECRET_IS_PLACEHOLDER && !Config.COORDINATOR_URL) {
+    console.warn('[Security] NOVA_JWT_SECRET is not set: login tokens are signed with the PUBLIC placeholder secret, so anyone can forge one for any account. Set NOVA_JWT_SECRET in .env (KNOWN_ISSUES jwt-secret-public).');
+  }
   console.log('[Server] Waiting for game client connections...\n');
 
   // Attach XMPP WebSocket to the HTTP server (port 3551)

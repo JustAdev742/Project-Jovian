@@ -278,7 +278,10 @@ function handleXmppConnection(ws: WebSocket, req: http.IncomingMessage): void {
     const message = Buffer.isBuffer(rawMsg) ? rawMsg.toString() : String(rawMsg);
     if (!message || message.trim() === '') { try { ws.send(' '); } catch { } return; }
 
-    const logData = message.length > 300 ? message.substring(0, 300) + '...' : message;
+    // SASL PLAIN carries the account id and the bearer token, base64-encoded, inside <auth>. A token
+    // pattern can't see it through base64, so the element's content is dropped before logging.
+    const safe = message.replace(/(<auth\b[^>]*>)[\s\S]*?(<\/auth>)/gi, '$1[redacted]$2');
+    const logData = safe.length > 300 ? safe.substring(0, 300) + '...' : safe;
     console.log(`[XMPP RX] ${logData}`);
 
     const msg = parseXml(message);

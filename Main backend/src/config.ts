@@ -35,8 +35,13 @@ export const Config = {
   HTTPS_PORT: 443,
   XMPP_PORT: 5222,
 
-  /** JWT */
-  JWT_SECRET: 'nova-backend-secret-key-change-in-production',
+  /** JWT. MUST be set on the coordinator (NOVA_JWT_SECRET in ~/nova-backend/.env). The fallback is a
+   *  public placeholder: it is in this source and in the compiled backend inside every installer, so
+   *  a server using it accepts a token anyone can mint for ANY account (KNOWN_ISSUES
+   *  jwt-secret-public). A host agent may keep the fallback (it verifies no coordinator tokens); the
+   *  coordinator logs a loud warning at startup if it is still using it. */
+  JWT_SECRET: process.env.NOVA_JWT_SECRET || 'nova-backend-secret-key-change-in-production',
+  JWT_SECRET_IS_PLACEHOLDER: !process.env.NOVA_JWT_SECRET,
   TOKEN_EXPIRY_HOURS: 8,
 
   /** Client IDs that Fortnite uses */

@@ -377,6 +377,23 @@ after the doctor's drift check showed the box matching the repo (0 of 50 files d
 anonymous `DELETE /nova/api/logs` → **403**, `DELETE /nova/api/diagnostics` → **403**; controls
 `GET /nova/api/info` and `GET /nova/api/logs` → 200.
 
+### `jwt-secret-public` · CONFIRMED · **P1 security** · *found 2026-11-08 by the voice-chat research*
+
+**Anyone can mint a login token for any account on the coordinator.** `config.ts` signed and verified
+every token with a fixed placeholder string. There was no environment override, the coordinator's
+`.env` did not set one, and the string sits in this repo and in the compiled backend inside every
+installer (`resources/Backend-Coordinator/dist/config.js`). The admin dashboards are unaffected (they
+check `NOVA_AC_ADMIN_SECRET`); accounts, profiles, friends, parties and doctor ingest are not.
+
+**Fix in source (2026-11-08):** `JWT_SECRET` now comes from `NOVA_JWT_SECRET`, and a coordinator still
+on the placeholder logs `[Security] NOVA_JWT_SECRET is not set` at startup. **Closing it needs one
+step on the box:** set a random `NOVA_JWT_SECRET` in `~/nova-backend/.env` and restart. That invalidates
+every existing token once, so everyone signs in again. Host agents verify no coordinator tokens and may
+keep the fallback.
+
+Same day: the XMPP receive log printed the first 300 characters of each stanza, including SASL
+`<auth>` (base64 account id + token). Its content is now redacted before logging.
+
 ## Open — P2
 
 | id | grade | location | issue |
