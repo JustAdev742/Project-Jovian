@@ -38,6 +38,13 @@ UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
     switch turns sending off. See doctor/README.md "On every player's PC".
     Stage it with tools/stage-doctor.mjs (a fourth --check gate). Verified end
     to end with a simulated session only, not yet in a real match.
+  * FIRST PLAYED SESSION ON 1.9.4 (the 7.40 build is back, in
+    Downloads\7.40-CL-5046157): it loaded in and played. The logs showed a
+    62s queue (cold server start), a PHANTOM host player in every hosted
+    match, and 30 Hz server net updates. Fixed in 1.9.5 + on the coordinator:
+    injection at server readiness, lobby pre-warm, phantom guard, 60 Hz. See
+    KNOWN_ISSUES phantom-host-player / cold-start-join-wait / server-net-30hz.
+    All three need a played match to confirm.
 
 -------------------------------------------------------------------------------
 0. READ THIS FIRST — THE ONE THING THAT MATTERS

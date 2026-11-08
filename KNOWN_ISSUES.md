@@ -414,6 +414,60 @@ anonymous `DELETE /nova/api/logs` → **403**, `DELETE /nova/api/diagnostics` �
 
 ## Fixed in the tree, NOT yet on any player's machine
 
+### `phantom-host-player` · CONFIRMED · **FIXED in source 2026-11-08** · *ships in 1.9.5* · *found from the first 1.9.4 session*
+
+**Every hosted match had an extra player: the server's own controller, logged in as the host.**
+Host log, 2026-11-08, one-player solo match:
+
+    06:32:19  Player [Athena_PlayerController_C_2147481017] PostLogin.     <- the server's own
+    06:32:25  Player [Athena_PlayerController_C_2147478659] PostLogin.     <- the real player
+    06:33:52  ExitAircraft: …_2147478659 (Pawn …472821)
+    06:33:52  ExitAircraft: …_2147481017 (Pawn …472818)                   <- the phantom gets a pawn
+
+`ReadyToStartMatch` drops the local player from `LocalPlayers`; after that
+`GetLocalPlayerController()` is null, so the guard in `SpawnDefaultPawnFor` that compares against it
+could never match. Proof it was dead: its "skipping the server's own local controller" line appears
+**0 times** in every cobalt.log, while `[Spawn] SpawnDefaultPawnFor` fired at warmup and at the drop
+zone. Fix: `Defines::ServerLocalController` is remembered just before the drop, and the guard
+compares against it. **Unverified in play:** the guard now returns no pawn for that controller at the
+drop zone, which is the path the original authors wrote it for, but nobody has watched it happen.
+Check a hosted match: one `ExitAircraft` per real player, and `[Spawn] skipping the server's own local
+controller` in cobalt.log.
+
+### `cold-start-join-wait` · CONFIRMED · **FIXED in source 2026-11-08** · *ships in 1.9.5 (agent) / live on the coordinator*
+
+**A player waited 62s in the queue because the server only started when they pressed Play.** The
+breakdown from that session (server log + agent log):
+
+- 7s election and spawn
+- 18s engine boot to the menu
+- **~18s of a flat 45s wait** before the launcher injected Reboot (the server was ready at 27s)
+- 5s Reboot's pre-travel countdown
+- 5.5s map load
+
+Three fixes:
+1. The agent reads the server's stdout for `CreatingParty` (it was spawned with stdout ignored) and
+   reports `injectable`, and the launcher injects ~1.5s later. 45s stays as the ceiling for an agent
+   that does not report it.
+2. **Pre-warm:** an agent whose player's game has been up 30s and isn't hosting sends `lobby=1`.
+   should-i-serve treats a lobby player who is not in a match as demand, and runs the normal election
+   (reservation + booting check), so one lobby never gets two servers. `NOVA_PREWARM=0` disables it.
+   In this session the player was in the lobby 64s before queueing, more than the ~45s a warm start
+   needs.
+3. Reboot `SecondsUntilTravel` 5 → 2. The 120s wait for the local player controller is unchanged.
+
+Expected: a player who spends 45s or more in the lobby queues into a ready server, and a cold start is
+about 20s faster. **Unverified in play.**
+
+### `server-net-30hz` · CONFIRMED · **CHANGED in source 2026-11-08** · *ships in 1.9.5*
+
+The replication graph sets `NetServerMaxTickRate` to 30 ("Setting NetServerMaxTickRate to 30.00"),
+Epic's 100-player figure. Reboot now runs `FortRepGraph.SetServerMaxTickRate 60` and sets the driver
+property when the server starts listening, and logs `[Nova] NetServerMaxTickRate N -> 60`.
+**Unverified:** if a later line puts it back to 30, the graph re-applies its own setting
+(`BRServerMaxTickRate`) and that property is the next lever. If play feels worse (bandwidth-capped
+clients), revert the one call in `Server::Listen`.
+
 ### `reboot-july-fixes-lost` · CONFIRMED · **PARTLY RESTORED 2026-11-08** · *ships in 1.9.3*
 
 **The fix pass of 2026-07-25 never reached the Reboot tree that ships.** It survives in
