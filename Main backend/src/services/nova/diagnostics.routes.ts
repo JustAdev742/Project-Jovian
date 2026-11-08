@@ -400,6 +400,10 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
   fastify.post('/nova/api/dashboard/login', async (request, reply) => {
     const supplied = String((request.body as any)?.secret || '');
     const expected = String(Config.AC_ADMIN_SECRET || '');
+    // Where to land afterwards. Only Nova's own admin pages are accepted, so the sign-in form can
+    // never be turned into an open redirect.
+    const nextRaw = String((request.body as any)?.next || '');
+    const next = /^\/nova\/api\/(dashboard|doctor\/dashboard|doctor\/players\/[0-9a-f]{32})$/.test(nextRaw) ? nextRaw : '/nova/api/dashboard';
 
     if (!expected || !sameSecret(supplied, expected)) {
       // Recorded like any other auth failure: repeated attempts on this endpoint are exactly the
@@ -408,7 +412,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
         category: 'AUTH_FAILURE', method: 'POST', url: '/nova/api/dashboard/login', status: 403,
         detail: expected ? 'wrong admin secret' : 'no admin secret configured',
       });
-      return reply.redirect('/nova/api/dashboard?denied=1', 303);
+      return reply.redirect(`${next}?denied=1`, 303);
     }
 
     // Secure only when the request actually arrived over HTTPS. Setting it unconditionally would
@@ -421,7 +425,7 @@ export async function diagnosticsRoutes(fastify: FastifyInstance): Promise<void>
       `${ADMIN_COOKIE}=${cookieToken()}; Path=/nova/api; Max-Age=43200; HttpOnly; SameSite=Strict${secure}`,
     );
     // 303 so the browser follows with GET; a 302 after a POST is where re-submission bugs live.
-    return reply.redirect('/nova/api/dashboard', 303);
+    return reply.redirect(next, 303);
   });
 
   /**

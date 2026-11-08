@@ -18,6 +18,10 @@
  *   node doctor/nova-doctor.mjs repair          list the repairs available for current findings
  *   node doctor/nova-doctor.mjs repair --apply <id> [--yes]
  *   node doctor/nova-doctor.mjs verify          regression tests (all suites + re-scan vs baseline)
+ *   node doctor/nova-doctor.mjs live --agent http://127.0.0.1:3552 [--parent <pid>]
+ *                                               what the launcher runs on players' PCs: tails new log lines
+ *                                               and hands them, plus a player-profile scan after each
+ *                                               game session, to the local agent (lib/live.mjs)
  *
  * Output: doctor/out/latest/report.json and report.html (and a timestamped copy).
  * Exit code: 0, or 1 with --strict when an open CONFIRMED P0/P1 exists.
@@ -45,6 +49,9 @@ function parseArgs(argv) {
     else if (a === '--build') opts.build = true;
     else if (a === '--remote') opts.remote = true;
     else if (a === '--game') opts.game = next();
+    else if (a === '--profile') opts.profile = next();
+    else if (a === '--agent') opts.agent = next();
+    else if (a === '--parent') opts.parent = Number(next());
     else if (a === '--out') opts.out = next();
     else if (a === '--save-baseline') opts.saveBaseline = true;
     else if (a === '--strict') opts.strict = true;
@@ -65,7 +72,9 @@ export async function scan(opts) {
   const findings = new FindingSet();
   const coverage = [];
   const timings = {};
-  const wanted = MODULE_ORDER.filter(m => (!opts.only || opts.only.includes(m) || m === 'rootcause') && !opts.skip.includes(m));
+  // The player profile runs on installed launchers: no repo, so the source & build analyzer is out.
+  const profileSkip = opts.profile === 'player' ? ['native'] : [];
+  const wanted = MODULE_ORDER.filter(m => (!opts.only || opts.only.includes(m) || m === 'rootcause') && !opts.skip.includes(m) && !profileSkip.includes(m));
 
   for (const id of wanted) {
     const t0 = Date.now();
@@ -103,14 +112,15 @@ export async function scan(opts) {
     tool: 'nova-doctor', version: VERSION,
     startedAt: ctx.startedAt, finishedAt: new Date().toISOString(),
     machine: os.hostname(),
-    options: { only: opts.only, build: !!opts.build, remote: !!opts.remote },
+    options: { only: opts.only, build: !!opts.build, remote: !!opts.remote, profile: opts.profile || 'dev' },
     paths: { game: ctx.paths.game, gameHow: ctx.paths.gameHow },
     summary, timings, coverage,
     causes: ctx.causes || [],
     findings: list,
   };
 
-  const outRoot = opts.out || path.join(ctx.repo, 'doctor', 'out');
+  // Players' reports live in their own %LOCALAPPDATA%: an installed launcher's folder may not be writable.
+  const outRoot = opts.out || (opts.profile === 'player' ? path.join(ctx.paths.novaState, 'Doctor') : path.join(ctx.repo, 'doctor', 'out'));
   report.baseline = compareToBaseline(report, path.join(outRoot, 'baseline.json'));
   writeReport(report, outRoot, opts);
   return report;
@@ -181,6 +191,7 @@ async function main() {
     }).listen(port, '127.0.0.1', () => console.log(`nova-doctor report: http://127.0.0.1:${port}/`));
     return new Promise(() => {});
   }
+  if (opts.command === 'live') return (await import('./lib/live.mjs')).liveCommand(opts, scan);
   if (opts.command === 'repair') return (await import('./lib/repair.mjs')).repairCommand(opts, scan);
   if (opts.command === 'verify') return (await import('./lib/verify.mjs')).verifyCommand(opts, scan);
   throw new Error(`unknown command: ${opts.command}`);

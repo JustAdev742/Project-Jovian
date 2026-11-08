@@ -71,7 +71,7 @@
         "resources/bumper.wav",
         "resources/node/*",
         "resources/nova-proxy/**/*",
-        "resources/Backend-Coordinator/**/*"
+        "resources/Backend-Coordinator/**/*", "resources/doctor/**/*"
       ]
     },
     "updater": {

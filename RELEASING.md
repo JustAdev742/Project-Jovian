@@ -64,6 +64,16 @@ way into the payload.
 > node tools/stage-backend.mjs --check   # exit 1 if the payload is behind the source
 > ```
 
+**The doctor is staged too.** Every launcher runs `nova-doctor live` from its own copy under
+`resources/doctor/` (1.9.4 and later), so a doctor change only reaches players through this step:
+
+```bash
+node tools/stage-doctor.mjs            # copies doctor/{nova-doctor.mjs,lib,modules,rules} (.mjs only)
+node tools/stage-doctor.mjs --check    # exit 1 on a MISSING, STALE or EXTRA file
+```
+
+`nova-doctor verify` runs all four `--check` gates, and its scanner reports a stale one as a finding.
+
 **Cobalt is scripted too, and for the same reason.**
 
 ```bash
@@ -203,6 +213,7 @@ resources/
   node/node.exe             bundled runtime — no prerequisites for the player
   nova-proxy/               local proxy: game -> coordinator
   Backend-Coordinator/      host agent (compiled JS, production deps only)
+  doctor/                   nova-doctor, run in live mode by the launcher (1.9.4+)
 ```
 
 The launcher looks for each of these beside the exe **and** under `resources/`, so the same build

@@ -21,7 +21,7 @@ import { run, exists, countNul, md5, readText } from './util.mjs';
 const TOKEN = /eg1~[A-Za-z0-9._~+\/=-]{20,}/g;
 
 export const REPAIRS = [
-  ...['backend payload', 'Cobalt.dll copies', 'Project Reboot.dll copies'].map(name => ({
+  ...['backend payload', 'Cobalt.dll copies', 'Project Reboot.dll copies', 'doctor payload'].map(name => ({
     id: `restage:${name}`,
     title: `Re-stage the ${name} from the current build`,
     scope: 'repo',                     // touches only the gitignored installer payload in this repo

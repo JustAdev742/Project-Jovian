@@ -181,6 +181,19 @@ export default function Settings({ api }: { api: LauncherApi }) {
             />
           </div>
         </Card>
+
+        {/* ── Diagnostics ────────────────────────────────────────────────────────────────────── */}
+        <Card>
+          <CardHeader title="Diagnostics" />
+          <div className="px-5 divide-y divide-hairline">
+            <Switch
+              checked={api.sharing}
+              onChange={api.toggleSharing}
+              label="Share problems with the Nova admins"
+              description="Sends the errors in your game and launcher logs, and a health report after each game. The admins use them to fix problems for everyone. Before anything leaves your PC, the launcher removes login tokens, partly hides IP addresses and replaces your PC’s name with a code. Turn this off to send nothing. Your own report stays on your PC either way."
+            />
+          </div>
+        </Card>
       </div>
     </div>
   );

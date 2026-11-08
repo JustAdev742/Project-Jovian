@@ -114,12 +114,77 @@ pub async fn forward_once(agent: &str, coordinator: &str, token: &str) -> Cycle 
     Cycle { accepted, back_off }
 }
 
+/// The fleet doctor's lines and reports go on their own, quicker loop: the dashboard shows them
+/// live, and each batch is small (the doctor sends problems only — see doctor/lib/live.mjs).
+const DOCTOR_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Drain the doctor's queue on the local agent once and forward it to the coordinator.
+pub async fn forward_doctor_once(agent: &str, coordinator: &str, token: &str) -> Cycle {
+    // The Settings switch. The doctor stops queueing when it is off; this makes sure nothing
+    // already queued leaves either.
+    if !crate::doctor::sharing_enabled() {
+        return Cycle::default();
+    }
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
+        Ok(c) => c,
+        Err(_) => return Cycle::default(),
+    };
+    let pending: Value = match client
+        .get(format!("{}/nova/api/doctor/pending", agent.trim_end_matches('/')))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(v) => v,
+            Err(_) => return Cycle::default(),
+        },
+        // Agent not up yet, or too old to have the route (404): nothing to do, not a failure.
+        _ => return Cycle::default(),
+    };
+    let lines = pending.get("lines").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    let report = pending.get("report").filter(|r| !r.is_null()).cloned();
+    let dropped = pending.get("dropped").and_then(|d| d.as_u64()).unwrap_or(0);
+    if lines.is_empty() && report.is_none() && dropped == 0 {
+        return Cycle::default();
+    }
+    let body = serde_json::json!({
+        "launcher": env!("CARGO_PKG_VERSION"),
+        "lines": lines,
+        "dropped": dropped,
+        "report": report,
+    });
+    match client
+        .post(format!("{}/nova/api/doctor/ingest", coordinator.trim_end_matches('/')))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => Cycle {
+            accepted: r.json::<Value>().await.ok().and_then(|v| v.get("accepted").and_then(|a| a.as_u64())).unwrap_or(0) as usize,
+            back_off: false,
+        },
+        // 429, an outage, or a coordinator without the route yet: drop this batch (the queue is a
+        // hand-off, not a buffer) and slow down rather than hammering it.
+        _ => Cycle { accepted: 0, back_off: true },
+    }
+}
+
 /// Start the background forwarder. Fire-and-forget; it lives for the process.
 ///
 /// Takes the token by value because the caller's copy may be refreshed underneath us — a stale token
 /// here costs one cycle of telemetry and nothing else, which is not worth a shared lock on the hot
 /// path of a launcher.
 pub fn spawn(agent: String, coordinator: String, token: String) {
+    {
+        let (agent, coordinator, token) = (agent.clone(), coordinator.clone(), token.clone());
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let cycle = forward_doctor_once(&agent, &coordinator, &token).await;
+                tokio::time::sleep(if cycle.back_off { BACKOFF } else { DOCTOR_INTERVAL }).await;
+            }
+        });
+    }
     tauri::async_runtime::spawn(async move {
         loop {
             let cycle = forward_once(&agent, &coordinator, &token).await;

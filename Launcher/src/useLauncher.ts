@@ -139,6 +139,8 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
   // The intro bumper. Owned by a marker file the game-side shim reads, not by localStorage — the
   // launcher asks the backend for the truth rather than remembering its own version of it.
   const [bumper, setBumper] = useState(true);
+  // Sharing diagnostics with the Nova admins (the fleet doctor). A marker file, like the bumper's.
+  const [sharing, setSharing] = useState(true);
 
   const [status, setStatus] = useState<string>("");
   const [role, setRole] = useState<MeshRole>("offline");
@@ -188,6 +190,10 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     invoke<{ enabled: boolean; clip_present: boolean }>("bumper_status")
       .then((s) => setBumper(s.enabled))
       .catch(() => { /* default stays on, which is what the game assumes too */ });
+
+    invoke<{ sharing: boolean }>("doctor_status")
+      .then((s) => setSharing(s.sharing))
+      .catch(() => { /* an older backend of the UI: leave the default */ });
 
     const savedBuilds = localStorage.getItem("ProjectMP.builds");
     if (savedBuilds) {
@@ -372,6 +378,18 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
       buildPath: localStorage.getItem("buildPath") ?? "",
     }).catch(() => {
       /* a missing log is the normal case before the game has ever run */
+    });
+  }, []);
+
+  /* The fleet doctor: watches this PC's logs and reports problems to the Nova admins.
+   *
+   * Started once per launcher session (idempotent on the Rust side) at below-normal priority. It reads
+   * only new log lines, runs its full scan only after a game session ends, and hands everything to
+   * the local agent — the forwarder above sends it on under this player's token. With sharing off it
+   * still keeps the player's own local report and sends nothing. */
+  useEffect(() => {
+    invoke("doctor_start_live", { agent: AGENT }).catch(() => {
+      /* diagnostics must never interrupt play */
     });
   }, []);
 
@@ -897,6 +915,14 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
     localStorage.setItem("p2pMode", String(next));
   }, []);
 
+  const toggleSharing = useCallback((next: boolean) => {
+    setSharing(next);
+    invoke("doctor_set_sharing", { enabled: next }).catch((e) => {
+      setSharing(!next);
+      notify({ kind: "error", title: "Couldn’t change the diagnostics setting", body: String(e) });
+    });
+  }, [notify]);
+
   const toggleBumper = useCallback((next: boolean) => {
     setBumper(next);
     invoke("bumper_set_enabled", { enabled: next }).catch((e) => {
@@ -965,9 +991,9 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
 
   return {
     // state
-    path, setPath, builds, isLaunching, EOR, p2pMode, bumper, status, role, injecting, playitAddr, mesh, health,
+    path, setPath, builds, isLaunching, EOR, p2pMode, bumper, sharing, status, role, injecting, playitAddr, mesh, health,
     // actions
     launch, injectServer, registerHost, launchClient, addBuild, removeBuild,
-    setPlayitAddr, toggleEOR, toggleP2p, toggleBumper,
+    setPlayitAddr, toggleEOR, toggleP2p, toggleBumper, toggleSharing,
   };
 }

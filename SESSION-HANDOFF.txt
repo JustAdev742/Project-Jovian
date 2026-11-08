@@ -28,6 +28,13 @@ UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
     verified): the Reboot fixes, the Cobalt bumper-on-server guard, the token
     redaction and the DELETE gate (that one is also live on the coordinator).
     Like 1.9.2 it has NOT been played through a match yet.
+  * FLEET DOCTOR (ships in 1.9.4): every launcher runs nova-doctor in live
+    mode and the coordinator shows every player's problems at
+    /nova/api/doctor/dashboard (admin secret). It is light by design and
+    private: tokens redacted, IPs masked, PC name hashed, and a Settings
+    switch turns sending off. See doctor/README.md "On every player's PC".
+    Stage it with tools/stage-doctor.mjs (a fourth --check gate). Verified end
+    to end with a simulated session only, not yet in a real match.
 
 -------------------------------------------------------------------------------
 0. READ THIS FIRST — THE ONE THING THAT MATTERS

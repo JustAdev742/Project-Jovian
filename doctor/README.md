@@ -20,6 +20,63 @@ The report is written to `doctor/out/latest/report.html` (and `report.json`), wi
 copy under `doctor/out/runs/`. Reports quote local log evidence, so `doctor/out/` is gitignored.
 Every quoted line is redacted for tokens and secrets before it is written.
 
+## On every player's PC: live mode and the fleet dashboard
+
+From launcher 1.9.4, every launcher starts the doctor in **live mode** and the coordinator collects
+what it finds into one admin dashboard covering every player.
+
+```
+nova-doctor live ──POST /nova/api/doctor/local, /local-report──▶ host agent (127.0.0.1:3552)
+launcher (diagreport.rs, every 20 s) ──GET /pending, then POST /nova/api/doctor/ingest (player token)──▶ coordinator
+```
+
+The doctor holds no credential. It hands its findings to the local agent, and the launcher forwards
+them under the player's own token. The DLLs' diagnostics already use this attribution model.
+
+**Light on the player's PC.** The launcher starts it as
+`node resources/doctor/nova-doctor.mjs live --agent … --parent <launcher pid>` with no window and at
+below-normal priority. It exits when the launcher does. Its limits are in `lib/live.mjs` (`LIMITS`):
+
+- **Log reading**: every 10 s it stats the logs and reads only the bytes appended since the last
+  read, at most 1 MiB per file per read. It never re-reads a whole file and follows rotation.
+- **What it sends**: problem lines only. That means catalog matches that aren't benign or not-ours,
+  UE4 Error and Fatal lines, and warnings in Nova-owned categories. At most 1,000 are queued;
+  beyond that the oldest are dropped and counted.
+- **Full report**: a player-profile scan (about 2–3 s of one core), at most once every 10 minutes and
+  never while the game is writing its log. It runs about 90 s after start-up if no game is
+  running, and again when a game session goes quiet. The upload is a summary plus the gzipped
+  report, 1.5 MB at most, with evidence trimmed beyond that.
+
+**Privacy.** Before anything is queued, tokens are redacted, the host part of an IPv4 address is
+masked, the Windows user name in paths becomes `<user>`, and the PC name becomes
+`PC-<8 hex of sha256>`. That label still tells two PCs on one account apart. Settings → Diagnostics
+→ *Share problems with the Nova admins* writes `%LOCALAPPDATA%\ProjectNova\doctor.off`; with that
+file present nothing is sent. The local report is still written to
+`%LOCALAPPDATA%\ProjectNova\Doctor`. Live mode logs to `…\Logs\doctor-live.log`.
+
+**The dashboard** is at `/nova/api/doctor/dashboard` on the coordinator (admin secret, the same
+sign-in as the incidents dashboard). It has three views:
+
+- **Fleet**: every reporting player, the problems they share and who has each one, and a live feed
+  of problem lines. The feed can be filtered by player and severity, the filter is kept in the link,
+  and it can be paused.
+- **Player**: a page per player with the causes found on their PC.
+- **Full report**: the player's full doctor report, served in a CSP sandbox because it comes from
+  their machine.
+
+The coordinator re-validates and clamps every field (`services/doctor/doctor.validate.ts`),
+rate-limits each account, and keeps 2,000 lines per player, 200,000 in total, and each player's
+last 3 reports.
+
+A problem line normally reaches the dashboard in about 20 s, and in about 45 s at worst (one read,
+one hand-off, one forward).
+
+**Test it without the game.** `NOVA_DOCTOR_FAST=1` runs the same code with second-scale limits. The
+end-to-end harness, `node tools/fleet-e2e.mjs`, starts a coordinator, an agent and a live doctor on a
+fake `LOCALAPPDATA`, writes a game session into its logs, and forwards the results the way the
+launcher does. As of 2026-11-08 this has **not** been seen in a real match, because there is no 7.40
+build on the dev PC.
+
 ## The loop it is built for
 
 ```bash

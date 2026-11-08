@@ -289,6 +289,7 @@ function routeAudit(ctx, F, cov) {
   const OPEN_BY_DESIGN = [
     [/^\/nova\/api\/diagnostics\/local$/, 'localhost-only ingest for the DLLs (DIAGNOSTICS_ARCHITECTURE §2)'],
     [/^\/nova\/api\/diagnostics\/pending$/, 'localhost hand-off to the launcher (diagreport.rs)'],
+    [/^\/nova\/api\/doctor\/(local|local-report|pending)$/, 'nova-doctor live → launcher hand-off: registered only in host-agent mode (127.0.0.1-bound), 404 on the coordinator (doctor.test.ts)'],
     [/^\/nova\/api\/gameserver\/(register|unregister)$/, 'accepted-open; gated by NOVA_REGISTER_SECRET once the field signs (KNOWN_ISSUES)'],
     [/^\/nova\/api\/(info|components|news|status|version)/, 'public status'],
     [/^\/nova\/api\/launcher\/(register|login|available)$/, 'account creation/sign-in'],

@@ -33,7 +33,7 @@ function suites(ctx, quick) {
     {
       id: 'staging gates', cmd: null,
       custom: () => {
-        const gates = [['tools/stage-backend.mjs', '--check'], ['tools/stage-cobalt.mjs', '--check'], ['tools/stage-cobalt.mjs', 'reboot', '--check']];
+        const gates = [['tools/stage-backend.mjs', '--check'], ['tools/stage-cobalt.mjs', '--check'], ['tools/stage-cobalt.mjs', 'reboot', '--check'], ['tools/stage-doctor.mjs', '--check']];
         const res = gates.map(g => run(ctx.tools.node, g, { cwd: ctx.repo }));
         return { ok: res.every(r => r.ok), detail: res.map((r, i) => `${gates[i].join(' ')}: ${r.ok ? 'ok' : 'STALE'}`).join('; ') };
       },

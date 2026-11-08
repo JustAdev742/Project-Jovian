@@ -39,6 +39,9 @@ function launcherVersions(ctx) {
 }
 
 function installedVersion(ctx) {
+  // The launcher passes its own version when it starts the doctor on a player's PC. Asking
+  // PowerShell instead costs ~0.9 s of CPU per scan — most of a player-profile scan's budget.
+  if (process.env.NOVA_LAUNCHER_VERSION) return process.env.NOVA_LAUNCHER_VERSION;
   if (!exists(ctx.paths.installedExe)) return null;
   const r = run('powershell', ['-NoProfile', '-NonInteractive', '-Command',
     `(Get-Item -LiteralPath '${ctx.paths.installedExe.replace(/'/g, "''")}').VersionInfo.ProductVersion`]);
@@ -84,6 +87,7 @@ function checkStaging(ctx, F, cov) {
     ['backend payload', ['tools/stage-backend.mjs', '--check']],
     ['Cobalt.dll copies', ['tools/stage-cobalt.mjs', '--check']],
     ['Project Reboot.dll copies', ['tools/stage-cobalt.mjs', 'reboot', '--check']],
+    ['doctor payload', ['tools/stage-doctor.mjs', '--check']],
   ];
   for (const [name, args] of gates) {
     if (!exists(path.join(ctx.repo, args[0]))) { cov.push({ area: `staging: ${name}`, status: 'skipped', detail: `${args[0]} missing` }); continue; }
@@ -92,7 +96,7 @@ function checkStaging(ctx, F, cov) {
     if (!r.ok) {
       F.add({
         id: 'scanner.staging-stale', key: `scanner.staging-stale:${name}`, module: M,
-        component: name.startsWith('backend') ? 'backend' : name.startsWith('Cobalt') ? 'cobalt' : 'reboot',
+        component: name.startsWith('backend') ? 'backend' : name.startsWith('Cobalt') ? 'cobalt' : name.startsWith('doctor') ? 'doctor' : 'reboot',
         category: 'release', severity: 'P1', confidence: 'CONFIRMED',
         title: `Staged ${name} differ from the build — a release now would ship stale code`,
         explain: 'Same failure as NOVA-AUDIT-013 and cobalt-dll-three-live-copies: the build writes one path and the installer bundles another.',
@@ -317,6 +321,17 @@ export default {
   title: 'Project Scanner',
   async run(ctx, F, opts) {
     const cov = [];
+    if (opts.profile === 'player') {
+      // An installed launcher has no repo: no git, no toolchain, no staging gates, no build output
+      // to compare against. What it does have is its own install, its version and the game.
+      const installed = installedVersion(ctx);
+      ctx.versions = { installed };
+      cov.push({ area: 'installed launcher version', status: installed ? 'checked' : 'skipped', detail: installed ? `installed ${installed}` : 'no installed launcher found' });
+      checkGame(ctx, F, cov);
+      checkCorruption(ctx, F, cov);
+      cov.push({ area: 'repo checks (git, toolchain, staging, coordinator)', status: 'n/a', detail: 'player profile: this machine runs an installed launcher, not the repo' });
+      return { coverage: cov };
+    }
     checkGit(ctx, cov);
     checkToolchain(ctx, cov);
     checkVersions(ctx, F, cov);

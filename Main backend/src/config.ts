@@ -120,6 +120,12 @@ export const Config = {
     ? path.resolve(process.env.NOVA_REGISTER_SECRET_FILE)
     : path.resolve(__dirname, '..', 'data', 'register-secret'),
 
+  /** The fleet doctor store (coordinator): players' live problem lines and doctor reports. A separate
+   *  SQLite file so its write load and retention never touch the account database. */
+  DOCTOR_DB_PATH: process.env.NOVA_DOCTOR_DB
+    ? path.resolve(process.env.NOVA_DOCTOR_DB)
+    : path.resolve(__dirname, '..', 'data', 'doctor.db'),
+
   /** HOST AGENT only: the secret this machine SENDS when it registers its gameserver with the
    *  coordinator. The launcher fetches it from the coordinator and passes it in at spawn.
    *

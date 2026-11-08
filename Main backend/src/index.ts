@@ -21,6 +21,7 @@ import { eosRoutes } from './services/eos/eos.routes';
 import { startXmppServer, attachXmppWebSocket } from './services/xmpp/xmpp.server';
 import { novaRoutes } from './services/nova/nova.routes';
 import { diagnosticsRoutes } from './services/nova/diagnostics.routes';
+import { doctorRoutes } from './services/doctor/doctor.routes';
 import { anticheatRoutes } from './services/anticheat/anticheat.routes';
 import { compatRoutes } from './services/compat/compat.routes';
 import { latentRoutes } from './services/compat/latent.routes';
@@ -150,6 +151,7 @@ async function main() {
     await app.register(eosRoutes);
     await app.register(novaRoutes);
     await app.register(diagnosticsRoutes);
+    await app.register(doctorRoutes);
     await app.register(anticheatRoutes);
     await app.register(compatRoutes);
     // Registered LAST on purpose. Every static route above is claimed first, so the parametric

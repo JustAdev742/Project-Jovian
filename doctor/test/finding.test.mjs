@@ -21,6 +21,16 @@ test('a bare JWT is redacted too', () => {
   assert.ok(!redact('token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMyJ9.c2ln end').includes('eyJzdWIi'));
 });
 
+test('the Windows account name and IP host parts are trimmed; loopback and versions survive', () => {
+  const s = redact('C:\\Users\\Admin\\AppData\\Local\\x.log from 100.96.188.28:7777 to 127.0.0.1:3551 build 4.22.0.5046157 bind 0.0.0.0');
+  assert.ok(s.includes('C:\\Users\\<user>\\AppData'), s);
+  assert.ok(!s.includes('Admin'), s);
+  assert.ok(s.includes('100.96.x.x:7777'), s);
+  assert.ok(s.includes('127.0.0.1:3551'), s);
+  assert.ok(s.includes('4.22.0.5046157'), 'a version string is not an address');
+  assert.ok(s.includes('0.0.0.0'), s);
+});
+
 test('an exit code is not mistaken for a secret', () => {
   // The C++ redactor once turned "code=3221225477" into "<redacted>" (DIAGNOSTICS_ARCHITECTURE §6).
   assert.ok(redact('Gameserver exited (code=3221225477)').includes('3221225477'));

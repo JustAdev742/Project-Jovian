@@ -45,7 +45,17 @@ export function redact(text) {
     .replace(/([?&](?:secret|token|access_token|code|password)=)[^&\s"]+/gi, '$1<redacted>')
     .replace(/(NOVA_[A-Z_]*(?:SECRET|KEY|TOKEN)[A-Z_]*\s*=\s*)\S+/g, '$1<redacted>')
     .replace(/(-AUTH_PASSWORD=)\S+/g, '$1<redacted>')
-    .replace(/("(?:secret|password|access_token|refresh_token)"\s*:\s*")[^"]*"/gi, '$1<redacted>"');
+    .replace(/("(?:secret|password|access_token|refresh_token)"\s*:\s*")[^"]*"/gi, '$1<redacted>"')
+    // Reports now leave the machine (the fleet dashboard), so two more things are trimmed: the
+    // Windows account name inside profile paths, and the host part of IPv4 addresses. Loopback and
+    // the unspecified address stay readable — they are what most endpoint diagnoses hinge on.
+    .replace(/\b([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\s"']+/gi, '$1<user>')
+    .replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (m, a, b, c, d) => {
+      const o = [a, b, c, d].map(Number);
+      if (o.some(x => x > 255)) return m;                 // a version string, not an address
+      if (o[0] === 127 || m === '0.0.0.0') return m;
+      return `${a}.${b}.x.x`;
+    });
 }
 
 function clip(s, n = 400) {

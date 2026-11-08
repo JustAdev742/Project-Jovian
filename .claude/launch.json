@@ -12,6 +12,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["doctor/nova-doctor.mjs", "serve"],
       "port": 4310
+    },
+    {
+      "name": "fleet-doctor-e2e",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/fleet-e2e.mjs"],
+      "port": 3598
     }
   ]
 }

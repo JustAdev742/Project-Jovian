@@ -11,6 +11,7 @@ mod diagreport;
 mod net;
 mod carter;
 mod discord;
+mod doctor;
 mod host;
 mod tailscale;
 mod ue4log;
@@ -391,6 +392,9 @@ async fn main() {
             ue4log::ue4_log_ingest_now,
             bumper::bumper_status,
             bumper::bumper_set_enabled,
+            doctor::doctor_status,
+            doctor::doctor_set_sharing,
+            doctor::doctor_start_live,
             host::p2p_fetch_register_secret,
             host::p2p_register_host,
             host::p2p_unregister_host,
