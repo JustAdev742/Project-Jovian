@@ -729,10 +729,22 @@ namespace Nova::UE4
     // a cheap ride there. The detour is one relaxed atomic load in the common case; the task is run
     // once and the flag cleared, so the steady-state cost after that is the same load returning
     // false forever.
+    //
+    // [Nova] AND IT MUST NOT STAY IN. The hook used to be enabled at the bumper's warm-up and left in
+    // for the whole session, matches included. That is what kept players on the loading screen after
+    // joining a match (2026-11-08): with it in, the client never switched its UI to Athena; the first
+    // session without it, with nothing else changed, dropped the loading screen and played. So the
+    // hook is now enabled only while a task is pending and disabled again right after the task has
+    // run. It is DISABLED, never removed: the game thread may still be inside the detour on its way
+    // to the original, and removing the hook would free the trampoline it returns through. Disabling
+    // restores the original bytes and leaves the trampoline valid.
     namespace
     {
         std::atomic<bool> gTaskPending{ false };
+        std::atomic<bool> gTaskRunning{ false };
         void (*gTask)() = nullptr;
+        bool gHookEnabled = false;
+        SRWLOCK gHookLock = SRWLOCK_INIT;
 
         void ProcessEventDetour(void* obj, void* fn, void* params)
         {
@@ -743,41 +755,59 @@ namespace Nova::UE4
                 bool expected = true;
                 if (gTaskPending.compare_exchange_strong(expected, false) && gTask)
                 {
+                    gTaskRunning.store(true);
                     __try { gTask(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                    gTaskRunning.store(false);
                 }
             }
             gProcessEventOriginal(obj, fn, params);
         }
+
+        /** Disable the hook once the queued task has run (or after 5s if the game thread never came
+         *  through, so a stuck task cannot keep it in). Runs on a worker thread. */
+        DWORD WINAPI DisableHookWhenIdle(LPVOID)
+        {
+            for (int i = 0; i < 250 && (gTaskPending.load() || gTaskRunning.load()); ++i) Sleep(20);
+            Sleep(50);   // the detour's last step after the task is the call to the original
+            AcquireSRWLockExclusive(&gHookLock);
+            if (gHookEnabled && !gTaskPending.load())
+            {
+                MH_DisableHook((LPVOID)gProcessEvent);
+                gHookEnabled = false;
+                Cobalt::Log::WriteLine("[UE4] game-thread hook disabled - ProcessEvent is untouched until the next task");
+            }
+            ReleaseSRWLockExclusive(&gHookLock);
+            return 0;
+        }
     }
 
-    /** [Nova] Take the ProcessEvent hook back out once its job is done. Every Blueprint event and UI
-     *  call in the client goes through ProcessEvent, and the hook was left in for the whole session,
-     *  matches included, long after the bumper (its only user) had finished. Called from a worker
-     *  thread after the last game-thread task has run; MinHook suspends the other threads while it
-     *  patches. A later RunOnGameThread simply installs it again. */
+    /** Kept for the bumper's finish thread: the hook already disables itself after every task, so
+     *  this only makes sure, and is a no-op when it is already off. */
     void UninstallGameThreadHook()
     {
-        for (int i = 0; i < 100 && gTaskPending.load(); ++i) Sleep(20);   // let a queued task run first
-        if (!gHookInstalled) return;
-        MH_DisableHook((LPVOID)gProcessEvent);
-        MH_RemoveHook((LPVOID)gProcessEvent);
-        gHookInstalled = false;
-        Cobalt::Log::WriteLine("[UE4] game-thread hook removed - ProcessEvent is untouched for the rest of the session");
+        DisableHookWhenIdle(nullptr);
     }
 
     bool RunOnGameThread(void (*task)())
     {
         if (!gResolved.load() || !task) return false;
+        AcquireSRWLockExclusive(&gHookLock);
         if (!gHookInstalled)
         {
             if (MH_CreateHook((LPVOID)gProcessEvent, &ProcessEventDetour,
-                              (LPVOID*)&gProcessEventOriginal) != MH_OK) return false;
-            if (MH_EnableHook((LPVOID)gProcessEvent) != MH_OK) return false;
-            gHookInstalled = true;
-            Cobalt::Log::WriteLine("[UE4] game-thread hook installed");
+                              (LPVOID*)&gProcessEventOriginal) != MH_OK) { ReleaseSRWLockExclusive(&gHookLock); return false; }
+            gHookInstalled = true;   // created once; enabled and disabled per task from here on
+        }
+        if (!gHookEnabled)
+        {
+            if (MH_EnableHook((LPVOID)gProcessEvent) != MH_OK) { ReleaseSRWLockExclusive(&gHookLock); return false; }
+            gHookEnabled = true;
+            Cobalt::Log::WriteLine("[UE4] game-thread hook enabled for one task");
         }
         gTask = task;
         gTaskPending.store(true, std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&gHookLock);
+        if (HANDLE h = CreateThread(nullptr, 0, &DisableHookWhenIdle, nullptr, 0, nullptr)) CloseHandle(h);
         return true;
     }
 
@@ -2044,14 +2074,21 @@ namespace Nova::UE4
     bool BumperEnabled()
     {
         // A file, not a registry key or a config parser: the launcher writes or deletes it from the
-        // Settings switch, and Cobalt only has to answer "is it there". Absent means ON, so the
-        // feature works on a fresh install without the launcher having written anything.
+        // Settings switch, and Cobalt only has to answer "is it there".
+        //
+        // [Nova] OPT-IN since 1.9.7: the bumper plays only when bumper.on exists. It used to play
+        // unless bumper.off existed, and its game-thread hook is what kept every player on the
+        // loading screen after joining a match (see the GAME-THREAD HOP note). The hook now disables
+        // itself after each task, but that has not yet been through a played match, so a fresh
+        // install stays off until it has. bumper.off still wins, for a launcher that writes it.
         wchar_t buf[MAX_PATH]{};
-        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return true;
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return false;
         // Double backslashes: the previous spelling had \P and \b in it, which the compiler read as
         // escapes (the build even warned), so this checked a garbled path and never saw the file.
-        const std::wstring off = std::wstring(buf) + L"\\ProjectNova\\bumper.off";
-        return GetFileAttributesW(off.c_str()) == INVALID_FILE_ATTRIBUTES;
+        const std::wstring dir = std::wstring(buf) + L"\\ProjectNova\\";
+        const bool on = GetFileAttributesW((dir + L"bumper.on").c_str()) != INVALID_FILE_ATTRIBUTES;
+        const bool off = GetFileAttributesW((dir + L"bumper.off").c_str()) != INVALID_FILE_ATTRIBUTES;
+        return on && !off;
     }
 
     void OnEnteredBattleRoyale()

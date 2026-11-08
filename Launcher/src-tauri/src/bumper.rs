@@ -1,10 +1,14 @@
 //! The intro bumper: the switch in Settings, and getting the clip where Cobalt looks for it.
 //!
 //! Cobalt (inside the game) plays `%LOCALAPPDATA%\ProjectNova\bumper.mp4` when Battle Royale is
-//! chosen, unless `%LOCALAPPDATA%\ProjectNova\bumper.off` exists. Both halves of that contract are
-//! files rather than settings the launcher would have to hand across a process boundary: Cobalt
-//! only ever has to answer "is it there", and works on a fresh install before the launcher has
-//! written anything (absent means ON).
+//! chosen, ONLY IF `%LOCALAPPDATA%\ProjectNova\bumper.on` exists (and `bumper.off` does not). Both
+//! halves of that contract are files rather than settings the launcher would have to hand across a
+//! process boundary: Cobalt only ever has to answer "is it there".
+//!
+//! Opt-in since 1.9.7. It used to play unless `bumper.off` existed, and the game-thread hook it
+//! installed stayed in for the whole session, which kept every player on the loading screen after
+//! joining a match (KNOWN_ISSUES client-stuck-on-loading-screen). The hook now switches itself off
+//! after each task; the bumper stays off by default until a played match with it on confirms that.
 //!
 //! The clip ships inside the launcher as a resource and is copied into place on every launch when
 //! missing or a different size, the same way Cobalt.dll is deployed -- so a player never has to put
@@ -24,13 +28,17 @@ fn off_marker() -> Option<PathBuf> {
     nova_dir().map(|d| d.join("bumper.off"))
 }
 
+fn on_marker() -> Option<PathBuf> {
+    nova_dir().map(|d| d.join("bumper.on"))
+}
+
 fn clip_path() -> Option<PathBuf> {
     nova_dir().map(|d| d.join("bumper.mp4"))
 }
 
 #[derive(serde::Serialize)]
 pub struct BumperStatus {
-    /// The switch. Absent marker file means on.
+    /// The switch: on only when bumper.on exists and bumper.off does not (opt-in since 1.9.7).
     pub enabled: bool,
     /// Whether the clip is where Cobalt will look for it.
     pub clip_present: bool,
@@ -39,7 +47,8 @@ pub struct BumperStatus {
 #[tauri::command]
 pub fn bumper_status() -> BumperStatus {
     BumperStatus {
-        enabled: off_marker().map(|p| !p.exists()).unwrap_or(true),
+        enabled: on_marker().map(|p| p.exists()).unwrap_or(false)
+            && !off_marker().map(|p| p.exists()).unwrap_or(false),
         clip_present: clip_path().map(|p| p.is_file()).unwrap_or(false),
     }
 }
@@ -49,16 +58,22 @@ pub fn bumper_status() -> BumperStatus {
 /// mid-session, but "next launch" is the promise the UI makes.
 #[tauri::command]
 pub fn bumper_set_enabled(enabled: bool) -> Result<(), String> {
-    let marker = off_marker().ok_or("LOCALAPPDATA is not set")?;
+    // On = write bumper.on and remove bumper.off; off = the reverse.
+    let off = off_marker().ok_or("LOCALAPPDATA is not set")?;
+    let on = on_marker().ok_or("LOCALAPPDATA is not set")?;
+    let remove = |p: &PathBuf| match fs::remove_file(p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Could not remove {}: {}", p.display(), e)),
+    };
     if enabled {
-        match fs::remove_file(&marker) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Could not remove {}: {}", marker.display(), e)),
-        }
+        remove(&off)?;
+        fs::write(&on, b"The Nova intro bumper is switched on in Settings.\n")
+            .map_err(|e| format!("Could not write {}: {}", on.display(), e))
     } else {
-        fs::write(&marker, b"The Nova intro bumper is switched off in Settings.\n")
-            .map_err(|e| format!("Could not write {}: {}", marker.display(), e))
+        remove(&on)?;
+        fs::write(&off, b"The Nova intro bumper is switched off in Settings.\n")
+            .map_err(|e| format!("Could not write {}: {}", off.display(), e))
     }
 }
 
