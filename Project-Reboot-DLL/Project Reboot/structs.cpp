@@ -126,9 +126,15 @@ ObjectType* FindObject(const std::string& ObjectName, UObject* Class, UObject* I
 		return (ObjectType*)FindObjectSlow(ObjectName); // (ObjectType*)FindObjectSlow(Class->GetName() + " " + ObjectName, false);
 
 	auto& ObjectNameCut = ObjectName; // ObjectName.substr(ObjectName.find(" ") + 1);
-	auto ObjectNameWide = std::wstring(ObjectNameCut.begin(), ObjectNameCut.end()).c_str();
+	// The wstring MUST be a named local. `.c_str()` on a temporary dangles the moment the statement
+	// ends: every object path is far past MSVC's 7-char SSO limit, so the heap block is freed and
+	// StaticFindObject reads freed memory. It "works" until an allocation reuses the block, then
+	// returns a wrong object or NULL for a path that exists -- which turns the unchecked
+	// FindObject(...)->... dereferences elsewhere into crashes. Fixed 2026-07-25 in a copy that never
+	// reached this tree (_backup-reboot-src-20260725); restored 2026-11-08 (found by nova-doctor).
+	const std::wstring ObjectNameWide(ObjectNameCut.begin(), ObjectNameCut.end());
 
-	return (ObjectType*)StaticFindObjectO(Class, InOuter, ObjectNameWide, false);
+	return (ObjectType*)StaticFindObjectO(Class, InOuter, ObjectNameWide.c_str(), false);
 }
 
 int FindOffsetStruct(const std::string& StructName, const std::string& MemberName, bool bExactStruct)

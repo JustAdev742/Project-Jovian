@@ -335,8 +335,9 @@ static T* StaticLoadObject(UObject* Class, UObject* Outer, const std::string& na
 
 	if (!Object)
 	{
-		auto Name = std::wstring(name.begin(), name.end()).c_str();
-		Object = (T*)StaticLoadObjectO(Class, Outer, Name, nullptr, LoadFlags, nullptr, false, nullptr);
+		// Named local -- .c_str() on a temporary dangles (same bug as FindObject in structs.cpp).
+		const std::wstring Name(name.begin(), name.end());
+		Object = (T*)StaticLoadObjectO(Class, Outer, Name.c_str(), nullptr, LoadFlags, nullptr, false, nullptr);
 	}
 
 	return Object;

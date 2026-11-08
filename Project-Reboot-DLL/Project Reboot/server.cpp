@@ -761,11 +761,19 @@ void Server::Hooks::TickFlush(UObject* thisNetDriver, float DeltaSeconds)
 			else
 			{
 				static auto ReplicationDriverOffset = NetDriver->GetOffset("ReplicationDriver");
-				auto ReplicationDriver = Get<UObject*>(NetDriver, ReplicationDriverOffset);
 
-				if (ReplicationDriver)
+				// Get<T>() returns the ADDRESS of the field, which is never null -- so the old
+				// `if (ReplicationDriver)` always passed while the value handed to ServerReplicateActors
+				// went unchecked. That value IS null during the netdriver teardown at match end, and
+				// TickFlush keeps running through that window: UReplicationGraph::ServerReplicateActors
+				// with this == nullptr, the all-engine-frames 0x90 crash. Check the offset too: a missing
+				// property gives 0, and *(NetDriver + 0) is the vtable pointer, not a driver.
+				// Fixed 2026-07-25 in a copy that never reached this tree; restored 2026-11-08.
+				auto ReplicationDriver = ReplicationDriverOffset ? *Get<UObject*>(NetDriver, ReplicationDriverOffset) : nullptr;
+
+				if (ReplicationDriver && Defines::ServerReplicateActors)
 				{
-					Defines::ServerReplicateActors(*ReplicationDriver);
+					Defines::ServerReplicateActors(ReplicationDriver);
 				}
 			}
 		}

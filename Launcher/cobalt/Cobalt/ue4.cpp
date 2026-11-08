@@ -1996,6 +1996,36 @@ namespace Nova::UE4
         Cobalt::Log::WriteLine("[UE4] cine: " + std::to_string(hits) + " cinematic-shaped item(s)");
     }
 
+    /**
+     * Is this the headless gameserver? Cobalt is loaded into BOTH Fortnite processes (it replaces a
+     * DLL from the game's import table), and the gameserver runs with -nullrhi: no renderer, no
+     * screen, no media player plug-ins. Without this check the bumper warmed up in the server too and
+     * logged "Cannot play file ... no media player plug-ins" 30 times across the logged sessions, and
+     * its music handling ran with a null world (found by nova-doctor, 2026-11-08).
+     *
+     * Hand-rolled, case-insensitive, over GetCommandLineW (kernel32, already imported): wcsstr or
+     * towlower would add api-ms-win-crt-string to an import table that must not grow.
+     */
+    bool IsHeadlessServer()
+    {
+        const wchar_t* cmd = GetCommandLineW();
+        if (!cmd) return false;
+        static const wchar_t kFlag[] = L"-nullrhi";
+        for (const wchar_t* p = cmd; *p; ++p)
+        {
+            size_t i = 0;
+            for (; kFlag[i]; ++i)
+            {
+                wchar_t c = p[i];
+                if (!c) return false;
+                if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+                if (c != kFlag[i]) break;
+            }
+            if (!kFlag[i]) return true;
+        }
+        return false;
+    }
+
     bool BumperEnabled()
     {
         // A file, not a registry key or a config parser: the launcher writes or deletes it from the
@@ -2015,6 +2045,11 @@ namespace Nova::UE4
         bool expected = false;
         if (!fired.compare_exchange_strong(expected, true)) return;   // once per session
 
+        if (IsHeadlessServer())
+        {
+            Cobalt::Log::WriteLine("[UE4] bumper: headless gameserver (-nullrhi) - nothing to show it on");
+            return;
+        }
         if (!BumperEnabled())
         {
             Cobalt::Log::WriteLine("[UE4] bumper: switched off in Settings - not playing");
@@ -2149,6 +2184,11 @@ namespace Nova::UE4
             if (found == kProbeCount)
             {
                 Cobalt::Log::WriteLine("[UE4] everything the bumper needs is live - stopping probe");
+                if (IsHeadlessServer())
+                {
+                    Cobalt::Log::WriteLine("[UE4] headless gameserver (-nullrhi): skipping the bumper warm-up");
+                    return;
+                }
                 EnumerateMedia();
                 EnumerateCinematics();
                 TryDecodeBumper();

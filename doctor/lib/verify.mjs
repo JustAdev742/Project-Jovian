@@ -66,7 +66,9 @@ function suites(ctx, quick) {
     });
     list.push({
       id: 'Cobalt emitter test + Reboot drift', when: () => exists(path.join(ctx.paths.cobalt, 'Cobalt', 'tests', 'build-and-run.cmd')),
-      cwd: path.join(ctx.paths.cobalt, 'Cobalt', 'tests'), shell: true, cmd: ['cmd', ['/c', 'build-and-run.cmd']], timeout: 600_000,
+      // Full path, no shell: cmd resolved the bare name against the wrong directory (and shell:true
+      // drew a DEP0190 warning). The script itself uses %~dp0 for its own paths.
+      cwd: path.join(ctx.paths.cobalt, 'Cobalt', 'tests'), cmd: ['cmd.exe', ['/d', '/c', path.join(ctx.paths.cobalt, 'Cobalt', 'tests', 'build-and-run.cmd')]], timeout: 600_000,
       judge: o => ({ ok: o.ok && /matches the Reboot copy/.test(o.stdout), detail: o.ok ? 'redaction test passed, emitter matches Reboot' : (o.stdout + o.stderr).trim().split('\n').slice(-2).join(' | ') }),
     });
   }

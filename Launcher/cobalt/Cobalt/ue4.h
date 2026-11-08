@@ -125,6 +125,7 @@ namespace Nova::UE4
     void OnEnteredBattleRoyale();
 
     /** Whether the player has switched the bumper off. */
+    bool IsHeadlessServer();   // true in the -nullrhi gameserver process
     bool BumperEnabled();
 
     /**
