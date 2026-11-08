@@ -103,6 +103,7 @@ button.link{background:none;border:0;padding:6px 0;font:inherit;cursor:pointer;t
 .log li:last-child{border-bottom:0}
 .log .who{font-size:14px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:28ch}
 .log .src{font-size:13px;color:var(--dim)}
+.log .rep{color:var(--fg);font-weight:600}
 .log .text{grid-column:1 / -1;font-family:var(--mono);font-size:13px;color:var(--body);white-space:pre-wrap;overflow-wrap:anywhere}
 .log .empty{display:block;color:var(--dim)}
 form.signin{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:12px}
@@ -125,7 +126,7 @@ function page(title: string, body: string, script = ''): string {
 }
 
 function lineItem(l: LineRow, showWho: boolean): string {
-  return `<li data-id="${l.id}" data-sev="${esc(l.sev)}" data-acct="${esc(l.account_id)}">${showWho ? `<span class="who" translate="no">${esc(l.display_name || l.account_id.slice(0, 8))}</span>` : ''}${sevBadge(l.sev)}<span class="src">${esc(l.src)} · ${esc((l.received_at || '').slice(11, 19))} UTC${l.rule ? ` · <span translate="no">${esc(l.rule)}</span>` : ''}</span><span class="text" translate="no">${esc(l.text)}</span></li>`;
+  return `<li data-id="${l.id}" data-sev="${esc(l.sev)}" data-acct="${esc(l.account_id)}">${showWho ? `<span class="who" translate="no">${esc(l.display_name || l.account_id.slice(0, 8))}</span>` : ''}${sevBadge(l.sev)}<span class="src">${esc(l.src)} · ${esc((l.received_at || '').slice(11, 19))} UTC${l.rule ? ` · <span translate="no">${esc(l.rule)}</span>` : ''}${(l.count || 1) > 1 ? ` · <strong class="rep" title="The same line ${l.count} times in a burst, sent once">×${l.count}</strong>` : ''}</span><span class="text" translate="no">${esc(l.text)}</span></li>`;
 }
 
 /** The polling script for a live list. Rows are built with textContent only. */
@@ -142,7 +143,9 @@ function liveScript(opts: { account?: string; showWho: boolean }): string {
     var li=el('li');li.dataset.id=l.id;li.dataset.sev=l.sev;li.dataset.acct=l.account_id;
     ${opts.showWho ? "var w=el('span','who',l.display_name||String(l.account_id).slice(0,8));w.setAttribute('translate','no');li.appendChild(w);" : ''}
     var s=SEV[l.sev]||SEV.INFO,b=el('span','sev');b.style.setProperty('--sev',s[0]);var m=el('span',null,s[1]);m.setAttribute('aria-hidden','true');b.appendChild(m);b.appendChild(document.createTextNode(' '+(SEV[l.sev]?l.sev:'INFO')));li.appendChild(b);
-    li.appendChild(el('span','src',l.src+' \\u00B7 '+String(l.received_at||'').slice(11,19)+' UTC'+(l.rule?' \\u00B7 '+l.rule:'')));
+    var src=el('span','src',l.src+' \\u00B7 '+String(l.received_at||'').slice(11,19)+' UTC'+(l.rule?' \\u00B7 '+l.rule:''));
+    if(l.count>1){src.appendChild(document.createTextNode(' \\u00B7 '));var rp=el('strong','rep','\\u00D7'+l.count);rp.title='The same line '+l.count+' times in a burst, sent once';src.appendChild(rp)}
+    li.appendChild(src);
     var t=el('span','text',l.text);t.setAttribute('translate','no');li.appendChild(t);
     return li;
   }

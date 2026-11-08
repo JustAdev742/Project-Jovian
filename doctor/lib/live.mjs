@@ -70,8 +70,22 @@ export function classifyLine(kind, line) {
     if (p.verbosity === 'Warning' && !Object.prototype.hasOwnProperty.call(SUBSYSTEMS, p.category)) return null;
     return { sev: p.verbosity === 'Fatal' ? 'P1' : 'P3', rule: null, status: 'open' };
   }
+  // Cobalt prints three explanatory lines after every [Exception] header ("The game OFTEN RECOVERS…").
+  // The header is classified above (a survived RVA is benign); the explanation is not a problem.
+  if (/\[Exception\] (?!first-chance|Critical)/.test(line)) return null;
   if (/\[(Exception|Crash)\]|\bERROR\b|\bFAILED\b|\bMISSING\b/.test(line)) return { sev: 'P3', rule: null, status: 'open' };
   return null;
+}
+
+/**
+ * What makes two lines "the same" for repeat-counting: source, rule and the text without its
+ * timestamp (UE4's `[2026.11.08-06.32.30:357][ 43]` or Cobalt's `17:32:38.419 `). Exported for the test.
+ */
+export function repeatKey(src, rule, text) {
+  const body = String(text)
+    .replace(/^\[\d{4}\.\d\d\.\d\d-\d\d\.\d\d\.\d\d:\d{3}\]\[\s*\d+\]/, '')
+    .replace(/^\d\d:\d\d:\d\d(?:\.\d+)?\s+/, '');
+  return `${src}|${rule ?? ''}|${body}`;
 }
 
 /** Follows one file by byte offset. Starts at the END: history belongs to the full report. */
@@ -138,6 +152,9 @@ export async function liveCommand(opts, scan) {
   ];
   const SRC = { 'ue4:client': 'client', 'ue4:host': 'server', cobalt: 'cobalt', agent: 'agent' };
   let queue = [];
+  /** Queued entries by repeatKey, so a repeat bumps a count instead of adding a line. */
+  const queued = new Map();
+  const entryKey = new WeakMap();
   let dropped = 0;
   let lastScan = 0, scanning = false, wasActive = false;
   const startedAt = Date.now();
@@ -162,15 +179,30 @@ export async function liveCommand(opts, scan) {
         const c = classifyLine(t.kind, raw);
         if (!c) continue;
         const p = t.kind.startsWith('ue4:') ? parseLine(raw) : null;
-        queue.push({
-          src: SRC[t.kind] || t.kind, sev: c.sev, rule: c.rule, status: c.status,
+        const src = SRC[t.kind] || t.kind;
+        const text = scrubHost(redact(raw.trim())).slice(0, LIMITS.MAX_LINE);
+        // The same line again while the first copy is still queued: count it instead of sending it
+        // twice. 2026-11-08 one spawn produced 56 identical WorldInventory warnings in half a second.
+        const key = repeatKey(src, c.rule, text);
+        const prev = queued.get(key);
+        if (prev) { prev.count++; continue; }
+        const entry = {
+          src, sev: c.sev, rule: c.rule, status: c.status,
           t: p?.stamp ?? (/^(\d\d:\d\d:\d\d(?:\.\d+)?)/.exec(raw)?.[1] ?? null),
-          text: scrubHost(redact(raw.trim())).slice(0, LIMITS.MAX_LINE),
-        });
+          text, count: 1,
+        };
+        queue.push(entry);
+        queued.set(key, entry);
+        entryKey.set(entry, key);
       }
       if (t.skipped) { dropped += Math.ceil(t.skipped / 200); t.skipped = 0; }   // ~200 bytes a line
     }
-    if (queue.length > LIMITS.MAX_QUEUE) { dropped += queue.length - LIMITS.MAX_QUEUE; queue = queue.slice(-LIMITS.MAX_QUEUE); }
+    if (queue.length > LIMITS.MAX_QUEUE) {
+      const gone = queue.slice(0, queue.length - LIMITS.MAX_QUEUE);
+      dropped += gone.reduce((n, e) => n + e.count, 0);
+      forget(gone);
+      queue = queue.slice(-LIMITS.MAX_QUEUE);
+    }
 
     // Game activity, read from the client log's write time — a stat, not a process listing.
     let mtime = 0;
@@ -189,11 +221,22 @@ export async function liveCommand(opts, scan) {
     }
   }
 
+  /** Entries leaving the queue stop absorbing repeats (a later copy starts a fresh entry). */
+  function forget(entries) {
+    for (const e of entries) { const k = entryKey.get(e); if (k && queued.get(k) === e) queued.delete(k); }
+  }
+
   async function flush() {
-    if (!sharing()) { queue = []; dropped = 0; return; }
+    if (!sharing()) { forget(queue); queue = []; dropped = 0; return; }
     while (queue.length) {
       const batch = queue.slice(0, LIMITS.BATCH);
-      if (!(await post('/nova/api/doctor/local', { lines: batch, dropped }))) return;   // keep for next time
+      // Detached from repeat-counting BEFORE the await: a repeat arriving mid-POST must not bump a
+      // count that has already been serialised and sent.
+      forget(batch);
+      if (!(await post('/nova/api/doctor/local', { lines: batch, dropped }))) {
+        for (const e of batch) { const k = entryKey.get(e); if (k && !queued.has(k)) queued.set(k, e); }
+        return;   // keep for next time
+      }
       queue = queue.slice(batch.length);
       dropped = 0;
     }

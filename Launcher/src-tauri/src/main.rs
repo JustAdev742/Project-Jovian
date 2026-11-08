@@ -282,6 +282,35 @@ fn start_backend(
     Ok(true)
 }
 
+/// After the player's game has closed on its own, end the launcher and anti-cheat stand-ins that the
+/// launch started suspended (FortniteLauncher.exe, FortniteClient-Win64-Shipping_EAC.exe). The game
+/// only needs them to exist while it runs; left alone they stayed suspended until the next Play (seen
+/// 2026-11-08, both still alive after the game had exited). Skipped while any Fortnite client is
+/// still running — a hosted server or a second instance may still be checking for them.
+#[tauri::command]
+fn cleanup_game_stubs() -> bool {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    let game_running = sys.processes().values().any(|p| {
+        p.name().to_string_lossy().eq_ignore_ascii_case("FortniteClient-Win64-Shipping.exe")
+    });
+    if game_running {
+        return false;
+    }
+    for proc in [
+        "FortniteClient-Win64-Shipping_EAC.exe",
+        "FortniteClient-Win64-Shipping_BE.exe",
+        "FortniteLauncher.exe",
+    ] {
+        let _ = std::process::Command::new("cmd")
+            .creation_flags(0x08000000)
+            .args(&["/C", "taskkill", "/F", "/IM", proc])
+            .spawn();
+    }
+    true
+}
+
 /// Force-close the running game / anti-cheat processes (a "Stop Game" button).
 #[tauri::command]
 fn stop_game() {
@@ -383,6 +412,7 @@ async fn main() {
             close_launcher,
             start_backend,
             stop_game,
+            cleanup_game_stubs,
             host::setup_playit,
             host::download_playit,
             host::p2p_should_i_host,

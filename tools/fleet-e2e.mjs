@@ -94,6 +94,8 @@ const lines = [
   `[${stamp()}][  6]LogNet: Login request: /Game/Maps/Frontend?Name=FleetTester?AuthTicket=eg1~eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMyJ9.sig from 203.0.113.77`,
 ];
 for (const l of lines) { fs.appendFileSync(clientLog, l + '\n'); await wait(300); }
+// A burst of one warning, the way a spawn produces it: the doctor must send it ONCE, with a count.
+for (let i = 0; i < 10; i++) fs.appendFileSync(clientLog, `[${stamp()}][ 43]LogFort: Warning: ClientRestart_Implementation failed because WorldInventory is invalid, waiting to finish restarting for FleetTester*\n`);
 fs.appendFileSync(cobaltLog, "16:20:01.000 Failed to find property 'QuickBars' (see the offset report)\n16:20:02.000 URL: example/fortnite/api/x\n");
 log('wrote a session; now letting it go quiet so the doctor runs its full scan…');
 await wait(14000);
@@ -103,6 +105,6 @@ const recent = await (await fetch('http://127.0.0.1:3598/nova/api/doctor/lines.j
 console.log(JSON.stringify({
   players: fleet.players.map(p => ({ name: p.display_name, launcher: p.launcher_version, open: p.open_total, p0: p.p0, report: !!p.last_report_at })),
   problems: fleet.problems.slice(0, 5).map(p => `${p.severity} ${p.title} (${p.players} player)`),
-  liveLines: recent.lines.map(l => `${l.sev} ${l.src} ${l.rule || '-'} :: ${l.text.slice(0, 110)}`),
+  liveLines: recent.lines.map(l => `${l.sev} ${l.src} ${l.rule || '-'}${l.count > 1 ? ` x${l.count}` : ''} :: ${l.text.slice(0, 110)}`),
 }, null, 2));
 log(`work dir ${work}; coordinator stays up at http://127.0.0.1:3598/nova/api/doctor/dashboard (admin secret ${ADMIN})`);

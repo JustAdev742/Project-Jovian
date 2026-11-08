@@ -51,6 +51,18 @@ export interface HostSpec {
 }
 
 let spec: HostSpec | null = null;
+/** When the launcher handed us the spec — i.e. when this player's game was launched. */
+let specSetAt = 0;
+
+/**
+ * PRE-WARM: tell the coordinator this player is in the lobby, so a server can be brought up BEFORE
+ * anyone presses Play. A cold server takes ~45-60s to become joinable, and that whole time used to be
+ * spent in the matchmaking queue (62s measured 2026-11-08) even though the player had been sitting
+ * in the lobby for over a minute first. Not sent until the game has had this long to boot, so a warm
+ * server never competes with the player's own client for CPU and disk while it loads. Not sent while
+ * this machine is already hosting. The coordinator decides whether to act on it (Config.PREWARM).
+ */
+const PREWARM_AFTER_MS = parseInt(process.env.NOVA_PREWARM_AFTER_MS || '30000', 10);
 let child: ChildProcess | null = null;
 let startedAt = 0;
 let lastError: string | null = null;
@@ -69,6 +81,49 @@ let lastVerdict = '';
 let serverReady = false;
 /** When the launcher told us the DLL went in, so a missing readiness marker can't strand everyone. */
 let injectedAt = 0;
+
+/**
+ * When the spawned process reached its main menu — the moment Reboot can safely go in.
+ *
+ * The launcher used to wait a flat 45s after spawn before injecting, because injecting before the
+ * menu crashes the game and it had no way to see the menu arrive: we spawned the server with stdout
+ * ignored. Measured 2026-11-08 on a Ryzen 5 5600, the server printed its menu marker 27s after spawn,
+ * so 18s of every cold match start was a sleep. The server is launched with -stdout (Rust
+ * HEADLESS_SERVER_ARGS), so we read that pipe for the same marker the launcher's own watcher uses
+ * ("CreatingParty", where Phoenix injects too) and report it in host/status as `injectable`.
+ */
+let bootedAt = 0;
+const BOOT_MARKER = 'CreatingParty';
+
+/** Calls onFound once when `marker` appears in the stream (even split across chunks), then keeps
+ *  draining. The pipe MUST keep being read: a full pipe buffer blocks the game's logging thread, and
+ *  with it the game. Exported for the test. */
+export function watchForMarker(stream: NodeJS.ReadableStream | null, marker: string, onFound: () => void): void {
+  if (!stream) return;
+  let tail = '';
+  const onData = (chunk: Buffer | string) => {
+    const text = tail + chunk.toString();
+    if (text.includes(marker)) {
+      onFound();
+      // Found it: stop scanning. resume() with no listener keeps draining the pipe for free.
+      stream.removeListener('data', onData);
+      stream.resume();
+      return;
+    }
+    tail = text.slice(-(marker.length + 8)); // the marker can straddle two chunks
+  };
+  stream.on('data', onData);
+  stream.on('error', () => { /* the process went away; exit handling covers it */ });
+}
+
+function watchBoot(stream: NodeJS.ReadableStream | null): void {
+  watchForMarker(stream, BOOT_MARKER, () => {
+    if (!bootedAt && startedAt) {
+      bootedAt = Date.now();
+      console.log(`[HostRunner] Gameserver reached its menu after ${Math.round((bootedAt - startedAt) / 1000)}s — ready for Reboot`);
+    }
+  });
+}
 
 /**
  * The gameserver announces itself when it is genuinely accepting players. Injection is NOT that
@@ -129,6 +184,7 @@ const AGENT_MODE = !!COORDINATOR;
 export function setHostSpec(next: HostSpec | null): { ok: boolean; error?: string } {
   if (next === null) {
     spec = null;
+    specSetAt = 0;
     // Otherwise the launcher keeps showing the last thing the coordinator said, long after this
     // machine stopped taking part.
     lastVerdict = '';
@@ -140,6 +196,7 @@ export function setHostSpec(next: HostSpec | null): { ok: boolean; error?: strin
   }
   if (!Array.isArray(next.args)) return { ok: false, error: 'args must be an array' };
 
+  if (!spec) specSetAt = Date.now();
   spec = {
     ...next,
     port: Number(next.port) || 7777,
@@ -182,6 +239,9 @@ export function hostStatus() {
     mode: AGENT_MODE ? 'agent' : 'standalone',
     /** False while the process is still booting to the menu — live, but not yet joinable. */
     ready: serverReady,
+    /** The server reached its menu, so Reboot can go in now (see bootedAt). Older launchers ignore it. */
+    injectable: isHosting() && bootedAt > 0,
+    bootSeconds: isHosting() && bootedAt ? Math.round((bootedAt - startedAt) / 1000) : null,
     coordinator: COORDINATOR || null,
     /** The coordinator's most recent answer, so the launcher can show WHY it is or isn't hosting. */
     verdict: lastVerdict,
@@ -209,12 +269,15 @@ function startServer(): void {
       // Detached so a backend restart doesn't take the running match down with it. We still hold the
       // handle for the normal stop path.
       detached: false,
-      stdio: 'ignore',
+      // stdout piped for the boot marker (watchBoot); stdin/stderr unused.
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     startedAt = Date.now();
     lastError = null;
     serverReady = false; // a brand new process is a client until the DLL goes in
     injectedAt = 0;
+    bootedAt = 0;
+    watchBoot(child.stdout);
 
     child.on('error', (e) => {
       lastError = String(e?.message || e);
@@ -228,6 +291,7 @@ function startServer(): void {
       child = null;
       serverReady = false;
       injectedAt = 0;
+      bootedAt = 0;
       void deregister();
     });
 
@@ -246,6 +310,7 @@ export function stopServer(reason: string): void {
   void deregister();
   try { child!.kill(); } catch { /* already gone */ }
   child = null;
+  bootedAt = 0;
   serverReady = false;
 }
 
@@ -368,7 +433,8 @@ async function tickAgent(): Promise<void> {
     `&playlist=${encodeURIComponent(spec.playlist)}` +
     `&region=${encodeURIComponent(spec.region)}` +
     `&address=${encodeURIComponent(publicAddress())}` +
-    `&port=${spec.port}`;
+    `&port=${spec.port}` +
+    (!isHosting() && PREWARM_AFTER_MS >= 0 && specSetAt && Date.now() - specSetAt >= PREWARM_AFTER_MS ? '&lobby=1' : '');
 
   let verdict: any;
   try {

@@ -576,7 +576,15 @@ bool ReadyToStartMatch(UObject* GameMode, UFunction* Function, void* Parameters)
 		// Dedicated server drops its local player (the host is not a participant). A listen server
 		// KEEPS it so the host spawns a pawn and plays.
 		if (LocalPlayers.size() && !Defines::bHostCanPlay)
+		{
+			// [Nova] Remember which controller is the server's own BEFORE dropping it: once it is gone from
+			// LocalPlayers nothing can identify it again, and SpawnDefaultPawnFor needs to. See
+			// Defines::ServerLocalController.
+			if (auto LocalPC = Helper::GetLocalPlayerController())
+				Defines::ServerLocalController = LocalPC;
+
 			LocalPlayers.RemoveAt(0);
+		}
 
 		/* static auto GameplayTagContainerOffset = Playlist->GetOffset("GameplayTagContainer");
 		auto GameplayTagContainer = Get<FGameplayTagContainer>(Playlist, GameplayTagContainerOffset);
@@ -2160,7 +2168,11 @@ bool SpawnDefaultPawnFor(UObject* GameMode, UFunction*, void* Parameters)
 	// In listen-server mode the host IS a player and must get a pawn like everyone else. Only the
 	// dedicated build skips the local controller (there, it isn't a participant at all) — seeing
 	// this line for the SERVER's own controller is correct and expected.
-	if (!Defines::bHostCanPlay && Helper::GetLocalPlayerController() == Params->PlayerController)
+	// [Nova] Compared against the REMEMBERED controller: by the time the game asks for a pawn,
+	// ReadyToStartMatch has already dropped the local player, so GetLocalPlayerController() is null and
+	// this check used to be dead (0 "skipping" lines across every log; a phantom host pawn instead).
+	if (!Defines::bHostCanPlay && Params->PlayerController &&
+		(Params->PlayerController == Defines::ServerLocalController || Helper::GetLocalPlayerController() == Params->PlayerController))
 	{
 		std::cout << "[Spawn] skipping the server's own local controller (dedicated mode)\n";
 		return true;

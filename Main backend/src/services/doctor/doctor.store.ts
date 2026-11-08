@@ -36,7 +36,7 @@ export function doctorDb(): Database.Database {
     );
     CREATE TABLE IF NOT EXISTS lines (
       id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, received_at TEXT NOT NULL,
-      src TEXT, sev TEXT, rule TEXT, status TEXT, t TEXT, text TEXT
+      src TEXT, sev TEXT, rule TEXT, status TEXT, t TEXT, text TEXT, count INTEGER NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS lines_by_player ON lines(account_id, id);
     CREATE TABLE IF NOT EXISTS reports (
@@ -45,6 +45,10 @@ export function doctorDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS reports_by_player ON reports(account_id, id);
   `);
+  // A database created before line counts existed (the coordinator's, from 2026-11-08) gains the
+  // column in place; every existing row reads as count 1, which is what it was.
+  const cols = db.prepare('PRAGMA table_info(lines)').all() as { name: string }[];
+  if (!cols.some(c => c.name === 'count')) db.exec('ALTER TABLE lines ADD COLUMN count INTEGER NOT NULL DEFAULT 1');
   return db;
 }
 
@@ -67,10 +71,10 @@ function touchPlayer(accountId: string, displayName: string, launcher: string, n
 export function recordLines(accountId: string, displayName: string, launcher: string, lines: LiveLine[], dropped: number): number {
   const d = doctorDb();
   const now = new Date().toISOString();
-  const ins = d.prepare('INSERT INTO lines (account_id, received_at, src, sev, rule, status, t, text) VALUES (?,?,?,?,?,?,?,?)');
+  const ins = d.prepare('INSERT INTO lines (account_id, received_at, src, sev, rule, status, t, text, count) VALUES (?,?,?,?,?,?,?,?,?)');
   d.transaction(() => {
     touchPlayer(accountId, displayName, launcher, now);
-    for (const l of lines) ins.run(accountId, now, l.src, l.sev, l.rule, l.status, l.t, l.text);
+    for (const l of lines) ins.run(accountId, now, l.src, l.sev, l.rule, l.status, l.t, l.text, l.count || 1);
     d.prepare('UPDATE players SET last_line_at = ?, lines_dropped = lines_dropped + ? WHERE account_id = ?')
       .run(lines.length ? now : null, Math.max(0, dropped | 0), accountId);
   })();

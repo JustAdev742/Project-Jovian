@@ -31,10 +31,10 @@ export const RULES = [
   {
     id: 'quickbar-guid-unmapped', sources: ['ue4:client'],
     re: /AFortQuickBars::AddItemInternal could not find Item with GUID/,
-    severity: 'P0', confidence: 'CONFIRMED', component: 'reboot', category: 'gameplay',
+    severity: 'P2', confidence: 'CONFIRMED', component: 'reboot', category: 'gameplay',
     cause: 'quickbars-lookup', kb: KI('client-stuck-on-loading-screen'),
-    title: 'Client could not place inventory items in quickbar slots (stuck-on-loading-screen signature)',
-    explain: 'The server never mapped item GUIDs to quickbar slots, so the client waits for an inventory it cannot build. Fixed in 1.9.2 (QuickBar singular + owner lookup); a recurrence on ≥1.9.2 means the fix did not take.',
+    title: 'Quickbar slots arrived before the items they point at (spawn race)',
+    explain: 'The client was told to put items in quickbar slots before the inventory holding them had replicated. Before 1.9.2 this went with the stuck-on-loading-screen hang. On 1.9.4 (2026-11-08) it still appears, 6 times at spawn, in a session that loaded in, dropped from the bus and played normally, so on its own it is no longer the hang. If a player IS stuck on the loading screen, this plus the quickbar lines in cobalt.log is still where to look.',
   },
   {
     id: 'quickbars-property-missing', sources: ['cobalt'],
@@ -60,6 +60,14 @@ export const RULES = [
     cause: 'worldinventory-race', kb: KI('worldinventory-race-at-spawn'),
     title: 'WorldInventory not yet replicated when ClientRestart ran (spawn race)',
     explain: 'Self-heals within seconds; mitigated by ForceNetUpdate before Possess. Open and deliberately unchanged — it is the spawn path. Recorded so its rate can be tracked.',
+  },
+  {
+    id: 'newpawn-race', sources: ['ue4:client'],
+    re: /ClientRestart_Implementation failed because NewPawn is null/,
+    severity: 'P3', confidence: 'CONFIRMED', component: 'reboot', category: 'replication',
+    cause: 'worldinventory-race', kb: KI('worldinventory-race-at-spawn'),
+    title: 'Pawn not yet replicated when ClientRestart ran (first step of the spawn race)',
+    explain: 'The client is told to restart before its pawn has arrived; it retries, then hits the WorldInventory step of the same race. Seen 2026-11-08 twice at warmup, right after a 1.3s server hitch, in a session that went on to play normally.',
   },
 
   // ── Hosting (ProcessEvent, lobby) ─────────────────────────────────────────────────────────────
@@ -106,6 +114,13 @@ export const RULES = [
     },
     title: 'Gameserver exited',
     explain: 'Exit 3 is UE4\'s GIsCriticalError → RequestExit path (what follows our vectored handler logging a crash); a raw crash shows 3221225477. Read the matching FortniteGame_2.log "=== Critical error: ===" block for the frames.',
+  },
+  {
+    id: 'join-in-progress-check', sources: ['ue4'], status: 'known-benign',
+    re: /\[UFortMatchmakingV\d::JoinInProgressIfRequired\] bHasCheckedForJoinInProgress/,
+    severity: 'INFO', confidence: 'CONFIRMED', component: 'game', category: 'noise',
+    title: 'Epic\'s join-in-progress check logs its state (harmless)',
+    explain: 'Printed on every matchmaking state change. Nova has no join-in-progress sessions, so the check always finds nothing to do; it is the game reporting that, not a failure.',
   },
   {
     id: 'first-chance-av-known', sources: ['cobalt'], status: 'known-benign',

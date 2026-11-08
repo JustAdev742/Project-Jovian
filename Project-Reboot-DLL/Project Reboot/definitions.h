@@ -45,7 +45,19 @@ namespace Defines
 	// network uses the path Reboot actually supports.
 	inline bool bHostCanPlay = false;
 
-	inline int SecondsUntilTravel = 5;
+	// [Nova] The server's OWN local player controller, remembered at the moment ReadyToStartMatch drops
+	// it from LocalPlayers. After that drop GetLocalPlayerController() returns null, so a guard that
+	// compared against it could never match: the server's controller got a pawn at warmup and again
+	// at the drop zone, and every hosted match carried a phantom copy of the host's account (seen
+	// 2026-11-08: two "JustADev*" controllers leaving the bus in a one-player match).
+	// void* so this header needs no engine types.
+	inline void* ServerLocalController = nullptr;
+
+	// [Nova] Was 5. This is a fixed pause before travelling, kept from the removed ImGui host menu (it
+	// gave the host time to change settings). The readiness that matters is checked right after it:
+	// dllmain waits up to 120s for the local player controller before SwitchLevel. 2s keeps a margin
+	// for the hooks to settle and gives 3s back to every match start.
+	inline int SecondsUntilTravel = 2;
 
 	// WARMUP HOLD — how long the lobby stays open before the bus launches.
 	//

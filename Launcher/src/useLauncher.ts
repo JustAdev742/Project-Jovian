@@ -403,15 +403,31 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
    * profile, never listening on 7777. That is exactly what "the game server didn’t start" looked
    * like: a server process very much alive, that was never a server.
    *
-   * The 45s wait is not arbitrary — injecting before the menu is reached crashes the game. Targeted
-   * by PID because the host is also running their own client, and picking the wrong one of two
-   * identically-named processes would turn the player's own game into the server.
+   * Injecting before the menu is reached crashes the game, so we wait for it — but no longer for a
+   * flat 45s. The agent reads the server's stdout and reports `injectable` the moment the menu marker
+   * appears (27s after spawn on a Ryzen 5 5600, measured 2026-11-08: 18s of every cold match start
+   * used to be this sleep). 45s stays as the ceiling, which is also exactly what an older agent that
+   * never reports `injectable` gets. Targeted by PID because the host is also running their own
+   * client, and picking the wrong one of two identically-named processes would turn the player's own
+   * game into the server.
    */
   const becomeGameserver = useCallback(async (pid?: number | null) => {
     if (!pid || injectedPidRef.current === pid) return;
     injectedPidRef.current = pid;
 
-    await new Promise((r) => setTimeout(r, 45000));
+    const deadline = Date.now() + 45000;
+    let atMenu = false;
+    while (Date.now() < deadline) {
+      const st: any = await fetch(`${AGENT}/nova/api/host/status`, { signal: AbortSignal.timeout(3000) })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      if (st?.injectable && st.pid === pid) { atMenu = true; break; }
+      if (st && st.hosting === false) break; // the server went away; the loop below notices
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    // A short settle after the marker: it prints as party creation starts, and the launcher's own
+    // watcher (and Phoenix) inject on the same line.
+    if (atMenu) await new Promise((r) => setTimeout(r, 1500));
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       // Nothing to inject into any more — it crashed, or the match was cancelled.
@@ -466,6 +482,9 @@ export function useLauncher(user: Session | null, notify: (t: { kind: "success" 
         hostAddrRef.current = null;
         setRole("connected");
         setStatus("You left the game — server stopped.");
+        // End the suspended launcher/anti-cheat stand-ins the launch left behind, once the server the
+        // agent was just told to stop has had a moment to exit (the command skips if any game remains).
+        setTimeout(() => { invoke("cleanup_game_stubs").catch(() => {}); }, 6000);
         return;
       }
 

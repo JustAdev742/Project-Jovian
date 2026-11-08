@@ -147,14 +147,26 @@ function analyseCrashes(ctx, F, cov) {
     const files = fs.readdirSync(ctx.paths.gameWin64).filter(n => /^crash.*\.(log|dmp)$/i.test(n));
     cov.push({ area: 'Reboot crash.log/.dmp', status: 'checked', detail: `${files.length} file(s) in ${ctx.paths.gameWin64}` });
     for (const f of files.filter(n => n.endsWith('.log'))) {
+      const text = readText(path.join(ctx.paths.gameWin64, f)) || '';
+      const rva = (/fault RVA[^:]*:\s*(0x[0-9A-Fa-f]+)/.exec(text)?.[1] || '').toLowerCase();
+      // Reboot's handler is vectored, so it writes crash.log for first-chance faults the game then
+      // survives. This RVA is one: 2026-09-18 and 2026-11-08, the server played on for minutes after.
+      const benign = SURVIVED_FIRST_CHANCE_RVAS.has(rva);
       F.add({ id: 'runtime.reboot-crash-log', key: `runtime.reboot-crash-log:${f}`, module: M, component: 'reboot', category: 'crash',
-        severity: 'P2', confidence: 'CONFIRMED', title: `Reboot wrote ${f}`, explain: 'Read alongside the UE4CC report of the same time; a vectored handler also records survived first-chance faults.',
-        evidence: [{ source: path.join(ctx.paths.gameWin64, f), excerpt: (readText(path.join(ctx.paths.gameWin64, f)) || '').split('\n').slice(0, 6).join(' | ') }] });
+        severity: benign ? 'INFO' : 'P2', confidence: 'CONFIRMED', status: benign ? 'known-benign' : undefined,
+        title: benign ? `Reboot logged a survived first-chance fault (RVA ${rva}) in ${f}` : `Reboot wrote ${f}`,
+        explain: benign
+          ? 'Not a crash: this fault happens during map streaming and the server carries on (seen with the server playing on for minutes afterwards). Reboot\'s vectored handler records it because it cannot tell a survived fault from a fatal one.'
+          : 'Read alongside the UE4CC report of the same time; a vectored handler also records survived first-chance faults.',
+        evidence: [{ source: path.join(ctx.paths.gameWin64, f), excerpt: text.split('\n').slice(0, 6).join(' | ') }] });
     }
   } else {
     cov.push({ area: 'Reboot crash.log/.dmp', status: 'skipped', detail: 'game build not found' });
   }
 }
+
+/** First-chance faults the game is known to survive (rule first-chance-av-known in rules/signatures.mjs). */
+const SURVIVED_FIRST_CHANCE_RVAS = new Set(['0x1242250']);
 
 // ── live state ────────────────────────────────────────────────────────────────────────────────────
 

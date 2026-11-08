@@ -39,7 +39,8 @@ function pick<T extends readonly string[]>(v: unknown, list: T, dflt: T[number])
 const arr = (v: unknown, max: number): unknown[] => (Array.isArray(v) ? v.slice(0, max) : []);
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 
-export interface LiveLine { src: string; sev: string; rule: string | null; status: string; t: string | null; text: string }
+/** `count` > 1 means the same line repeated that many times in a burst and was sent once (live.mjs). */
+export interface LiveLine { src: string; sev: string; rule: string | null; status: string; t: string | null; text: string; count: number }
 
 export function normalizeLines(raw: unknown): LiveLine[] {
   return arr(raw, LIMITS.LINES_PER_BATCH).map(x => {
@@ -51,6 +52,7 @@ export function normalizeLines(raw: unknown): LiveLine[] {
       status: pick(l.status, STATUSES, 'open'),
       t: optStr(l.t, 40),
       text: str(l.text, LIMITS.LINE_TEXT),
+      count: Math.min(Math.max(Math.trunc(Number(l.count)) || 1, 1), 1_000_000),
     };
   }).filter(l => l.text.length > 0);
 }

@@ -119,6 +119,35 @@ DWORD WINAPI PauseThread(LPVOID)
 	return 0;
 }
 
+// [Nova] Server network update rate. When the replication graph comes up it sets the net driver to
+// Epic's 30 Hz live-server rate ("LogFortReplicationGraph: Setting NetServerMaxTickRate to 30.00"),
+// a figure chosen for 100-player lobbies. Nova lobbies are small, the world already ticks at 60, and
+// at 30 Hz every position, shot and build reaches the other players up to 33 ms later than it could.
+// 60 Hz halves that wait. Both levers are set: the game's own console command for its replication
+// graph, and the driver property it controls, so whichever the graph reads wins. Logged either way,
+// so the host log shows the rate that was actually applied.
+static void ApplyNovaNetTickRate(UObject* Driver)
+{
+	if (!Driver)
+		return;
+
+	FString TickCmd = L"FortRepGraph.SetServerMaxTickRate 60";
+	Helper::ExecuteConsoleCommand(TickCmd);
+
+	static auto NetServerMaxTickRateOffset = Driver->GetOffsetSlow("NetServerMaxTickRate");
+
+	if (NetServerMaxTickRateOffset > 0)
+	{
+		auto Rate = Get<int>(Driver, NetServerMaxTickRateOffset);
+		std::cout << "[Nova] NetServerMaxTickRate " << *Rate << " -> 60\n";
+		*Rate = 60;
+	}
+	else
+	{
+		std::cout << "[Nova] NetServerMaxTickRate property not found; left at the game's default\n";
+	}
+}
+
 bool Server::Listen(int Port)
 {
 	if (Defines::bIsRestarting)
@@ -245,6 +274,8 @@ bool Server::Listen(int Port)
 	}
 	else
 	{
+		ApplyNovaNetTickRate(NetDriver);
+
 		Server::PauseBeaconRequests(false);
 
 		std::cout << "Players may join now!\n";

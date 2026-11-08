@@ -6,13 +6,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyLine, Tail, LIMITS } from '../lib/live.mjs';
+import { classifyLine, Tail, LIMITS, repeatKey } from '../lib/live.mjs';
 import { buildUpload, buildSummary } from '../lib/upload.mjs';
 
 test('a known problem is kept, with its rule', () => {
   const c = classifyLine('ue4:client', '[2026.09.19-02.47.15:721][686]LogFort: Warning: AFortQuickBars::AddItemInternal could not find Item with GUID 520B7F5C');
   assert.equal(c.rule, 'quickbar-guid-unmapped');
-  assert.equal(c.sev, 'P0');
+  assert.equal(c.sev, 'P2'); // regraded 2026-11-08: 1.9.4 loads in despite it
 });
 
 test('benign and not-ours lines are dropped — they are noise the catalog already explains', () => {
@@ -98,4 +98,28 @@ test('the PC name never leaves the machine: summary, full report and evidence ca
   assert.ok(!/scotts-gaming-pc/i.test(full), 'no trace of the hostname in the full report');
   assert.ok(full.includes(u.summary.machine), 'the same label replaces it everywhere');
   assert.equal(report.machine, host, 'the caller’s report is not mutated');
+});
+
+test('a burst of the same line collapses to one key, whatever its timestamp', () => {
+  const a = '[2026.11.08-06.32.30:357][ 43]LogFort: Warning: ClientRestart_Implementation failed because WorldInventory is invalid, waiting to finish restarting for JustADev*';
+  const b = '[2026.11.08-06.32.30:859][ 73]LogFort: Warning: ClientRestart_Implementation failed because WorldInventory is invalid, waiting to finish restarting for JustADev*';
+  assert.equal(repeatKey('client', 'worldinventory-race', a), repeatKey('client', 'worldinventory-race', b));
+  assert.equal(repeatKey('cobalt', null, '17:32:38.419 [Locker] backpack apply FAILED'), repeatKey('cobalt', null, '17:40:01.002 [Locker] backpack apply FAILED'));
+  assert.notEqual(repeatKey('client', null, a), repeatKey('server', null, a), 'a different source is a different line');
+});
+
+test('noise from 2026-11-08 is no longer sent as problems', () => {
+  // Cobalt's explanation after a survived first-chance fault
+  assert.equal(classifyLine('cobalt', '17:32:38.419 [Exception] The game OFTEN RECOVERS from these. Treat it as a crash only if the server'), null);
+  assert.equal(classifyLine('cobalt', '17:32:38.419 [Exception] first-chance 0xC0000005 at 0x00007FF6AB842250 (RVA 0x1242250) - dump written.'), null, 'the known survived RVA is benign');
+  // Epic's join-in-progress state line
+  assert.equal(classifyLine('ue4:client', '[2026.11.08-06.31.18:466][910]LogOnlineAccount: Warning: [UFortMatchmakingV2::JoinInProgressIfRequired] bHasCheckedForJoinInProgress: 0, HasAllowJoinInProgressInitiallyReplicated: 0'), null);
+  // ...while an unknown first-chance fault still is a problem
+  assert.ok(classifyLine('cobalt', '17:32:38.419 [Exception] first-chance 0xC0000005 at 0x00007FF6AB899999 (RVA 0x1299999) - dump written.'));
+});
+
+test('the quickbar GUID race is no longer graded as a blocking P0', () => {
+  const c = classifyLine('ue4:client', '[2026.11.08-06.32.30:859][ 73]LogFort: Warning: AFortQuickBars::AddItemInternal could not find Item with GUID C5CA04DB4853281A3F2124B02C0A83E6');
+  assert.equal(c.rule, 'quickbar-guid-unmapped');
+  assert.equal(c.sev, 'P2');
 });

@@ -1223,6 +1223,8 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
    * mid-match reads as "some other machine is serving", and the coordinator would answer stand-down
    * to the very machine holding the match together.
    */
+  /** Last [Serve] line logged per account, so only changes are logged (see below). Bounded. */
+  const lastServeLog = new Map<string, string>();
   fastify.get('/nova/api/host/should-i-serve', async (request, reply) => {
     const q = request.query as Record<string, string>;
     const accountId = q.accountId || q.account || 'anon';
@@ -1262,8 +1264,19 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
       });
     }
 
-    // Nobody has pressed Play. Starting a server here would burn a machine for nobody.
-    if (demand.waiting === 0) {
+    /* PRE-WARM. A cold server takes ~45-60s to become joinable, and that used to be spent entirely in
+     * the matchmaking queue: 2026-11-08, a player sat in the lobby for 64s, pressed Play, then waited
+     * 62s more while a server was started for them. The agent now says "my player is in the lobby"
+     * (lobby=1, sent only once their game has had time to boot and while that machine is not hosting),
+     * and a lobby player counts as demand — so the server is usually joinable by the time they queue.
+     *
+     * Only for a player who is NOT already in a match: electing a machine whose player is mid-game
+     * would start a server on top of their running game. The usual election (reservation, booting
+     * check, best machine) still decides who hosts, so one lobby never produces two servers. */
+    const prewarm = demand.waiting === 0 && Config.PREWARM && q.lobby === '1' && !playerSessionMap.has(accountId);
+
+    // Nobody has pressed Play, and this player is not waiting in a lobby either.
+    if (demand.waiting === 0 && !prewarm) {
       return reply.send({ ...base, serve: false, reason: 'no-demand' });
     }
 
@@ -1279,16 +1292,26 @@ export async function matchmakingRoutes(fastify: FastifyInstance): Promise<void>
     // question was asked — never the answer or the state behind it. Without this the only way to tell
     // "nobody was elected" from "someone was elected and never delivered" is to guess.
     const holder = pendingHosts.get(playlistKey(playlist, region));
-    console.log(
-      `[Serve] ${accountId.slice(0, 8)} -> ${decision.host ? 'SERVE' : 'stand down'} (${decision.reason})` +
-      ` | waiting=${demand.waiting} hasServer=${demand.hasServer}` +
-      ` | reservation=${holder ? holder.accountId.slice(0, 8) + ' idle ' + Math.round((Date.now() - holder.lastSeen) / 1000) + 's' : 'none'}` +
-      ` | servers=${[...gameServers.values()].filter(isLive).map(e => `${e.address}:${e.port}/${e.status}`).join(',') || 'none'}`,
-    );
+    const reason = prewarm ? `prewarm:${decision.reason}` : decision.reason;
+    // Logged when the verdict CHANGES, not on every 3s poll: with lobby players also asking, the
+    // identical line every few seconds buried the ones that mattered.
+    const liveServers = [...gameServers.values()].filter(isLive).map(e => `${e.address}:${e.port}/${e.status}`).join(',') || 'none';
+    const logKey = `${decision.host}|${reason}|${demand.waiting}|${demand.hasServer}|${holder?.accountId ?? ''}|${liveServers}`;
+    if (lastServeLog.get(accountId) !== logKey) {
+      lastServeLog.set(accountId, logKey);
+      if (lastServeLog.size > 500) lastServeLog.delete(lastServeLog.keys().next().value as string);
+      console.log(
+        `[Serve] ${accountId.slice(0, 8)} -> ${decision.host ? 'SERVE' : 'stand down'} (${reason})` +
+        ` | waiting=${demand.waiting} hasServer=${demand.hasServer}` +
+        ` | reservation=${holder ? holder.accountId.slice(0, 8) + ' idle ' + Math.round((Date.now() - holder.lastSeen) / 1000) + 's' : 'none'}` +
+        ` | servers=${liveServers}`,
+      );
+    }
     return reply.send({
       ...base,
       serve: decision.host,
-      reason: decision.reason,
+      reason,
+      prewarm,
       betterHost: decision.betterHost,
       retryMs: decision.retryMs,
       score: decision.score,

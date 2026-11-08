@@ -92,6 +92,8 @@ export const Config = {
   COORDINATOR_URL: (process.env.NOVA_COORDINATOR || '').trim().replace(/\/+$/, ''),
   /** How often (ms) the host agent asks the coordinator whether it should be serving. */
   HOST_AGENT_POLL_MS: parseInt(process.env.NOVA_HOST_AGENT_POLL_MS || '3000', 10),
+  /** Bring a server up while players are in the lobby, before anyone presses Play (should-i-serve). On unless NOVA_PREWARM=0. */
+  PREWARM: process.env.NOVA_PREWARM !== '0',
 
   /** How long (ms) after its first player a match still accepts new joiners. Past this the server
    *  is treated as "in progress" and the next player to press Play hosts a FRESH match instead of
