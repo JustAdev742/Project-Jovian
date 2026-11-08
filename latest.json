@@ -1,11 +1,11 @@
 {
-  "version": "1.9.2",
-  "notes": "The loading screen should clear now.\n\nYour inventory bar was never being built. The server looks up the object that owns your quickbar slots, and on 7.40 it was looking for it under the wrong name — so nothing ever told the game which item belongs in which slot. Your game received the items, could not place a single one, and waited on a loading screen for an inventory that was never going to arrive. The only sign of it in the log was one line reading \"Failed to find property 'QuickBars'\", which looked harmless.\n\nIt now tries both names this property goes by, and if a future build renames it again, finds the object directly by who owns it — which cannot be misspelled. The result is checked before it is used, so a wrong match is ignored rather than trusted.\n\nIf this is the last thing standing between you and a match, the loading screen should now give way to the island.",
-  "pub_date": "2026-09-19T02:55:58Z",
+  "version": "1.9.3",
+  "notes": "Hosting should be steadier, and your login no longer ends up in log files.\n\nThe game server could read memory it had already freed every time it looked something up, and at the end of a match it could act on a network component that was being taken apart. Fixes for both, and for several smaller unchecked writes, were made in July but never reached the version you were running. They are in now.\n\nThe intro video no longer tries to play inside the hidden server that runs while you host. That server has no screen, so all it did was fill the log with errors.\n\nThe launcher's startup log used to record your login token on every launch. It now writes it as \"eg1~<redacted>\".\n\nThis release also includes the loading-screen fix from 1.9.2.\n\nThese changes have been built and tested, but not yet played through a full match. If a match misbehaves, send the log from the Logs tab.",
+  "pub_date": "2026-11-08T05:25:05Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bWRDRnVCc0VCMWMyc2xvK3lZMmNETno1MVBHbkNnZTBtcFl2azJnRmFEYjlBVjZFS1ZpNEQ4ZlkyMDdya3FYVVAzbzZtTSs4dlB1dlZFYmRRS1V6RFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5Nzg2NTQ5CWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuMl94NjQtc2V0dXAubnNpcy56aXAKait1dDlrMGo2TGhRMW5xNWxyREVRL2xPWSt3T2F5Qmh5M3ZiTmRlQ0pkYmVNWERQVFdXWGNRZTljcmtwcGxWakhhU2NmQ2c3K3BjWE0rSERDUlhVQWc9PQo=",
-      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.2/Project.Launcher_1.9.2_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRR2locnZRRnY2bWV6VjFSaHdIVytQbi9wT1BuWEVLZXV0SGw3QlZPcE1McDhiQUJ1Ykh6QU8xdlBmY2dINTRlNVNtemZyTFVBMno0dFJ4Q0pCejY3SDdvaE5WeU9vMGdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTE1NDkwCWZpbGU6UHJvamVjdCBMYXVuY2hlcl8xLjkuM194NjQtc2V0dXAubnNpcy56aXAKSm5nNFVRNXBJdnMySkNJV3oyejltN1ZoY2FUTzhGOXZRVTJCU2VwQkZTVEV5ZnBzR09XOXczSFFONnF0S04xRlFOSUFxaUw3NnAwWkpFeUMxUDk2Qmc9PQo=",
+      "url": "https://github.com/JustAdev742/Project-Jovian/releases/download/v1.9.3/Project.Launcher_1.9.3_x64-setup.nsis.zip"
     }
   }
 }

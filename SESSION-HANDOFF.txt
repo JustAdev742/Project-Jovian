@@ -24,8 +24,10 @@ UPDATE 2026-11-08 (later the same day) — read KNOWN_ISSUES.md for detail:
   * The 2026-07-25 Reboot fixes had never reached the shipped tree; the
     low-risk ones are restored and staged, four behaviour-changing ones are
     held for a played match (KNOWN_ISSUES reboot-july-fixes-lost).
-  * Staged, not released: Reboot fixes, the Cobalt bumper-on-server guard,
-    the backend DELETE gate. A 1.9.3 release would carry all of them.
+  * RELEASED 1.9.3 (marked latest; served latest.json, signature and zip md5
+    verified): the Reboot fixes, the Cobalt bumper-on-server guard, the token
+    redaction and the DELETE gate (that one is also live on the coordinator).
+    Like 1.9.2 it has NOT been played through a match yet.
 
 -------------------------------------------------------------------------------
 0. READ THIS FIRST — THE ONE THING THAT MATTERS
